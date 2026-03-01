@@ -1,0 +1,46 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "cargo build dap",
+			"type": "shell",
+			"command": "cargo build",
+			"options": {
+				"cwd": "${workspaceFolder}/dap"
+			},
+			"group": "build",
+			"presentation": { "reveal": "silent" },
+			"problemMatcher": "$rustc"
+		},
+		{
+			"label": "npm install",
+			"type": "shell",
+			"command": "npm install",
+			"options": {
+				"cwd": "${workspaceFolder}/vscode_extension"
+			},
+			"group": "build",
+			"presentation": { "reveal": "silent" },
+			"problemMatcher": []
+		},
+		{
+			"label": "npm compile",
+			"type": "shell",
+			"command": "npm run compile",
+			"options": {
+				"cwd": "${workspaceFolder}/vscode_extension"
+			},
+			"dependsOn": ["npm install"],
+			"group": "build",
+			"presentation": { "reveal": "silent" },
+			"problemMatcher": "$tsc"
+		},
+		{
+			"label": "build",
+			"dependsOn": ["cargo build dap", "npm compile"],
+			"dependsOrder": "parallel",
+			"group": { "kind": "build", "isDefault": true },
+			"problemMatcher": []
+		}
+	]
+}

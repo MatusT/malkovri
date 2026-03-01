@@ -1,0 +1,13 @@
+[package]
+name = "malkovri_wgsl_debugger_dap"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+malkovri_wgsl_debugger = { path = "../core" }
+serde = { version = "1.*", features = ["derive"] }
+serde_json = "1.*"
+dapts = "*"
+naga = { version = "27.0.3", features = ["wgsl-in"] }
+thiserror = "2"
+ron = "0.8"

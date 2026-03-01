@@ -1,0 +1,14 @@
+# Rust
+target/
+
+# Node / npm
+node_modules/
+package-lock.json
+
+# TypeScript build output
+out/
+dist/
+
+# OS
+.DS_Store
+Thumbs.db
