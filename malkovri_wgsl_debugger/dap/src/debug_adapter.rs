@@ -1,10 +1,8 @@
 use std::{
-    cell::RefCell,
     collections::HashMap,
     fmt::Debug,
     fs,
     io::{BufRead, BufReader, BufWriter, Read, Write},
-    rc::Rc,
 };
 
 use dapts::Breakpoint;
@@ -12,7 +10,7 @@ use naga::{ResourceBinding, Statement};
 use serde::Serialize;
 
 use crate::error::DebugAdapterError;
-use malkovri_wgsl_debugger::{EntryPointInputs, Evaluator, NextStatement, Value};
+use malkovri_wgsl_debugger::{EntryPointInputs, Evaluator, NextStatement, Primitive, Value};
 
 // Variables reference IDs for scopes
 const LOCALS_SCOPE_REF: u32 = 1;
@@ -100,17 +98,17 @@ fn parse_inline(
     Ok(match type_str {
         "f32" => Value::Array(
             arr.iter()
-                .map(|v| Rc::new(RefCell::new(Value::F32(v.as_f64().unwrap_or(0.0) as f32))))
+                .map(|v| Primitive::F32(v.as_f64().unwrap_or(0.0) as f32).into())
                 .collect(),
         ),
         "i32" => Value::Array(
             arr.iter()
-                .map(|v| Rc::new(RefCell::new(Value::I32(v.as_i64().unwrap_or(0) as i32))))
+                .map(|v| Primitive::I32(v.as_i64().unwrap_or(0) as i32).into())
                 .collect(),
         ),
         "u32" => Value::Array(
             arr.iter()
-                .map(|v| Rc::new(RefCell::new(Value::U32(v.as_u64().unwrap_or(0) as u32))))
+                .map(|v| Primitive::U32(v.as_u64().unwrap_or(0) as u32).into())
                 .collect(),
         ),
         _ => {
@@ -134,19 +132,19 @@ fn parse_file(
                 "f32" => Value::Array(
                     bytes
                         .chunks_exact(4)
-                        .map(|c| Rc::new(RefCell::new(Value::F32(f32::from_le_bytes([c[0], c[1], c[2], c[3]])))))
+                        .map(|c| Primitive::F32(f32::from_le_bytes([c[0], c[1], c[2], c[3]])).into())
                         .collect(),
                 ),
                 "i32" => Value::Array(
                     bytes
                         .chunks_exact(4)
-                        .map(|c| Rc::new(RefCell::new(Value::I32(i32::from_le_bytes([c[0], c[1], c[2], c[3]])))))
+                        .map(|c| Primitive::I32(i32::from_le_bytes([c[0], c[1], c[2], c[3]])).into())
                         .collect(),
                 ),
                 "u32" => Value::Array(
                     bytes
                         .chunks_exact(4)
-                        .map(|c| Rc::new(RefCell::new(Value::U32(u32::from_le_bytes([c[0], c[1], c[2], c[3]])))))
+                        .map(|c| Primitive::U32(u32::from_le_bytes([c[0], c[1], c[2], c[3]])).into())
                         .collect(),
                 ),
                 _ => {
@@ -165,7 +163,7 @@ fn parse_file(
                     })?;
                     Value::Array(
                         vals.into_iter()
-                            .map(|v| Rc::new(RefCell::new(Value::F32(v as f32))))
+                            .map(|v| Primitive::F32(v as f32).into())
                             .collect(),
                     )
                 }
@@ -175,7 +173,7 @@ fn parse_file(
                     })?;
                     Value::Array(
                         vals.into_iter()
-                            .map(|v| Rc::new(RefCell::new(Value::I32(v as i32))))
+                            .map(|v| Primitive::I32(v as i32).into())
                             .collect(),
                     )
                 }
@@ -185,7 +183,7 @@ fn parse_file(
                     })?;
                     Value::Array(
                         vals.into_iter()
-                            .map(|v| Rc::new(RefCell::new(Value::U32(v as u32))))
+                            .map(|v| Primitive::U32(v as u32).into())
                             .collect(),
                     )
                 }
@@ -842,3 +840,6 @@ impl DebugAdapter {
         Ok(())
     }
 }
+
+
+

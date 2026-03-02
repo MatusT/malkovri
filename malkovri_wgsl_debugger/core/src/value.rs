@@ -1,39 +1,24 @@
 use std::{cell::RefCell, rc::Rc};
-
+use std::ops::{Add, BitAnd, BitOr, BitXor, Div, Mul, Rem, Shl, Shr, Sub};
 use naga::TypeInner;
 
-#[allow(dead_code)]
-#[derive(Clone, Debug, Default)]
+use crate::primitive::Primitive;
+
+#[derive(Clone, Debug)]
 pub enum Value {
-    #[default]
     Uninitialized,
-    F32(f32),
-    F64(f64),
-    I32(i32),
-    I64(i64),
-    U32(u32),
-    U64(u64),
-    // Vector types
-    U32x2([u32; 2]),
-    U32x3([u32; 3]),
-    U32x4([u32; 4]),
-    I32x2([i32; 2]),
-    I32x3([i32; 3]),
-    I32x4([i32; 4]),
-    F32x2([f32; 2]),
-    F32x3([f32; 3]),
-    F32x4([f32; 4]),
-    // Composite types
-    Array(Vec<Rc<RefCell<Value>>>),
+    Primitive(Primitive),
+    Array(Vec<Value>),
+    /// Named fields in declaration order.
+    Struct(Vec<(String, Value)>),
     Pointer(Rc<RefCell<Value>>),
 }
 
-/// Decomposed scalar components of a Value, used for generic operations.
-pub enum ScalarComponents {
-    F32(Vec<f32>),
-    I32(Vec<i32>),
-    U32(Vec<u32>),
+impl Default for Value {
+    fn default() -> Self { Value::Uninitialized }
 }
+
+// ── Core accessors ─────────────────────────────────────────────────────────────
 
 impl Value {
     pub fn leaf_value(&self) -> Value {
@@ -43,188 +28,111 @@ impl Value {
         }
     }
 
-    // ── Component decomposition / reconstruction ──────────────────────
-
-    /// Decompose a scalar or vector Value into its scalar components.
-    /// Returns None for non-numeric types (Array, Pointer, Uninitialized, F64, I64, U64).
-    pub fn to_components(&self) -> Option<ScalarComponents> {
+    pub fn as_primitive(&self) -> Option<&Primitive> {
         match self {
-            Value::F32(v) => Some(ScalarComponents::F32(vec![*v])),
-            Value::F32x2(a) => Some(ScalarComponents::F32(a.to_vec())),
-            Value::F32x3(a) => Some(ScalarComponents::F32(a.to_vec())),
-            Value::F32x4(a) => Some(ScalarComponents::F32(a.to_vec())),
-            Value::I32(v) => Some(ScalarComponents::I32(vec![*v])),
-            Value::I32x2(a) => Some(ScalarComponents::I32(a.to_vec())),
-            Value::I32x3(a) => Some(ScalarComponents::I32(a.to_vec())),
-            Value::I32x4(a) => Some(ScalarComponents::I32(a.to_vec())),
-            Value::U32(v) => Some(ScalarComponents::U32(vec![*v])),
-            Value::U32x2(a) => Some(ScalarComponents::U32(a.to_vec())),
-            Value::U32x3(a) => Some(ScalarComponents::U32(a.to_vec())),
-            Value::U32x4(a) => Some(ScalarComponents::U32(a.to_vec())),
+            Value::Primitive(p) => Some(p),
             _ => None,
         }
     }
+}
 
-    /// Reconstruct a Value from f32 components, matching the original size.
-    pub fn from_f32_slice(s: &[f32]) -> Value {
-        match s.len() {
-            1 => Value::F32(s[0]),
-            2 => Value::F32x2([s[0], s[1]]),
-            3 => Value::F32x3([s[0], s[1], s[2]]),
-            4 => Value::F32x4([s[0], s[1], s[2], s[3]]),
-            _ => Value::Uninitialized,
-        }
-    }
+// ── Delegation to Primitive — keeps the evaluator's helper call-sites unchanged ─
 
-    /// Reconstruct a Value from i32 components, matching the original size.
-    pub fn from_i32_slice(s: &[i32]) -> Value {
-        match s.len() {
-            1 => Value::I32(s[0]),
-            2 => Value::I32x2([s[0], s[1]]),
-            3 => Value::I32x3([s[0], s[1], s[2]]),
-            4 => Value::I32x4([s[0], s[1], s[2], s[3]]),
-            _ => Value::Uninitialized,
-        }
-    }
-
-    /// Reconstruct a Value from u32 components, matching the original size.
-    pub fn from_u32_slice(s: &[u32]) -> Value {
-        match s.len() {
-            1 => Value::U32(s[0]),
-            2 => Value::U32x2([s[0], s[1]]),
-            3 => Value::U32x3([s[0], s[1], s[2]]),
-            4 => Value::U32x4([s[0], s[1], s[2], s[3]]),
-            _ => Value::Uninitialized,
-        }
-    }
-
-    /// Number of scalar components (1 for scalars, 2-4 for vectors, 0 for others).
-    #[allow(dead_code)]
+impl Value {
     pub fn component_count(&self) -> usize {
-        match self {
-            Value::F32(_) | Value::I32(_) | Value::U32(_) |
-            Value::F64(_) | Value::I64(_) | Value::U64(_) => 1,
-            Value::F32x2(_) | Value::I32x2(_) | Value::U32x2(_) => 2,
-            Value::F32x3(_) | Value::I32x3(_) | Value::U32x3(_) => 3,
-            Value::F32x4(_) | Value::I32x4(_) | Value::U32x4(_) => 4,
-            _ => 0,
-        }
+        self.as_primitive().map_or(0, Primitive::component_count)
     }
 
-    // ── Unary map (component-wise) ────────────────────────────────────
+    pub fn extract_component(&self, index: usize) -> Value {
+        let p = self.as_primitive()
+            .unwrap_or_else(|| panic!("extract_component called on non-primitive: {:?}", self));
+        Value::Primitive(p.extract_component(index))
+    }
 
-    /// Apply a component-wise f32 function to an f32 scalar or vector.
     pub fn map_f32(self, f: impl Fn(f32) -> f32) -> Value {
-        match self.to_components() {
-            Some(ScalarComponents::F32(v)) => {
-                Value::from_f32_slice(&v.iter().map(|x| f(*x)).collect::<Vec<_>>())
-            }
-            _ => self,
+        match self {
+            Value::Primitive(p) => Value::Primitive(
+                p.map_f32(f).unwrap_or_else(|| panic!("map_f32 called on non-f32 primitive"))
+            ),
+            other => other,
         }
     }
 
-    /// Apply a component-wise i32 function to an i32 scalar or vector.
     pub fn map_i32(self, f: impl Fn(i32) -> i32) -> Value {
-        match self.to_components() {
-            Some(ScalarComponents::I32(v)) => {
-                Value::from_i32_slice(&v.iter().map(|x| f(*x)).collect::<Vec<_>>())
-            }
-            _ => self,
+        match self {
+            Value::Primitive(p) => Value::Primitive(
+                p.map_i32(f).unwrap_or_else(|| panic!("map_i32 called on non-i32 primitive"))
+            ),
+            other => other,
         }
     }
 
-    /// Apply a component-wise u32 function to a u32 scalar or vector.
     pub fn map_u32(self, f: impl Fn(u32) -> u32) -> Value {
-        match self.to_components() {
-            Some(ScalarComponents::U32(v)) => {
-                Value::from_u32_slice(&v.iter().map(|x| f(*x)).collect::<Vec<_>>())
-            }
-            _ => self,
+        match self {
+            Value::Primitive(p) => Value::Primitive(
+                p.map_u32(f).unwrap_or_else(|| panic!("map_u32 called on non-u32 primitive"))
+            ),
+            other => other,
         }
     }
 
-    // ── Binary zip-map (component-wise, same type) ────────────────────
-
-    /// Component-wise binary f32 operation on two matching f32 values.
-    pub fn zip_map_f32(self, other: Value, f: impl Fn(f32, f32) -> f32) -> Value {
-        match (self.to_components(), other.to_components()) {
-            (Some(ScalarComponents::F32(a)), Some(ScalarComponents::F32(b))) if a.len() == b.len() => {
-                Value::from_f32_slice(&a.iter().zip(b.iter()).map(|(x, y)| f(*x, *y)).collect::<Vec<_>>())
-            }
-            _ => Value::Uninitialized,
-        }
-    }
-
-    /// Component-wise binary f32 comparison returning u32 booleans.
-    pub fn zip_cmp_f32(self, other: Value, f: impl Fn(f32, f32) -> bool) -> Value {
-        match (self.to_components(), other.to_components()) {
-            (Some(ScalarComponents::F32(a)), Some(ScalarComponents::F32(b))) if a.len() == b.len() => {
-                Value::from_u32_slice(&a.iter().zip(b.iter()).map(|(x, y)| u32::from(f(*x, *y))).collect::<Vec<_>>())
-            }
-            _ => Value::Uninitialized,
-        }
-    }
-
-    /// Component-wise binary i32 operation on two matching i32 values.
-    pub fn zip_map_i32(self, other: Value, f: impl Fn(i32, i32) -> i32) -> Value {
-        match (self.to_components(), other.to_components()) {
-            (Some(ScalarComponents::I32(a)), Some(ScalarComponents::I32(b))) if a.len() == b.len() => {
-                Value::from_i32_slice(&a.iter().zip(b.iter()).map(|(x, y)| f(*x, *y)).collect::<Vec<_>>())
-            }
-            _ => Value::Uninitialized,
-        }
-    }
-
-    /// Component-wise binary i32 comparison returning u32 booleans.
-    pub fn zip_cmp_i32(self, other: Value, f: impl Fn(i32, i32) -> bool) -> Value {
-        match (self.to_components(), other.to_components()) {
-            (Some(ScalarComponents::I32(a)), Some(ScalarComponents::I32(b))) if a.len() == b.len() => {
-                Value::from_u32_slice(&a.iter().zip(b.iter()).map(|(x, y)| u32::from(f(*x, *y))).collect::<Vec<_>>())
-            }
-            _ => Value::Uninitialized,
-        }
-    }
-
-    /// Component-wise binary u32 operation on two matching u32 values.
-    pub fn zip_map_u32(self, other: Value, f: impl Fn(u32, u32) -> u32) -> Value {
-        match (self.to_components(), other.to_components()) {
-            (Some(ScalarComponents::U32(a)), Some(ScalarComponents::U32(b))) if a.len() == b.len() => {
-                Value::from_u32_slice(&a.iter().zip(b.iter()).map(|(x, y)| f(*x, *y)).collect::<Vec<_>>())
-            }
-            _ => Value::Uninitialized,
-        }
-    }
-
-    /// Component-wise binary u32 comparison returning u32 booleans.
-    pub fn zip_cmp_u32(self, other: Value, f: impl Fn(u32, u32) -> bool) -> Value {
-        match (self.to_components(), other.to_components()) {
-            (Some(ScalarComponents::U32(a)), Some(ScalarComponents::U32(b))) if a.len() == b.len() => {
-                Value::from_u32_slice(&a.iter().zip(b.iter()).map(|(x, y)| u32::from(f(*x, *y))).collect::<Vec<_>>())
-            }
-            _ => Value::Uninitialized,
-        }
-    }
-
-    // ── Generic component-wise operations ─────────────────────────────
-
-    /// Apply a unary operation dispatching on the scalar kind.
-    /// Handles f32/i32/u32 scalars and vectors.
     pub fn map_numeric(
         self,
         ff32: impl Fn(f32) -> f32,
         fi32: impl Fn(i32) -> i32,
         fu32: impl Fn(u32) -> u32,
     ) -> Value {
-        match self.to_components() {
-            Some(ScalarComponents::F32(v)) => Value::from_f32_slice(&v.iter().map(|x| ff32(*x)).collect::<Vec<_>>()),
-            Some(ScalarComponents::I32(v)) => Value::from_i32_slice(&v.iter().map(|x| fi32(*x)).collect::<Vec<_>>()),
-            Some(ScalarComponents::U32(v)) => Value::from_u32_slice(&v.iter().map(|x| fu32(*x)).collect::<Vec<_>>()),
-            None => Value::Uninitialized,
+        match self {
+            Value::Primitive(p) => Value::Primitive(
+                p.map_numeric(ff32, fi32, fu32)
+                    .unwrap_or_else(|| panic!("map_numeric called on unsupported primitive type"))
+            ),
+            other => other,
         }
     }
 
-    /// Apply a binary operation dispatching on the scalar kind.
-    /// Both values must have the same type and size.
+    pub fn zip_map_f32(self, other: Value, f: impl Fn(f32, f32) -> f32) -> Value {
+        match (self, other) {
+            (Value::Primitive(a), Value::Primitive(b)) => Value::Primitive(a.zip_map_f32(b, f)),
+            (a, b) => panic!("zip_map_f32: expected two primitives, got {:?} and {:?}", a, b),
+        }
+    }
+
+    pub fn zip_cmp_f32(self, other: Value, f: impl Fn(f32, f32) -> bool) -> Value {
+        match (self, other) {
+            (Value::Primitive(a), Value::Primitive(b)) => Value::Primitive(a.zip_cmp_f32(b, f)),
+            (a, b) => panic!("zip_cmp_f32: expected two primitives, got {:?} and {:?}", a, b),
+        }
+    }
+
+    pub fn zip_map_i32(self, other: Value, f: impl Fn(i32, i32) -> i32) -> Value {
+        match (self, other) {
+            (Value::Primitive(a), Value::Primitive(b)) => Value::Primitive(a.zip_map_i32(b, f)),
+            (a, b) => panic!("zip_map_i32: expected two primitives, got {:?} and {:?}", a, b),
+        }
+    }
+
+    pub fn zip_cmp_i32(self, other: Value, f: impl Fn(i32, i32) -> bool) -> Value {
+        match (self, other) {
+            (Value::Primitive(a), Value::Primitive(b)) => Value::Primitive(a.zip_cmp_i32(b, f)),
+            (a, b) => panic!("zip_cmp_i32: expected two primitives, got {:?} and {:?}", a, b),
+        }
+    }
+
+    pub fn zip_map_u32(self, other: Value, f: impl Fn(u32, u32) -> u32) -> Value {
+        match (self, other) {
+            (Value::Primitive(a), Value::Primitive(b)) => Value::Primitive(a.zip_map_u32(b, f)),
+            (a, b) => panic!("zip_map_u32: expected two primitives, got {:?} and {:?}", a, b),
+        }
+    }
+
+    pub fn zip_cmp_u32(self, other: Value, f: impl Fn(u32, u32) -> bool) -> Value {
+        match (self, other) {
+            (Value::Primitive(a), Value::Primitive(b)) => Value::Primitive(a.zip_cmp_u32(b, f)),
+            (a, b) => panic!("zip_cmp_u32: expected two primitives, got {:?} and {:?}", a, b),
+        }
+    }
+
     pub fn zip_map_numeric(
         self,
         other: Value,
@@ -232,22 +140,15 @@ impl Value {
         fi32: impl Fn(i32, i32) -> i32,
         fu32: impl Fn(u32, u32) -> u32,
     ) -> Value {
-        match (self.to_components(), other.to_components()) {
-            (Some(ScalarComponents::F32(a)), Some(ScalarComponents::F32(b))) if a.len() == b.len() => {
-                Value::from_f32_slice(&a.iter().zip(b.iter()).map(|(x, y)| ff32(*x, *y)).collect::<Vec<_>>())
-            }
-            (Some(ScalarComponents::I32(a)), Some(ScalarComponents::I32(b))) if a.len() == b.len() => {
-                Value::from_i32_slice(&a.iter().zip(b.iter()).map(|(x, y)| fi32(*x, *y)).collect::<Vec<_>>())
-            }
-            (Some(ScalarComponents::U32(a)), Some(ScalarComponents::U32(b))) if a.len() == b.len() => {
-                Value::from_u32_slice(&a.iter().zip(b.iter()).map(|(x, y)| fu32(*x, *y)).collect::<Vec<_>>())
-            }
-            _ => Value::Uninitialized,
+        match (self, other) {
+            (Value::Primitive(a), Value::Primitive(b)) => Value::Primitive(
+                a.zip_map_numeric(b, ff32, fi32, fu32)
+                    .unwrap_or_else(|| panic!("zip_map_numeric: type mismatch"))
+            ),
+            (a, b) => panic!("zip_map_numeric: expected two primitives, got {:?} and {:?}", a, b),
         }
     }
 
-    /// Apply a ternary operation dispatching on the scalar kind.
-    /// All three values must have the same type and size.
     pub fn zip3_map_numeric(
         self,
         b: Value,
@@ -256,98 +157,218 @@ impl Value {
         fi32: impl Fn(i32, i32, i32) -> i32,
         fu32: impl Fn(u32, u32, u32) -> u32,
     ) -> Value {
-        match (self.to_components(), b.to_components(), c.to_components()) {
-            (Some(ScalarComponents::F32(a)), Some(ScalarComponents::F32(b)), Some(ScalarComponents::F32(c)))
-                if a.len() == b.len() && b.len() == c.len() =>
-            {
-                Value::from_f32_slice(&a.iter().zip(b.iter()).zip(c.iter()).map(|((x, y), z)| ff32(*x, *y, *z)).collect::<Vec<_>>())
-            }
-            (Some(ScalarComponents::I32(a)), Some(ScalarComponents::I32(b)), Some(ScalarComponents::I32(c)))
-                if a.len() == b.len() && b.len() == c.len() =>
-            {
-                Value::from_i32_slice(&a.iter().zip(b.iter()).zip(c.iter()).map(|((x, y), z)| fi32(*x, *y, *z)).collect::<Vec<_>>())
-            }
-            (Some(ScalarComponents::U32(a)), Some(ScalarComponents::U32(b)), Some(ScalarComponents::U32(c)))
-                if a.len() == b.len() && b.len() == c.len() =>
-            {
-                Value::from_u32_slice(&a.iter().zip(b.iter()).zip(c.iter()).map(|((x, y), z)| fu32(*x, *y, *z)).collect::<Vec<_>>())
-            }
-            _ => Value::Uninitialized,
+        match (self, b, c) {
+            (Value::Primitive(a), Value::Primitive(b), Value::Primitive(c)) => Value::Primitive(
+                a.zip3_map_numeric(b, c, ff32, fi32, fu32)
+                    .unwrap_or_else(|| panic!("zip3_map_numeric: type mismatch"))
+            ),
+            (a, b, c) => panic!("zip3_map_numeric: expected three primitives, got {:?}, {:?}, {:?}", a, b, c),
         }
     }
 
-    // ── Flatten components for Compose ─────────────────────────────────
-
-    /// Collect all f32 scalar components from a slice of Values (flattening vectors).
+    /// Flatten f32 components from a slice of Values (vectors are expanded).
     pub fn collect_f32_components(vals: &[Value]) -> Vec<f32> {
-        let mut result = Vec::new();
-        for v in vals {
-            if let Some(ScalarComponents::F32(comps)) = v.to_components() {
-                result.extend(comps);
-            }
-        }
-        result
+        vals.iter()
+            .filter_map(|v| v.as_primitive())
+            .flat_map(|p| p.as_f32_slice().unwrap_or(&[]).iter().copied())
+            .collect()
     }
 
-    /// Collect all i32 scalar components from a slice of Values (flattening vectors).
+    /// Flatten i32 components from a slice of Values.
     pub fn collect_i32_components(vals: &[Value]) -> Vec<i32> {
-        let mut result = Vec::new();
-        for v in vals {
-            if let Some(ScalarComponents::I32(comps)) = v.to_components() {
-                result.extend(comps);
-            }
-        }
-        result
+        vals.iter()
+            .filter_map(|v| v.as_primitive())
+            .flat_map(|p| p.as_i32_slice().unwrap_or(&[]).iter().copied())
+            .collect()
     }
 
-    /// Collect all u32 scalar components from a slice of Values (flattening vectors).
+    /// Flatten u32 components from a slice of Values.
     pub fn collect_u32_components(vals: &[Value]) -> Vec<u32> {
-        let mut result = Vec::new();
-        for v in vals {
-            if let Some(ScalarComponents::U32(comps)) = v.to_components() {
-                result.extend(comps);
-            }
-        }
-        result
+        vals.iter()
+            .filter_map(|v| v.as_primitive())
+            .flat_map(|p| p.as_u32_slice().unwrap_or(&[]).iter().copied())
+            .collect()
     }
+}
 
-    /// Extract a single scalar component from a vector by index.
-    pub fn extract_component(&self, index: usize) -> Value {
-        match self.to_components() {
-            Some(ScalarComponents::F32(v)) => v.get(index).copied().map(Value::F32).unwrap_or(Value::Uninitialized),
-            Some(ScalarComponents::I32(v)) => v.get(index).copied().map(Value::I32).unwrap_or(Value::Uninitialized),
-            Some(ScalarComponents::U32(v)) => v.get(index).copied().map(Value::U32).unwrap_or(Value::Uninitialized),
-            None => Value::Uninitialized,
+// ── From conversions ───────────────────────────────────────────────────────────
+
+impl From<Primitive> for Value {
+    fn from(p: Primitive) -> Self { Value::Primitive(p) }
+}
+
+impl From<&[f32]> for Value {
+    fn from(s: &[f32]) -> Self { Value::Primitive(Primitive::from(s)) }
+}
+impl From<&[i32]> for Value {
+    fn from(s: &[i32]) -> Self { Value::Primitive(Primitive::from(s)) }
+}
+impl From<&[u32]> for Value {
+    fn from(s: &[u32]) -> Self { Value::Primitive(Primitive::from(s)) }
+}
+impl From<&Vec<f32>> for Value { fn from(v: &Vec<f32>) -> Self { Value::from(v.as_slice()) } }
+impl From<&Vec<i32>> for Value { fn from(v: &Vec<i32>) -> Self { Value::from(v.as_slice()) } }
+impl From<&Vec<u32>> for Value { fn from(v: &Vec<u32>) -> Self { Value::from(v.as_slice()) } }
+
+impl From<&TypeInner> for Value {
+    fn from(ty: &TypeInner) -> Self {
+        match ty {
+            TypeInner::Array { .. }  => Value::Array(Vec::new()),
+            TypeInner::Struct { .. } => Value::Struct(Vec::new()),
+            _ => Primitive::try_from(ty)
+                .map(Value::Primitive)
+                .unwrap_or(Value::Uninitialized),
         }
     }
 }
 
-impl From<&TypeInner> for Value {
-    fn from(ty: &TypeInner) -> Self {
-        use naga::{Scalar, ScalarKind, VectorSize};
-        match ty {
-            TypeInner::Scalar(Scalar { kind: ScalarKind::Float, width: 4 }) => Value::F32(0.0),
-            TypeInner::Scalar(Scalar { kind: ScalarKind::Float, width: 8 }) => Value::F64(0.0),
-            TypeInner::Scalar(Scalar { kind: ScalarKind::Sint, width: 4 }) => Value::I32(0),
-            TypeInner::Scalar(Scalar { kind: ScalarKind::Sint, width: 8 }) => Value::I64(0),
-            TypeInner::Scalar(Scalar { kind: ScalarKind::Uint, width: 4 }) => Value::U32(0),
-            TypeInner::Scalar(Scalar { kind: ScalarKind::Uint, width: 8 }) => Value::U64(0),
-            TypeInner::Vector { size, scalar: Scalar { kind, width: 4 } } => {
-                match (size, kind) {
-                    (VectorSize::Bi,   ScalarKind::Float) => Value::F32x2([0.0; 2]),
-                    (VectorSize::Tri,  ScalarKind::Float) => Value::F32x3([0.0; 3]),
-                    (VectorSize::Quad, ScalarKind::Float) => Value::F32x4([0.0; 4]),
-                    (VectorSize::Bi,   ScalarKind::Sint)  => Value::I32x2([0; 2]),
-                    (VectorSize::Tri,  ScalarKind::Sint)  => Value::I32x3([0; 3]),
-                    (VectorSize::Quad, ScalarKind::Sint)  => Value::I32x4([0; 4]),
-                    (VectorSize::Bi,   ScalarKind::Uint)  => Value::U32x2([0; 2]),
-                    (VectorSize::Tri,  ScalarKind::Uint)  => Value::U32x3([0; 3]),
-                    (VectorSize::Quad, ScalarKind::Uint)  => Value::U32x4([0; 4]),
-                    _ => Value::Uninitialized,
-                }
-            }
-            TypeInner::Array { .. } => Value::Array(Vec::new()),
-            _ => Value::Uninitialized,
+// ── IntoIterator ───────────────────────────────────────────────────────────────
+
+impl IntoIterator for Value {
+    type Item = Value;
+    type IntoIter = std::vec::IntoIter<Value>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        match self.leaf_value() {
+            Value::Array(elements) => elements.into_iter(),
+            Value::Primitive(p) => p.into_iter().map(Value::Primitive).collect::<Vec<_>>().into_iter(),
+            Value::Struct(fields) => fields.into_iter().map(|(_, v)| v).collect::<Vec<_>>().into_iter(),
+            other => vec![other].into_iter(),
+        }
+    }
+}
+
+// ── PartialEq / PartialOrd ─────────────────────────────────────────────────────
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Primitive(a),  Value::Primitive(b))  => a == b,
+            (Value::Array(a),      Value::Array(b))      => a == b,
+            (Value::Struct(a),     Value::Struct(b))     => a == b,
+            (Value::Pointer(a),    Value::Pointer(b))    => Rc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+}
+
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        match (self, other) {
+            (Value::Primitive(a), Value::Primitive(b)) => a.partial_cmp(b),
+            _ => None,
+        }
+    }
+}
+
+// ── Arithmetic traits — delegate to Primitive ──────────────────────────────────
+
+impl Add for Value {
+    type Output = Value;
+    fn add(self, rhs: Self) -> Value {
+        match (self.leaf_value(), rhs.leaf_value()) {
+            (Value::Array(a), Value::Array(b)) if a.len() == b.len() =>
+                Value::Array(a.into_iter().zip(b).map(|(x, y)| x + y).collect()),
+            (Value::Primitive(a), Value::Primitive(b)) => Value::Primitive(a + b),
+            (a, b) => panic!("Value::add type mismatch: {:?} + {:?}", a, b),
+        }
+    }
+}
+
+impl Sub for Value {
+    type Output = Value;
+    fn sub(self, rhs: Self) -> Value {
+        match (self.leaf_value(), rhs.leaf_value()) {
+            (Value::Array(a), Value::Array(b)) if a.len() == b.len() =>
+                Value::Array(a.into_iter().zip(b).map(|(x, y)| x - y).collect()),
+            (Value::Primitive(a), Value::Primitive(b)) => Value::Primitive(a - b),
+            (a, b) => panic!("Value::sub type mismatch: {:?} - {:?}", a, b),
+        }
+    }
+}
+
+impl Mul for Value {
+    type Output = Value;
+    fn mul(self, rhs: Self) -> Value {
+        match (self.leaf_value(), rhs.leaf_value()) {
+            (Value::Array(a), Value::Array(b)) if a.len() == b.len() =>
+                Value::Array(a.into_iter().zip(b).map(|(x, y)| x * y).collect()),
+            (Value::Primitive(a), Value::Primitive(b)) => Value::Primitive(a * b),
+            (a, b) => panic!("Value::mul type mismatch: {:?} * {:?}", a, b),
+        }
+    }
+}
+
+impl Div for Value {
+    type Output = Value;
+    fn div(self, rhs: Self) -> Value {
+        match (self.leaf_value(), rhs.leaf_value()) {
+            (Value::Array(a), Value::Array(b)) if a.len() == b.len() =>
+                Value::Array(a.into_iter().zip(b).map(|(x, y)| x / y).collect()),
+            (Value::Primitive(a), Value::Primitive(b)) => Value::Primitive(a / b),
+            (a, b) => panic!("Value::div type mismatch: {:?} / {:?}", a, b),
+        }
+    }
+}
+
+impl Rem for Value {
+    type Output = Value;
+    fn rem(self, rhs: Self) -> Value {
+        match (self.leaf_value(), rhs.leaf_value()) {
+            (Value::Array(a), Value::Array(b)) if a.len() == b.len() =>
+                Value::Array(a.into_iter().zip(b).map(|(x, y)| x % y).collect()),
+            (Value::Primitive(a), Value::Primitive(b)) => Value::Primitive(a % b),
+            (a, b) => panic!("Value::rem type mismatch: {:?} % {:?}", a, b),
+        }
+    }
+}
+
+impl BitAnd for Value {
+    type Output = Value;
+    fn bitand(self, rhs: Self) -> Value {
+        match (self.leaf_value(), rhs.leaf_value()) {
+            (Value::Primitive(a), Value::Primitive(b)) => Value::Primitive(a & b),
+            (a, b) => panic!("Value::bitand type mismatch: {:?} & {:?}", a, b),
+        }
+    }
+}
+
+impl BitOr for Value {
+    type Output = Value;
+    fn bitor(self, rhs: Self) -> Value {
+        match (self.leaf_value(), rhs.leaf_value()) {
+            (Value::Primitive(a), Value::Primitive(b)) => Value::Primitive(a | b),
+            (a, b) => panic!("Value::bitor type mismatch: {:?} | {:?}", a, b),
+        }
+    }
+}
+
+impl BitXor for Value {
+    type Output = Value;
+    fn bitxor(self, rhs: Self) -> Value {
+        match (self.leaf_value(), rhs.leaf_value()) {
+            (Value::Primitive(a), Value::Primitive(b)) => Value::Primitive(a ^ b),
+            (a, b) => panic!("Value::bitxor type mismatch: {:?} ^ {:?}", a, b),
+        }
+    }
+}
+
+impl Shl for Value {
+    type Output = Value;
+    fn shl(self, rhs: Self) -> Value {
+        match (self.leaf_value(), rhs.leaf_value()) {
+            (Value::Primitive(a), Value::Primitive(b)) => Value::Primitive(a << b),
+            (a, b) => panic!("Value::shl type mismatch: {:?} << {:?}", a, b),
+        }
+    }
+}
+
+impl Shr for Value {
+    type Output = Value;
+    fn shr(self, rhs: Self) -> Value {
+        match (self.leaf_value(), rhs.leaf_value()) {
+            (Value::Primitive(a), Value::Primitive(b)) => Value::Primitive(a >> b),
+            (a, b) => panic!("Value::shr type mismatch: {:?} >> {:?}", a, b),
         }
     }
 }

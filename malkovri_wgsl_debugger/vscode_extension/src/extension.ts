@@ -59,7 +59,7 @@ class DebugAdapterExecutableFactory implements vscode.DebugAdapterDescriptorFact
 	): vscode.ProviderResult<vscode.DebugAdapterDescriptor> {
 		const suffix = process.platform === 'win32' ? '.exe' : '';
 		const adapterPath = vscode.Uri.joinPath(
-			this.extensionUri, '..', 'dap', 'target', 'debug', `malkovri_wgsl_debugger_dap${suffix}`
+			this.extensionUri, '..', 'target', 'debug', `malkovri_wgsl_debugger_dap${suffix}`
 		).fsPath;
 		const executable = new vscode.DebugAdapterExecutable(adapterPath);
 

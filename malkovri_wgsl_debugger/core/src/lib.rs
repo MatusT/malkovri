@@ -1,11 +1,13 @@
 mod error;
 mod evaluator;
 mod function_state;
+mod primitive;
 mod value;
 mod wgsl;
 
-pub use error::EvaluatorError;
-pub use evaluator::{EntryPointInputs, Evaluator};
-pub use function_state::{FunctionState, NextStatement};
-pub use value::Value;
-pub use wgsl::{WgslToModuleError, wgsl_to_module};
+pub use error::*;
+pub use evaluator::*;
+pub use function_state::*;
+pub use primitive::*;
+pub use value::*;
+pub use wgsl::*;
