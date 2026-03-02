@@ -34,7 +34,7 @@ fn parse_global_invocation_id(arguments: &serde_json::Map<String, serde_json::Va
         .and_then(|v| v.as_array())
         .and_then(|arr| {
             Some([
-                arr.get(0)?.as_u64()? as u32,
+                arr.first()?.as_u64()? as u32,
                 arr.get(1)?.as_u64()? as u32,
                 arr.get(2)?.as_u64()? as u32,
             ])

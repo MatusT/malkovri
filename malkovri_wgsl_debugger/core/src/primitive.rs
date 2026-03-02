@@ -497,13 +497,13 @@ impl Rem for Primitive {
     fn rem(self, rhs: Self) -> Primitive {
         if let Some(p) = apply_f32(&self, &rhs, |a, b| a % b) { return p; }
         if let Some(p) = apply_i32(&self, &rhs, |a, b| {
-            a.checked_rem(b).unwrap_or_else(|| if b == 0 { a } else { 0 })
+            a.checked_rem(b).unwrap_or(if b == 0 { a } else { 0 })
         }) { return p; }
         if let Some(p) = apply_u32(&self, &rhs, |a, b| a.checked_rem(b).unwrap_or(a)) { return p; }
         match (&self, &rhs) {
             (Primitive::F64(a), Primitive::F64(b)) => Primitive::F64(a % b),
             (Primitive::I64(a), Primitive::I64(b)) => Primitive::I64(
-                a.checked_rem(*b).unwrap_or_else(|| if *b == 0 { *a } else { 0 })
+                a.checked_rem(*b).unwrap_or(if *b == 0 { *a } else { 0 })
             ),
             (Primitive::U64(a), Primitive::U64(b)) => Primitive::U64(a.checked_rem(*b).unwrap_or(*a)),
             _ => panic!("Primitive::rem type mismatch: {:?} % {:?}", self, rhs),

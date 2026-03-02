@@ -317,7 +317,7 @@ impl Evaluator {
             } => self.evaluate_swizzle(
                 *size,
                 *vector,
-                pattern.clone(),
+                *pattern,
                 state_index,
                 parent_state_index,
             ),
@@ -571,20 +571,20 @@ impl Evaluator {
                 }
                 match (l.as_primitive(), r.as_primitive()) {
                     (Some(lp), Some(rp)) => {
-                        if let (Some(a), Some(b)) = (lp.as_f32_slice(), rp.as_f32_slice()) {
-                            if let Some(res) = cmp_slices(cmp, a, b) {
-                                return Value::from(Primitive::from(res.as_slice()));
-                            }
+                        if let (Some(a), Some(b)) = (lp.as_f32_slice(), rp.as_f32_slice())
+                            && let Some(res) = cmp_slices(cmp, a, b)
+                        {
+                            return Value::from(Primitive::from(res.as_slice()));
                         }
-                        if let (Some(a), Some(b)) = (lp.as_i32_slice(), rp.as_i32_slice()) {
-                            if let Some(res) = cmp_slices(cmp, a, b) {
-                                return Value::from(Primitive::from(res.as_slice()));
-                            }
+                        if let (Some(a), Some(b)) = (lp.as_i32_slice(), rp.as_i32_slice())
+                            && let Some(res) = cmp_slices(cmp, a, b)
+                        {
+                            return Value::from(Primitive::from(res.as_slice()));
                         }
-                        if let (Some(a), Some(b)) = (lp.as_u32_slice(), rp.as_u32_slice()) {
-                            if let Some(res) = cmp_slices(cmp, a, b) {
-                                return Value::from(Primitive::from(res.as_slice()));
-                            }
+                        if let (Some(a), Some(b)) = (lp.as_u32_slice(), rp.as_u32_slice())
+                            && let Some(res) = cmp_slices(cmp, a, b)
+                        {
+                            return Value::from(Primitive::from(res.as_slice()));
                         }
                         match (lp, rp) {
                             (Primitive::F64(a), Primitive::F64(b)) => {
@@ -1051,6 +1051,7 @@ impl Evaluator {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn evaluate_math(
         &self,
         fun: MathFunction,

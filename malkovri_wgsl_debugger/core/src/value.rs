@@ -4,18 +4,15 @@ use naga::TypeInner;
 
 use crate::primitive::Primitive;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum Value {
+    #[default]
     Uninitialized,
     Primitive(Primitive),
     Array(Vec<Value>),
     /// Named fields in declaration order.
     Struct(Vec<(String, Value)>),
     Pointer(Rc<RefCell<Value>>),
-}
-
-impl Default for Value {
-    fn default() -> Self { Value::Uninitialized }
 }
 
 // ── Core accessors ─────────────────────────────────────────────────────────────
