@@ -2,6 +2,7 @@
 name = "malkovri_wgsl_debugger_dap"
 version = "0.1.0"
 edition = "2024"
+license = "EUPL-1.2"
 
 [dependencies]
 malkovri_wgsl_debugger = { path = "../core" }
