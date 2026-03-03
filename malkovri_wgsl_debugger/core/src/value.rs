@@ -31,6 +31,19 @@ impl Value {
             _ => None,
         }
     }
+
+    /// Index into a composite value (array, struct, or vector) by position.
+    pub fn index_into(&self, index: usize) -> Value {
+        match self {
+            Value::Array(elements) => elements.get(index).cloned().unwrap_or(Value::Uninitialized),
+            Value::Struct(fields) => fields
+                .get(index)
+                .map(|(_, v)| v.clone())
+                .unwrap_or(Value::Uninitialized),
+            Value::Primitive(p) => Value::Primitive(p.extract_component(index)),
+            _ => Value::Uninitialized,
+        }
+    }
 }
 
 // ── Delegation to Primitive — keeps the evaluator's helper call-sites unchanged ─

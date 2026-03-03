@@ -66,15 +66,16 @@ impl Evaluator {
         &self.stack[self.stack.len() - 1]
     }
 
+    /// Return the parent frame index for the given state, or `None` if it's the bottom frame.
+    fn parent_of(&self, state_index: usize) -> Option<usize> {
+        state_index.checked_sub(1)
+    }
+
     /// Evaluate all named expressions (WGSL `let` bindings) in the current frame.
     /// Returns `(name, value)` pairs in source order.
     pub fn named_expression_values(&self) -> Vec<(String, Value)> {
         let state_index = self.stack.len() - 1;
-        let parent_state_index = if state_index > 0 {
-            Some(state_index - 1)
-        } else {
-            None
-        };
+        let parent_state_index = self.parent_of(state_index);
         let state = &self.stack[state_index];
         state
             .function
@@ -91,11 +92,7 @@ impl Evaluator {
 
     pub fn next_statement(&mut self) -> Option<NextStatement> {
         let current_state_index = self.stack.len() - 1;
-        let parent_state_index = if current_state_index == 0 {
-            None
-        } else {
-            Some(current_state_index - 1)
-        };
+        let parent_state_index = self.parent_of(current_state_index);
         let current_statement_index = self.stack[current_state_index].current_statement_index;
         let current_state_statements_len = self.stack[current_state_index].function.body.len();
 
@@ -442,17 +439,7 @@ impl Evaluator {
         let value = self
             .evaluate_expression(base, state_index, parent_state_index)
             .leaf_value();
-        let index = index as usize;
-
-        match value {
-            Value::Array(elements) => elements.get(index).cloned().unwrap_or(Value::Uninitialized),
-            Value::Struct(fields) => fields
-                .get(index)
-                .map(|(_, v)| v.clone())
-                .unwrap_or(Value::Uninitialized),
-            Value::Primitive(p) => Value::Primitive(p.extract_component(index)),
-            _ => Value::Uninitialized,
-        }
+        value.index_into(index as usize)
     }
 
     fn evaluate_function_argument(&self, index: usize, state: &FunctionState) -> Value {
@@ -632,15 +619,7 @@ impl Evaluator {
             _ => return Value::Uninitialized,
         };
 
-        match base_value {
-            Value::Array(elements) => elements.get(index).cloned().unwrap_or(Value::Uninitialized),
-            Value::Struct(fields) => fields
-                .get(index)
-                .map(|(_, v)| v.clone())
-                .unwrap_or(Value::Uninitialized),
-            Value::Primitive(p) => Value::Primitive(p.extract_component(index)),
-            _ => Value::Uninitialized,
-        }
+        base_value.index_into(index)
     }
 
     /// Evaluate an expression from the module's global_expressions arena (used for constants/overrides).
@@ -670,7 +649,7 @@ impl Evaluator {
 
     /// Assemble a composite value from evaluated components, guided by the target type.
     fn assemble_compose(&self, ty_inner: &TypeInner, vals: &[Value]) -> Value {
-        use naga::{Scalar, ScalarKind};
+        use naga::ScalarKind;
         match ty_inner {
             TypeInner::Array { .. } => Value::Array(vals.to_vec()),
             TypeInner::Struct { members, .. } => {
@@ -681,58 +660,27 @@ impl Evaluator {
                     .collect();
                 Value::Struct(fields)
             }
-            TypeInner::Vector { size, .. } => {
+            TypeInner::Vector { size, scalar } => {
                 let expected_len = match size {
                     VectorSize::Bi => 2,
                     VectorSize::Tri => 3,
                     VectorSize::Quad => 4,
                 };
-                match ty_inner {
-                    TypeInner::Vector {
-                        scalar:
-                            Scalar {
-                                kind: ScalarKind::Float,
-                                width: 4,
-                            },
-                        ..
-                    } => {
-                        let comps = Value::collect_f32_components(vals);
+                // Helper: collect components, truncate to expected_len, and build a Primitive.
+                macro_rules! compose_vec {
+                    ($collect:expr) => {{
+                        let comps = $collect(vals);
                         if comps.len() >= expected_len {
                             Value::from(Primitive::from(&comps[..expected_len]))
                         } else {
                             Value::Uninitialized
                         }
-                    }
-                    TypeInner::Vector {
-                        scalar:
-                            Scalar {
-                                kind: ScalarKind::Sint,
-                                width: 4,
-                            },
-                        ..
-                    } => {
-                        let comps = Value::collect_i32_components(vals);
-                        if comps.len() >= expected_len {
-                            Value::from(Primitive::from(&comps[..expected_len]))
-                        } else {
-                            Value::Uninitialized
-                        }
-                    }
-                    TypeInner::Vector {
-                        scalar:
-                            Scalar {
-                                kind: ScalarKind::Uint,
-                                width: 4,
-                            },
-                        ..
-                    } => {
-                        let comps = Value::collect_u32_components(vals);
-                        if comps.len() >= expected_len {
-                            Value::from(Primitive::from(&comps[..expected_len]))
-                        } else {
-                            Value::Uninitialized
-                        }
-                    }
+                    }};
+                }
+                match (scalar.kind, scalar.width) {
+                    (ScalarKind::Float, 4) => compose_vec!(Value::collect_f32_components),
+                    (ScalarKind::Sint,  4) => compose_vec!(Value::collect_i32_components),
+                    (ScalarKind::Uint,  4) => compose_vec!(Value::collect_u32_components),
                     _ => Value::Uninitialized,
                 }
             }
@@ -902,65 +850,41 @@ impl Evaluator {
         };
 
         match convert {
-            Some(4) => match (kind, p) {
-                // To F32
-                (Float, F32(v)) => F32(v).into(),
-                (Float, I32(v)) => F32(v as f32).into(),
-                (Float, U32(v)) => F32(v as f32).into(),
-                (Float, F64(v)) => F32(v as f32).into(),
-                (Float, I64(v)) => F32(v as f32).into(),
-                (Float, U64(v)) => F32(v as f32).into(),
-                // To I32
-                (Sint, I32(v)) => I32(v).into(),
-                (Sint, F32(v)) => I32(v as i32).into(),
-                (Sint, U32(v)) => I32(v as i32).into(),
-                (Sint, F64(v)) => I32(v as i32).into(),
-                (Sint, I64(v)) => I32(v as i32).into(),
-                (Sint, U64(v)) => I32(v as i32).into(),
-                // To U32
-                (Uint, U32(v)) => U32(v).into(),
-                (Uint, F32(v)) => U32(v as u32).into(),
-                (Uint, I32(v)) => U32(v as u32).into(),
-                (Uint, F64(v)) => U32(v as u32).into(),
-                (Uint, I64(v)) => U32(v as u32).into(),
-                (Uint, U64(v)) => U32(v as u32).into(),
+            Some(4) => match (kind, &p) {
+                // Scalar → F32
+                (Float, F32(v)) => F32(*v).into(),
+                (Float, F64(v)) => F32(*v as f32).into(),
+                (Float, I64(v)) => F32(*v as f32).into(),
+                (Float, U64(v)) => F32(*v as f32).into(),
+                // Scalar → I32
+                (Sint, I32(v)) => I32(*v).into(),
+                (Sint, F64(v)) => I32(*v as i32).into(),
+                (Sint, I64(v)) => I32(*v as i32).into(),
+                (Sint, U64(v)) => I32(*v as i32).into(),
+                // Scalar → U32
+                (Uint, U32(v)) => U32(*v).into(),
+                (Uint, F64(v)) => U32(*v as u32).into(),
+                (Uint, I64(v)) => U32(*v as u32).into(),
+                (Uint, U64(v)) => U32(*v as u32).into(),
                 // To Bool (U32 0/1)
-                (Bool, U32(v)) => U32(u32::from(v != 0)).into(),
-                (Bool, I32(v)) => U32(u32::from(v != 0)).into(),
-                (Bool, F32(v)) => U32(u32::from(v != 0.0)).into(),
-                // Vector → F32xN
-                (Float, I32x2([a, b])) => F32x2([a as f32, b as f32]).into(),
-                (Float, I32x3([a, b, c])) => F32x3([a as f32, b as f32, c as f32]).into(),
-                (Float, I32x4([a, b, c, d])) => {
-                    F32x4([a as f32, b as f32, c as f32, d as f32]).into()
-                }
-                (Float, U32x2([a, b])) => F32x2([a as f32, b as f32]).into(),
-                (Float, U32x3([a, b, c])) => F32x3([a as f32, b as f32, c as f32]).into(),
-                (Float, U32x4([a, b, c, d])) => {
-                    F32x4([a as f32, b as f32, c as f32, d as f32]).into()
-                }
-                // Vector → I32xN
-                (Sint, F32x2([a, b])) => I32x2([a as i32, b as i32]).into(),
-                (Sint, F32x3([a, b, c])) => I32x3([a as i32, b as i32, c as i32]).into(),
-                (Sint, F32x4([a, b, c, d])) => {
-                    I32x4([a as i32, b as i32, c as i32, d as i32]).into()
-                }
-                (Sint, U32x2([a, b])) => I32x2([a as i32, b as i32]).into(),
-                (Sint, U32x3([a, b, c])) => I32x3([a as i32, b as i32, c as i32]).into(),
-                (Sint, U32x4([a, b, c, d])) => {
-                    I32x4([a as i32, b as i32, c as i32, d as i32]).into()
-                }
-                // Vector → U32xN
-                (Uint, F32x2([a, b])) => U32x2([a as u32, b as u32]).into(),
-                (Uint, F32x3([a, b, c])) => U32x3([a as u32, b as u32, c as u32]).into(),
-                (Uint, F32x4([a, b, c, d])) => {
-                    U32x4([a as u32, b as u32, c as u32, d as u32]).into()
-                }
-                (Uint, I32x2([a, b])) => U32x2([a as u32, b as u32]).into(),
-                (Uint, I32x3([a, b, c])) => U32x3([a as u32, b as u32, c as u32]).into(),
-                (Uint, I32x4([a, b, c, d])) => {
-                    U32x4([a as u32, b as u32, c as u32, d as u32]).into()
-                }
+                (Bool, U32(v)) => U32(u32::from(*v != 0)).into(),
+                (Bool, I32(v)) => U32(u32::from(*v != 0)).into(),
+                (Bool, F32(v)) => U32(u32::from(*v != 0.0)).into(),
+                // Scalar/Vector → F32xN (from i32 or u32 sources, or identity for f32)
+                (Float, _) => p.map_i32_to_f32(|v| v as f32)
+                    .or_else(|| p.map_u32_to_f32(|v| v as f32))
+                    .map(Value::from)
+                    .unwrap_or(Value::Uninitialized),
+                // Scalar/Vector → I32xN (from f32 or u32 sources, or identity for i32)
+                (Sint, _) => p.map_f32_to_i32(|v| v as i32)
+                    .or_else(|| p.map_u32_to_i32(|v| v as i32))
+                    .map(Value::from)
+                    .unwrap_or(Value::Uninitialized),
+                // Scalar/Vector → U32xN (from f32 or i32 sources, or identity for u32)
+                (Uint, _) => p.map_f32_to_u32(|v| v as u32)
+                    .or_else(|| p.map_i32_to_u32(|v| v as u32))
+                    .map(Value::from)
+                    .unwrap_or(Value::Uninitialized),
                 _ => Value::Uninitialized,
             },
             Some(8) => match (kind, p) {
@@ -984,67 +908,26 @@ impl Evaluator {
                 (Uint, F64(v)) => U64(v as u64).into(),
                 _ => Value::Uninitialized,
             },
-            // Bitcast — reinterpret bits
-            None => match (kind, p) {
-                (Float, I32(v)) => F32(f32::from_bits(v as u32)).into(),
-                (Float, U32(v)) => F32(f32::from_bits(v)).into(),
+            // Bitcast — reinterpret bits (scalars handled explicitly, vectors via cross-type maps)
+            None => match (kind, &p) {
+                (Float, I32(v)) => F32(f32::from_bits(*v as u32)).into(),
+                (Float, U32(v)) => F32(f32::from_bits(*v)).into(),
                 (Sint, F32(v)) => I32(v.to_bits() as i32).into(),
-                (Sint, U32(v)) => I32(v as i32).into(),
+                (Sint, U32(v)) => I32(*v as i32).into(),
                 (Uint, F32(v)) => U32(v.to_bits()).into(),
-                (Uint, I32(v)) => U32(v as u32).into(),
-                (Float, I32x2([a, b])) => {
-                    F32x2([f32::from_bits(a as u32), f32::from_bits(b as u32)]).into()
-                }
-                (Float, I32x3([a, b, c])) => F32x3([
-                    f32::from_bits(a as u32),
-                    f32::from_bits(b as u32),
-                    f32::from_bits(c as u32),
-                ])
-                .into(),
-                (Float, I32x4([a, b, c, d])) => F32x4([
-                    f32::from_bits(a as u32),
-                    f32::from_bits(b as u32),
-                    f32::from_bits(c as u32),
-                    f32::from_bits(d as u32),
-                ])
-                .into(),
-                (Float, U32x2([a, b])) => F32x2([f32::from_bits(a), f32::from_bits(b)]).into(),
-                (Float, U32x3([a, b, c])) => {
-                    F32x3([f32::from_bits(a), f32::from_bits(b), f32::from_bits(c)]).into()
-                }
-                (Float, U32x4([a, b, c, d])) => F32x4([
-                    f32::from_bits(a),
-                    f32::from_bits(b),
-                    f32::from_bits(c),
-                    f32::from_bits(d),
-                ])
-                .into(),
-                (Sint, F32x2([a, b])) => I32x2([a.to_bits() as i32, b.to_bits() as i32]).into(),
-                (Sint, F32x3([a, b, c])) => {
-                    I32x3([a.to_bits() as i32, b.to_bits() as i32, c.to_bits() as i32]).into()
-                }
-                (Sint, F32x4([a, b, c, d])) => I32x4([
-                    a.to_bits() as i32,
-                    b.to_bits() as i32,
-                    c.to_bits() as i32,
-                    d.to_bits() as i32,
-                ])
-                .into(),
-                (Sint, U32x2([a, b])) => I32x2([a as i32, b as i32]).into(),
-                (Sint, U32x3([a, b, c])) => I32x3([a as i32, b as i32, c as i32]).into(),
-                (Sint, U32x4([a, b, c, d])) => {
-                    I32x4([a as i32, b as i32, c as i32, d as i32]).into()
-                }
-                (Uint, F32x2([a, b])) => U32x2([a.to_bits(), b.to_bits()]).into(),
-                (Uint, F32x3([a, b, c])) => U32x3([a.to_bits(), b.to_bits(), c.to_bits()]).into(),
-                (Uint, F32x4([a, b, c, d])) => {
-                    U32x4([a.to_bits(), b.to_bits(), c.to_bits(), d.to_bits()]).into()
-                }
-                (Uint, I32x2([a, b])) => U32x2([a as u32, b as u32]).into(),
-                (Uint, I32x3([a, b, c])) => U32x3([a as u32, b as u32, c as u32]).into(),
-                (Uint, I32x4([a, b, c, d])) => {
-                    U32x4([a as u32, b as u32, c as u32, d as u32]).into()
-                }
+                (Uint, I32(v)) => U32(*v as u32).into(),
+                (Float, _) => p.map_i32_to_f32(|v| f32::from_bits(v as u32))
+                    .or_else(|| p.map_u32_to_f32(f32::from_bits))
+                    .map(Value::from)
+                    .unwrap_or(Value::Uninitialized),
+                (Sint, _) => p.map_f32_to_i32(|v| v.to_bits() as i32)
+                    .or_else(|| p.map_u32_to_i32(|v| v as i32))
+                    .map(Value::from)
+                    .unwrap_or(Value::Uninitialized),
+                (Uint, _) => p.map_f32_to_u32(|v| v.to_bits())
+                    .or_else(|| p.map_i32_to_u32(|v| v as u32))
+                    .map(Value::from)
+                    .unwrap_or(Value::Uninitialized),
                 _ => Value::Uninitialized,
             },
             _ => Value::Uninitialized,

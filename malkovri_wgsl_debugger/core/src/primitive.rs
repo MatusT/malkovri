@@ -85,6 +85,71 @@ impl Primitive {
             _ => panic!("extract_component: index {} out of bounds for {:?}", index, self),
         }
     }
+    /// Convert f32 components to i32 using the given function, preserving vector width.
+    pub fn map_f32_to_i32(&self, f: impl Fn(f32) -> i32) -> Option<Self> {
+        match self {
+            Primitive::F32(v)              => Some(Primitive::I32(f(*v))),
+            Primitive::F32x2([a, b])       => Some(Primitive::I32x2([f(*a), f(*b)])),
+            Primitive::F32x3([a, b, c])    => Some(Primitive::I32x3([f(*a), f(*b), f(*c)])),
+            Primitive::F32x4([a, b, c, d]) => Some(Primitive::I32x4([f(*a), f(*b), f(*c), f(*d)])),
+            _ => None,
+        }
+    }
+
+    /// Convert f32 components to u32 using the given function, preserving vector width.
+    pub fn map_f32_to_u32(&self, f: impl Fn(f32) -> u32) -> Option<Self> {
+        match self {
+            Primitive::F32(v)              => Some(Primitive::U32(f(*v))),
+            Primitive::F32x2([a, b])       => Some(Primitive::U32x2([f(*a), f(*b)])),
+            Primitive::F32x3([a, b, c])    => Some(Primitive::U32x3([f(*a), f(*b), f(*c)])),
+            Primitive::F32x4([a, b, c, d]) => Some(Primitive::U32x4([f(*a), f(*b), f(*c), f(*d)])),
+            _ => None,
+        }
+    }
+
+    /// Convert i32 components to f32 using the given function, preserving vector width.
+    pub fn map_i32_to_f32(&self, f: impl Fn(i32) -> f32) -> Option<Self> {
+        match self {
+            Primitive::I32(v)              => Some(Primitive::F32(f(*v))),
+            Primitive::I32x2([a, b])       => Some(Primitive::F32x2([f(*a), f(*b)])),
+            Primitive::I32x3([a, b, c])    => Some(Primitive::F32x3([f(*a), f(*b), f(*c)])),
+            Primitive::I32x4([a, b, c, d]) => Some(Primitive::F32x4([f(*a), f(*b), f(*c), f(*d)])),
+            _ => None,
+        }
+    }
+
+    /// Convert i32 components to u32 using the given function, preserving vector width.
+    pub fn map_i32_to_u32(&self, f: impl Fn(i32) -> u32) -> Option<Self> {
+        match self {
+            Primitive::I32(v)              => Some(Primitive::U32(f(*v))),
+            Primitive::I32x2([a, b])       => Some(Primitive::U32x2([f(*a), f(*b)])),
+            Primitive::I32x3([a, b, c])    => Some(Primitive::U32x3([f(*a), f(*b), f(*c)])),
+            Primitive::I32x4([a, b, c, d]) => Some(Primitive::U32x4([f(*a), f(*b), f(*c), f(*d)])),
+            _ => None,
+        }
+    }
+
+    /// Convert u32 components to f32 using the given function, preserving vector width.
+    pub fn map_u32_to_f32(&self, f: impl Fn(u32) -> f32) -> Option<Self> {
+        match self {
+            Primitive::U32(v)              => Some(Primitive::F32(f(*v))),
+            Primitive::U32x2([a, b])       => Some(Primitive::F32x2([f(*a), f(*b)])),
+            Primitive::U32x3([a, b, c])    => Some(Primitive::F32x3([f(*a), f(*b), f(*c)])),
+            Primitive::U32x4([a, b, c, d]) => Some(Primitive::F32x4([f(*a), f(*b), f(*c), f(*d)])),
+            _ => None,
+        }
+    }
+
+    /// Convert u32 components to i32 using the given function, preserving vector width.
+    pub fn map_u32_to_i32(&self, f: impl Fn(u32) -> i32) -> Option<Self> {
+        match self {
+            Primitive::U32(v)              => Some(Primitive::I32(f(*v))),
+            Primitive::U32x2([a, b])       => Some(Primitive::I32x2([f(*a), f(*b)])),
+            Primitive::U32x3([a, b, c])    => Some(Primitive::I32x3([f(*a), f(*b), f(*c)])),
+            Primitive::U32x4([a, b, c, d]) => Some(Primitive::I32x4([f(*a), f(*b), f(*c), f(*d)])),
+            _ => None,
+        }
+    }
 }
 
 fn apply_f32(lhs: &Primitive, rhs: &Primitive, f: impl Fn(f32, f32) -> f32) -> Option<Primitive> {
