@@ -346,26 +346,26 @@ impl DebugAdapter {
             DebugAdapterError::InvalidProgram("evaluator not initialized".to_string())
         })?;
 
-        let current_state = evaluator.peek();
+        let current_state = evaluator.current_function_frame().unwrap();
 
-        let current_statement = current_state
-            .function
-            .body
-            .get(current_state.current_statement_index)
+        let (active_block, active_index) =
+            evaluator.current_active_block().ok_or_else(|| {
+                DebugAdapterError::InvalidProgram("stack is empty".to_string())
+            })?;
+
+        let current_statement = active_block
+            .get(active_index)
             .cloned()
             .ok_or_else(|| {
                 DebugAdapterError::InvalidProgram("invalid statement index".to_string())
             })?;
 
-        let spans = current_state
-            .function
-            .body
+        let spans = active_block
             .span_iter()
             .map(|(_, span)| span)
             .collect::<Vec<_>>();
 
-        let relevant_span =
-            spans[current_state.current_statement_index].location(&self.program_source);
+        let relevant_span = spans[active_index].location(&self.program_source);
 
         let total_span = naga::Span::total_span(
             current_state
@@ -434,7 +434,7 @@ impl DebugAdapter {
             DebugAdapterError::InvalidProgram("evaluator not initialized".to_string())
         })?;
 
-        let current_state = evaluator.peek();
+        let current_state = evaluator.current_function_frame().unwrap();
         let named_variables_len = current_state.function.local_variables.len()
             + current_state.function.named_expressions.len();
         let function_arguments_len = current_state.function.arguments.len();
@@ -633,7 +633,7 @@ impl DebugAdapter {
             DebugAdapterError::InvalidProgram("evaluator not initialized".to_string())
         })?;
 
-        let current_state = evaluator.peek();
+        let current_state = evaluator.current_function_frame().unwrap();
 
         if argument.variables_reference == LOCALS_SCOPE_REF {
             // var declarations

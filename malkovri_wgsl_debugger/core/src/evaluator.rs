@@ -1,5 +1,7 @@
 use crate::{
-    function_state::{FunctionState, NextStatement},
+    function_state::{
+        BlockFrame, BlockKind, ControlFlow, FunctionFrame, NextStatement, StackFrame,
+    },
     primitive::Primitive,
     value::Value,
 };
@@ -7,8 +9,8 @@ use crate::{
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use naga::{
-    Expression, GlobalVariable, Literal, LocalVariable, MathFunction, Module, RelationalFunction,
-    Statement, SwizzleComponent, Type, TypeInner, UnaryOperator, VectorSize,
+    Expression, GlobalVariable, Handle, Literal, LocalVariable, MathFunction, Module,
+    RelationalFunction, Statement, SwizzleComponent, Type, TypeInner, UnaryOperator, VectorSize,
 };
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -22,7 +24,7 @@ pub struct Evaluator {
     entry_point: naga::ir::EntryPoint,
     entry_point_inputs: EntryPointInputs,
     global_values: HashMap<naga::Handle<GlobalVariable>, Value>,
-    stack: Vec<FunctionState>,
+    stack: Vec<StackFrame>,
 }
 
 impl Evaluator {
@@ -32,6 +34,9 @@ impl Evaluator {
         entry_point_inputs: EntryPointInputs,
         global_values: HashMap<naga::ResourceBinding, Value>,
     ) -> Self {
+        let entry_fn = module.entry_points[entry_point_index].function.clone();
+        let statements = entry_fn.body.clone();
+
         let mut evaluator = Evaluator {
             module: module.clone(),
             entry_point: module.entry_points[entry_point_index].clone(),
@@ -48,130 +53,403 @@ impl Evaluator {
                     )
                 })
                 .collect(),
-            stack: vec![FunctionState {
-                function: module.entry_points[entry_point_index].function.clone(),
+            stack: vec![StackFrame::Function(Box::new(FunctionFrame {
+                function: entry_fn,
                 function_handle: None,
                 local_variables: HashMap::new(),
                 evaluated_expressions: HashMap::new(),
                 evaluated_function_arguments: Vec::new(),
+                statements,
                 current_statement_index: 0,
-                returns: None,
-            }],
+                call_result_handle: None,
+                control_flow: ControlFlow::None,
+            }))],
         };
         evaluator.initialize_local_variables(0, None);
         evaluator
     }
 
-    pub fn peek(&self) -> &FunctionState {
-        &self.stack[self.stack.len() - 1]
+    /// Return a reference to the current function frame (the nearest `Function` variant on the
+    /// stack), or `None` if the stack is empty.
+    pub fn current_function_frame(&self) -> Option<&FunctionFrame> {
+        let func_idx = self.current_function_frame_index()?;
+        match &self.stack[func_idx] {
+            StackFrame::Function(f) => Some(f),
+            StackFrame::Block(_) => None,
+        }
     }
 
-    /// Return the parent frame index for the given state, or `None` if it's the bottom frame.
-    fn parent_of(&self, state_index: usize) -> Option<usize> {
-        state_index.checked_sub(1)
+    /// Return the statements and current index of the top-of-stack frame.
+    /// Unlike `current_function_frame`, this reflects the innermost active block,
+    /// which may be a nested `if`/`loop`/`switch` block rather than the function body.
+    pub fn current_active_block(&self) -> Option<(&naga::Block, usize)> {
+        let top = self.stack.last()?;
+        Some((top.statements(), top.current_statement_index()))
     }
 
-    /// Evaluate all named expressions (WGSL `let` bindings) in the current frame.
+    /// Index of the topmost `Function` frame, used to look up expressions and variables.
+    fn current_function_frame_index(&self) -> Option<usize> {
+        self.stack
+            .iter()
+            .rposition(|sf| matches!(sf, StackFrame::Function(_)))
+    }
+
+    /// Index of the `Function` frame below `func_idx` — the caller's frame, used for `CallResult`.
+    fn parent_function_frame_index(&self, func_idx: usize) -> Option<usize> {
+        self.stack[..func_idx]
+            .iter()
+            .rposition(|sf| matches!(sf, StackFrame::Function(_)))
+    }
+
+    /// Evaluate all named expressions (WGSL `let` bindings) in the current function frame.
     /// Returns `(name, value)` pairs in source order.
     pub fn named_expression_values(&self) -> Vec<(String, Value)> {
-        let state_index = self.stack.len() - 1;
-        let parent_state_index = self.parent_of(state_index);
-        let state = &self.stack[state_index];
-        state
+        let func_idx = match self.current_function_frame_index() {
+            Some(i) => i,
+            None => return vec![],
+        };
+        let parent_func_idx = self.parent_function_frame_index(func_idx);
+        let StackFrame::Function(ref frame) = self.stack[func_idx] else {
+            return vec![];
+        };
+        frame
             .function
             .named_expressions
             .iter()
             .map(|(handle, name)| {
                 (
                     name.clone(),
-                    self.evaluate_expression(*handle, state_index, parent_state_index),
+                    self.evaluate_expression(*handle, func_idx, parent_func_idx),
                 )
             })
             .collect()
     }
 
-    pub fn next_statement(&mut self) -> Option<NextStatement> {
-        let current_state_index = self.stack.len() - 1;
-        let parent_state_index = self.parent_of(current_state_index);
-        let current_statement_index = self.stack[current_state_index].current_statement_index;
-        let current_state_statements_len = self.stack[current_state_index].function.body.len();
+    // -------------------------------------------------------------------------
+    // Core execution loop
+    // -------------------------------------------------------------------------
 
-        if current_statement_index < current_state_statements_len {
-            let current_statement = self.stack[current_state_index]
-                .function
-                .body
-                .get(current_statement_index)
-                .cloned()
-                .unwrap();
-
-            self.handle_statement(current_statement, current_state_index, parent_state_index);
-
-            self.stack[current_state_index].current_statement_index += 1;
-
-            // Pop stack if we've finished the current function
-            if self.stack[current_state_index].current_statement_index
-                >= self.stack[current_state_index].function.body.len()
-            {
-                self.stack.pop();
+    /// Advance past any pending control-flow signals and exhausted frames until
+    /// a live statement is ready to execute (or the stack is empty).
+    /// Returns `true` if a live statement exists at the top of the stack.
+    fn advance_to_live_statement(&mut self) -> bool {
+        loop {
+            if self.stack.is_empty() {
+                return false;
             }
 
-            // Return the next statement if available
-            if let Some(state) = self.stack.last() {
-                return Some(NextStatement {
-                    function: state.function.clone(),
-                    statement: state
-                        .function
-                        .body
-                        .get(state.current_statement_index)
-                        .cloned()
-                        .unwrap(),
-                    statement_index: state.current_statement_index,
-                });
+            // Handle any control-flow signal on the current function frame.
+            let func_idx = match self.current_function_frame_index() {
+                Some(i) => i,
+                None => return false,
+            };
+            let signal = match &self.stack[func_idx] {
+                StackFrame::Function(frame) => frame.control_flow.clone(),
+                StackFrame::Block(_) => ControlFlow::None,
+            };
+            match signal {
+                ControlFlow::None => {}
+                ControlFlow::Break => {
+                    self.apply_break(func_idx);
+                    continue;
+                }
+                ControlFlow::Continue => {
+                    self.apply_continue(func_idx);
+                    continue;
+                }
+                ControlFlow::Return(return_val) => {
+                    self.apply_return(func_idx, return_val);
+                    continue;
+                }
             }
 
-            None
-        } else {
-            None
+            // Pop exhausted frames.
+            let top = self.stack.len() - 1;
+            if self.stack[top].is_exhausted() {
+                self.handle_exhausted_frame(top);
+                continue;
+            }
+
+            return true;
         }
     }
+
+    pub fn next_statement(&mut self) -> Option<NextStatement> {
+        if !self.advance_to_live_statement() {
+            return None;
+        }
+
+        let top = self.stack.len() - 1;
+        let stmt_idx = self.stack[top].current_statement_index();
+        let stmt = self.stack[top].statements()[stmt_idx].clone();
+        let func_idx = self.current_function_frame_index().unwrap();
+        let parent_func_idx = self.parent_function_frame_index(func_idx);
+
+        self.handle_statement(stmt, func_idx, parent_func_idx);
+        self.stack[top].increment_statement_index();
+
+        // Resolve any signals/exhaustion produced by the statement we just ran,
+        // then return whatever is live next (or None if execution finished).
+        self.advance_to_live_statement();
+        self.peek_next_statement()
+    }
+
+    fn peek_next_statement(&self) -> Option<NextStatement> {
+        let func_idx = self.current_function_frame_index()?;
+        let StackFrame::Function(ref frame) = self.stack[func_idx] else {
+            return None;
+        };
+        let top = self.stack.len() - 1;
+        let stmt_idx = self.stack[top].current_statement_index();
+        let stmt = self.stack[top].statements().get(stmt_idx)?.clone();
+        Some(NextStatement {
+            function: frame.function.clone(),
+            statement: stmt,
+            statement_index: stmt_idx,
+        })
+    }
+
+    // -------------------------------------------------------------------------
+    // Control-flow signal handlers
+    // -------------------------------------------------------------------------
+
+    /// Pop block frames above `func_idx` until (and including) the nearest `Loop` or `Switch` frame.
+    fn apply_break(&mut self, func_idx: usize) {
+        while self.stack.len() > func_idx + 1 {
+            let top = self.stack.len() - 1;
+            let is_target = matches!(
+                &self.stack[top],
+                StackFrame::Block(BlockFrame {
+                    kind: BlockKind::Loop { .. } | BlockKind::Switch,
+                    ..
+                })
+            );
+            self.stack.pop();
+            if is_target {
+                break;
+            }
+        }
+        if let StackFrame::Function(ref mut frame) = self.stack[func_idx] {
+            frame.control_flow = ControlFlow::None;
+        }
+    }
+
+    /// Pop block frames above `func_idx` until the nearest `Loop` frame (keep it), then switch
+    /// it to its `continuing` block.
+    fn apply_continue(&mut self, func_idx: usize) {
+        while self.stack.len() > func_idx + 1 {
+            let top = self.stack.len() - 1;
+            if matches!(
+                &self.stack[top],
+                StackFrame::Block(BlockFrame {
+                    kind: BlockKind::Loop { .. },
+                    ..
+                })
+            ) {
+                break;
+            }
+            self.stack.pop();
+        }
+
+        // Switch the loop frame to its continuing block.
+        let top = self.stack.len() - 1;
+        if top > func_idx {
+            let cont = match &self.stack[top] {
+                StackFrame::Block(block_frame) => match &block_frame.kind {
+                    BlockKind::Loop { continuing, .. } => Some(continuing.clone()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let (Some(cont), StackFrame::Block(block_frame)) = (cont, &mut self.stack[top])
+                && let BlockKind::Loop {
+                    ref mut in_continuing,
+                    ..
+                } = block_frame.kind
+                {
+                    block_frame.statements = cont;
+                    block_frame.current_statement_index = 0;
+                    *in_continuing = true;
+                }
+        }
+
+        if let StackFrame::Function(ref mut frame) = self.stack[func_idx] {
+            frame.control_flow = ControlFlow::None;
+        }
+    }
+
+    /// Store the return value in the parent function frame, then truncate the stack
+    /// to remove the returning function and everything above it.
+    fn apply_return(&mut self, func_idx: usize, value: Option<Value>) {
+        // Read the result handle from the callee before truncating the stack.
+        let call_result_handle = match &self.stack[func_idx] {
+            StackFrame::Function(frame) => frame.call_result_handle,
+            StackFrame::Block(_) => None,
+        };
+        // Store the return value in the parent frame's expression cache, keyed
+        // by the CallResult expression handle so that each call's result is
+        // independently retrievable even when multiple calls appear in sequence.
+        if let (Some(handle), Some(return_val)) = (call_result_handle, value)
+            && let Some(parent_func_idx) = self.parent_function_frame_index(func_idx)
+            && let StackFrame::Function(ref mut parent_frame) = self.stack[parent_func_idx]
+        {
+            parent_frame.evaluated_expressions.insert(handle, return_val);
+        }
+        self.stack.truncate(func_idx);
+    }
+
+    // -------------------------------------------------------------------------
+    // Exhausted-frame handler
+    // -------------------------------------------------------------------------
+
+    fn handle_exhausted_frame(&mut self, top: usize) {
+        enum Action {
+            Pop,
+            SwitchToContinuing(naga::Block),
+            CheckBreakIf {
+                break_if: Option<Handle<Expression>>,
+                body: naga::Block,
+            },
+        }
+
+        let action = match &self.stack[top] {
+            StackFrame::Function(_) => Action::Pop,
+            StackFrame::Block(block_frame) => match &block_frame.kind {
+                BlockKind::Plain | BlockKind::Switch => Action::Pop,
+                BlockKind::Loop {
+                    in_continuing: false,
+                    continuing,
+                    ..
+                } => Action::SwitchToContinuing(continuing.clone()),
+                BlockKind::Loop {
+                    in_continuing: true,
+                    break_if,
+                    body,
+                    ..
+                } => Action::CheckBreakIf {
+                    break_if: *break_if,
+                    body: body.clone(),
+                },
+            },
+        };
+
+        match action {
+            Action::Pop => {
+                self.stack.pop();
+            }
+            Action::SwitchToContinuing(cont) => {
+                if let StackFrame::Block(ref mut block_frame) = self.stack[top]
+                    && let BlockKind::Loop {
+                        ref mut in_continuing,
+                        ..
+                    } = block_frame.kind
+                    {
+                        block_frame.statements = cont;
+                        block_frame.current_statement_index = 0;
+                        *in_continuing = true;
+                    }
+            }
+            Action::CheckBreakIf { break_if, body } => {
+                let should_break = if let Some(expr) = break_if {
+                    let func_idx = self.current_function_frame_index().unwrap();
+                    let parent_func_idx = self.parent_function_frame_index(func_idx);
+                    let v = self.evaluate_expression(expr, func_idx, parent_func_idx);
+                    matches!(v, Value::Primitive(Primitive::U32(v)) if v != 0)
+                } else {
+                    false // infinite loop — repeat body
+                };
+
+                if should_break {
+                    self.stack.pop();
+                } else if let StackFrame::Block(ref mut block_frame) = self.stack[top]
+                    && let BlockKind::Loop {
+                        ref mut in_continuing,
+                        ..
+                    } = block_frame.kind
+                    {
+                        block_frame.statements = body;
+                        block_frame.current_statement_index = 0;
+                        *in_continuing = false;
+                    }
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Statement dispatch
+    // -------------------------------------------------------------------------
 
     fn handle_statement(
         &mut self,
         statement: Statement,
-        current_state_index: usize,
-        parent_state_index: Option<usize>,
+        func_idx: usize,
+        parent_func_idx: Option<usize>,
     ) {
         match statement {
-            Statement::Emit(expression_handles) => {
-                self.handle_emit(expression_handles, current_state_index, parent_state_index);
+            Statement::Emit(_) => {
+                // Expressions are evaluated lazily on demand.
             }
             Statement::Call {
                 function: function_handle,
                 arguments,
-                result: _result,
+                result,
             } => {
-                self.handle_call(
-                    function_handle,
-                    arguments,
-                    current_state_index,
-                    parent_state_index,
-                );
+                self.handle_call(function_handle, arguments, result, func_idx, parent_func_idx);
             }
             Statement::Store { pointer, value } => {
-                self.handle_store(pointer, value, current_state_index, parent_state_index);
+                self.handle_store(pointer, value, func_idx, parent_func_idx);
             }
             Statement::Return { value } => {
-                if let Some(value) = value {
-                    self.handle_return(value, current_state_index, parent_state_index);
+                let return_value =
+                    value.map(|v| self.evaluate_expression(v, func_idx, parent_func_idx));
+                if let StackFrame::Function(ref mut frame) = self.stack[func_idx] {
+                    frame.control_flow = ControlFlow::Return(return_value);
                 }
             }
-            Statement::Block(_)
-            | Statement::If { .. }
-            | Statement::Switch { .. }
-            | Statement::Loop { .. }
-            | Statement::Break
-            | Statement::Continue
-            | Statement::Kill
+            Statement::If {
+                condition,
+                accept,
+                reject,
+            } => {
+                self.handle_if(condition, accept, reject, func_idx, parent_func_idx);
+            }
+            Statement::Block(block) => {
+                self.stack.push(StackFrame::Block(BlockFrame {
+                    statements: block,
+                    current_statement_index: 0,
+                    kind: BlockKind::Plain,
+                }));
+            }
+            Statement::Loop {
+                body,
+                continuing,
+                break_if,
+            } => {
+                self.stack.push(StackFrame::Block(BlockFrame {
+                    statements: body.clone(),
+                    current_statement_index: 0,
+                    kind: BlockKind::Loop {
+                        body,
+                        continuing,
+                        break_if,
+                        in_continuing: false,
+                    },
+                }));
+            }
+            Statement::Switch { selector, cases } => {
+                self.handle_switch(selector, cases, func_idx, parent_func_idx);
+            }
+            Statement::Break => {
+                if let StackFrame::Function(ref mut frame) = self.stack[func_idx] {
+                    frame.control_flow = ControlFlow::Break;
+                }
+            }
+            Statement::Continue => {
+                if let StackFrame::Function(ref mut frame) = self.stack[func_idx] {
+                    frame.control_flow = ControlFlow::Continue;
+                }
+            }
+            Statement::Kill
             | Statement::ControlBarrier(_)
             | Statement::MemoryBarrier(_)
             | Statement::ImageStore { .. }
@@ -185,79 +463,74 @@ impl Evaluator {
         }
     }
 
-    fn handle_emit(
-        &mut self,
-        _expression_handles: naga::Range<naga::Expression>,
-        _state_index: usize,
-        _parent_state_index: Option<usize>,
-    ) {
-        // Expressions are evaluated lazily on demand, so there is nothing to do here.
-    }
-
     fn handle_call(
         &mut self,
         function_handle: naga::Handle<naga::Function>,
-        arguments: Vec<naga::Handle<Expression>>,
-        state_index: usize,
-        parent_state_index: Option<usize>,
+        arguments: Vec<Handle<Expression>>,
+        call_result_handle: Option<Handle<Expression>>,
+        func_idx: usize,
+        parent_func_idx: Option<usize>,
     ) {
         let evaluated_function_arguments = arguments
             .iter()
-            .map(|&arg| self.evaluate_expression(arg, state_index, parent_state_index))
+            .map(|&arg| self.evaluate_expression(arg, func_idx, parent_func_idx))
             .collect();
 
-        let new_function_state = FunctionState {
-            function: self.module.functions[function_handle].clone(),
+        let callee = self.module.functions[function_handle].clone();
+        let statements = callee.body.clone();
+
+        self.stack.push(StackFrame::Function(Box::new(FunctionFrame {
+            function: callee,
             function_handle: Some(function_handle),
             local_variables: HashMap::new(),
             evaluated_expressions: HashMap::new(),
             evaluated_function_arguments,
+            statements,
             current_statement_index: 0,
-            returns: None,
-        };
-        self.stack.push(new_function_state);
+            call_result_handle,
+            control_flow: ControlFlow::None,
+        })));
 
-        let new_state_index = self.stack.len() - 1;
-        self.initialize_local_variables(new_state_index, parent_state_index);
+        let new_func_idx = self.stack.len() - 1;
+        self.initialize_local_variables(new_func_idx, parent_func_idx);
     }
 
-    fn initialize_local_variables(
-        &mut self,
-        state_index: usize,
-        parent_state_index: Option<usize>,
-    ) {
-        let mut insert_variables = Vec::new();
+    fn initialize_local_variables(&mut self, func_idx: usize, parent_func_idx: Option<usize>) {
+        let mut insert_variables: Vec<(Handle<LocalVariable>, Value)> = Vec::new();
 
-        for local_variable in self.stack[state_index].function.local_variables.iter() {
-            let evaluated_local_variable = match &local_variable.1.init {
-                Some(init_expr) => {
-                    self.evaluate_expression(*init_expr, state_index, parent_state_index)
-                }
+        let local_vars: Vec<_> = match &self.stack[func_idx] {
+            StackFrame::Function(frame) => frame.function.local_variables.iter().collect(),
+            StackFrame::Block(_) => return,
+        };
+
+        for (handle, local_var) in local_vars {
+            let value = match &local_var.init {
+                Some(init_expr) => self.evaluate_expression(*init_expr, func_idx, parent_func_idx),
                 None => {
-                    let ty = &self.module.types[local_variable.1.ty];
+                    let ty = &self.module.types[local_var.ty];
                     Value::from(&ty.inner)
                 }
             };
-
-            insert_variables.push((local_variable.0, evaluated_local_variable));
+            insert_variables.push((handle, value));
         }
 
         for (handle, value) in insert_variables {
-            self.stack[state_index]
-                .local_variables
-                .insert(handle, Value::Pointer(Rc::new(RefCell::new(value))));
+            if let StackFrame::Function(ref mut frame) = self.stack[func_idx] {
+                frame.local_variables
+                    .insert(handle, Value::Pointer(Rc::new(RefCell::new(value))));
+            }
         }
     }
 
     fn handle_store(
         &mut self,
-        pointer: naga::Handle<Expression>,
-        value: naga::Handle<Expression>,
-        state_index: usize,
-        parent_state_index: Option<usize>,
+        pointer: Handle<Expression>,
+        value: Handle<Expression>,
+        func_idx: usize,
+        parent_func_idx: Option<usize>,
     ) {
-        let evaluated_value = self.evaluate_expression(value, state_index, parent_state_index);
-        let evaluated_pointer = self.evaluate_expression(pointer, state_index, parent_state_index);
+        let evaluated_value = self.evaluate_expression(value, func_idx, parent_func_idx);
+        let evaluated_pointer = self.evaluate_expression(pointer, func_idx, parent_func_idx);
 
         match evaluated_pointer {
             Value::Pointer(inner) => {
@@ -269,27 +542,84 @@ impl Evaluator {
         }
     }
 
-    fn handle_return(
+    fn handle_if(
         &mut self,
-        value: naga::Handle<Expression>,
-        state_index: usize,
-        parent_state_index: Option<usize>,
+        condition: Handle<Expression>,
+        accept: naga::Block,
+        reject: naga::Block,
+        func_idx: usize,
+        parent_func_idx: Option<usize>,
     ) {
-        let return_value = self.evaluate_expression(value, state_index, parent_state_index);
-
-        if let Some(parent_state_index) = parent_state_index {
-            self.stack[parent_state_index].returns = Some(return_value);
+        let condition_result = self.evaluate_expression(condition, func_idx, parent_func_idx);
+        let branch = if matches!(condition_result, Value::Primitive(Primitive::U32(v)) if v != 0) {
+            accept
+        } else {
+            reject
+        };
+        if !branch.is_empty() {
+            self.stack.push(StackFrame::Block(BlockFrame {
+                statements: branch,
+                current_statement_index: 0,
+                kind: BlockKind::Plain,
+            }));
         }
     }
 
+    fn handle_switch(
+        &mut self,
+        selector: Handle<Expression>,
+        cases: Vec<naga::SwitchCase>,
+        func_idx: usize,
+        parent_func_idx: Option<usize>,
+    ) {
+        let selector_val = self.evaluate_expression(selector, func_idx, parent_func_idx);
+
+        let selector_i32 = match selector_val {
+            Value::Primitive(Primitive::I32(v)) => v,
+            Value::Primitive(Primitive::U32(v)) => v as i32,
+            _ => return,
+        };
+
+        // Find the matching case, fall back to Default.
+        let body = cases
+            .iter()
+            .find(|c| matches!(&c.value, naga::SwitchValue::I32(v) if *v == selector_i32))
+            .or_else(|| {
+                cases
+                    .iter()
+                    .find(|c| matches!(&c.value, naga::SwitchValue::U32(v) if *v == selector_i32 as u32))
+            })
+            .or_else(|| {
+                cases
+                    .iter()
+                    .find(|c| matches!(&c.value, naga::SwitchValue::Default))
+            })
+            .map(|c| c.body.clone());
+
+        if let Some(body) = body
+            && !body.is_empty() {
+                self.stack.push(StackFrame::Block(BlockFrame {
+                    statements: body,
+                    current_statement_index: 0,
+                    kind: BlockKind::Switch,
+                }));
+            }
+    }
+
+    // -------------------------------------------------------------------------
+    // Expression evaluation
+    // -------------------------------------------------------------------------
+
     pub fn evaluate_expression(
         &self,
-        expression_handle: naga::Handle<Expression>,
-        state_index: usize,
-        parent_state_index: Option<usize>,
+        expression_handle: Handle<Expression>,
+        func_idx: usize,
+        parent_func_idx: Option<usize>,
     ) -> Value {
-        let state = &self.stack[state_index];
-        let expression = &state.function.expressions[expression_handle];
+        let StackFrame::Function(ref frame) = self.stack[func_idx] else {
+            return Value::Uninitialized;
+        };
+        let expression = &frame.function.expressions[expression_handle];
 
         match expression {
             Expression::Literal(literal) => self.evaluate_literal(literal),
@@ -302,60 +632,44 @@ impl Evaluator {
             },
             Expression::ZeroValue(ty) => Value::from(&self.module.types[*ty].inner),
             Expression::Compose { ty, components } => {
-                self.evaluate_compose(*ty, components, state_index, parent_state_index)
+                self.evaluate_compose(*ty, components, func_idx, parent_func_idx)
             }
             Expression::Splat { size, value } => {
-                self.evaluate_splat(*size, *value, state_index, parent_state_index)
+                self.evaluate_splat(*size, *value, func_idx, parent_func_idx)
             }
             Expression::Swizzle {
                 size,
                 vector,
                 pattern,
-            } => self.evaluate_swizzle(
-                *size,
-                *vector,
-                *pattern,
-                state_index,
-                parent_state_index,
-            ),
-            Expression::Load { pointer } => {
-                self.evaluate_load(*pointer, state, state_index, parent_state_index)
-            }
+            } => self.evaluate_swizzle(*size, *vector, *pattern, func_idx, parent_func_idx),
+            Expression::Load { pointer } => self.evaluate_load(*pointer, func_idx, parent_func_idx),
             Expression::AccessIndex { base, index } => {
-                self.evaluate_access_index(*base, *index, state_index, parent_state_index)
+                self.evaluate_access_index(*base, *index, func_idx, parent_func_idx)
             }
             Expression::FunctionArgument(index) => {
-                self.evaluate_function_argument(*index as usize, state)
+                self.evaluate_function_argument(*index as usize, func_idx)
             }
             Expression::LocalVariable(handle) => {
-                self.evaluate_local_variable(*handle, state, state_index, parent_state_index)
+                self.evaluate_local_variable(*handle, func_idx, parent_func_idx)
             }
             Expression::Binary { op, left, right } => {
-                self.evaluate_binary(*op, *left, *right, state_index, parent_state_index)
+                self.evaluate_binary(*op, *left, *right, func_idx, parent_func_idx)
             }
             Expression::Unary { op, expr } => {
-                let val = self
-                    .evaluate_expression(*expr, state_index, parent_state_index)
-                    .leaf_value();
+                let val = self.evaluate_expression(*expr, func_idx, parent_func_idx).leaf_value();
                 self.evaluate_unary(*op, val)
             }
             Expression::Select {
                 condition,
                 accept,
                 reject,
-            } => self.evaluate_select(
-                *condition,
-                *accept,
-                *reject,
-                state_index,
-                parent_state_index,
-            ),
+            } => self.evaluate_select(*condition, *accept, *reject, func_idx, parent_func_idx),
             Expression::As {
                 expr,
                 kind,
                 convert,
             } => {
-                let val = self.evaluate_expression(*expr, state_index, parent_state_index);
+                let val = self.evaluate_expression(*expr, func_idx, parent_func_idx);
                 self.evaluate_as(val, *kind, *convert)
             }
             Expression::Math {
@@ -364,25 +678,13 @@ impl Evaluator {
                 arg1,
                 arg2,
                 arg3,
-            } => self.evaluate_math(
-                *fun,
-                *arg,
-                *arg1,
-                *arg2,
-                *arg3,
-                state_index,
-                parent_state_index,
-            ),
+            } => self.evaluate_math(*fun, *arg, *arg1, *arg2, *arg3, func_idx, parent_func_idx),
             Expression::Relational { fun, argument } => {
-                let val = self
-                    .evaluate_expression(*argument, state_index, parent_state_index)
-                    .leaf_value();
+                let val = self.evaluate_expression(*argument, func_idx, parent_func_idx).leaf_value();
                 self.evaluate_relational(*fun, val)
             }
             Expression::ArrayLength(expr) => {
-                let argument = self
-                    .evaluate_expression(*expr, state_index, parent_state_index)
-                    .leaf_value();
+                let argument = self.evaluate_expression(*expr, func_idx, parent_func_idx).leaf_value();
                 match argument {
                     Value::Array(elements) => Primitive::U32(elements.len() as u32).into(),
                     _ => panic!("ArrayLength applied to non-array value: {:?}", argument),
@@ -390,10 +692,16 @@ impl Evaluator {
             }
             Expression::GlobalVariable(handle) => self.evaluate_global_variable(*handle),
             Expression::Access { base, index } => {
-                self.evaluate_access(*base, *index, state_index, parent_state_index)
+                self.evaluate_access(*base, *index, func_idx, parent_func_idx)
             }
-            Expression::CallResult(_handle) => {
-                state.returns.clone().unwrap_or(Value::Uninitialized)
+            Expression::CallResult(_) => {
+                // The return value was stored in evaluated_expressions by apply_return,
+                // keyed by expression_handle (the Handle<Expression> for this CallResult).
+                frame
+                    .evaluated_expressions
+                    .get(&expression_handle)
+                    .cloned()
+                    .unwrap_or(Value::Uninitialized)
             }
             _ => Value::Uninitialized,
         }
@@ -414,36 +722,44 @@ impl Evaluator {
 
     fn evaluate_load(
         &self,
-        pointer: naga::Handle<Expression>,
-        state: &FunctionState,
-        state_index: usize,
-        parent_state_index: Option<usize>,
+        pointer: Handle<Expression>,
+        func_idx: usize,
+        parent_func_idx: Option<usize>,
     ) -> Value {
-        if let Some(value) = state.evaluated_expressions.get(&pointer).cloned() {
-            value
-        } else {
-            match self.evaluate_expression(pointer, state_index, parent_state_index) {
-                Value::Pointer(inner) => inner.borrow().clone(),
-                _ => Value::Uninitialized,
-            }
+        // Check expression cache first.
+        let cached = match &self.stack[func_idx] {
+            StackFrame::Function(frame) => frame.evaluated_expressions.get(&pointer).cloned(),
+            StackFrame::Block(_) => None,
+        };
+        if let Some(value) = cached {
+            return value;
+        }
+        match self.evaluate_expression(pointer, func_idx, parent_func_idx) {
+            Value::Pointer(inner) => inner.borrow().clone(),
+            // Access into a global storage array evaluates directly to a value
+            // (not a pointer) because global_values stores plain Value::Array.
+            // Return it as-is rather than falling through to Uninitialized.
+            Value::Uninitialized => Value::Uninitialized,
+            value => value,
         }
     }
 
     fn evaluate_access_index(
         &self,
-        base: naga::Handle<Expression>,
+        base: Handle<Expression>,
         index: u32,
-        state_index: usize,
-        parent_state_index: Option<usize>,
+        func_idx: usize,
+        parent_func_idx: Option<usize>,
     ) -> Value {
-        let value = self
-            .evaluate_expression(base, state_index, parent_state_index)
-            .leaf_value();
+        let value = self.evaluate_expression(base, func_idx, parent_func_idx).leaf_value();
         value.index_into(index as usize)
     }
 
-    fn evaluate_function_argument(&self, index: usize, state: &FunctionState) -> Value {
-        let function_argument = &state.function.arguments[index];
+    fn evaluate_function_argument(&self, index: usize, func_idx: usize) -> Value {
+        let StackFrame::Function(ref frame) = self.stack[func_idx] else {
+            return Value::Uninitialized;
+        };
+        let function_argument = &frame.function.arguments[index];
 
         if let Some(binding) = &function_argument.binding {
             match binding {
@@ -456,46 +772,49 @@ impl Evaluator {
                 naga::ir::Binding::Location { .. } => Value::Uninitialized,
             }
         } else {
-            state.evaluated_function_arguments[index].clone()
+            frame.evaluated_function_arguments[index].clone()
         }
     }
 
     fn evaluate_local_variable(
         &self,
-        handle: naga::Handle<LocalVariable>,
-        state: &FunctionState,
-        state_index: usize,
-        parent_state_index: Option<usize>,
+        handle: Handle<LocalVariable>,
+        func_idx: usize,
+        parent_func_idx: Option<usize>,
     ) -> Value {
-        if let Some(value) = state.local_variables.get(&handle).cloned() {
+        // Check if already initialized.
+        let (cached, init_expr) = match &self.stack[func_idx] {
+            StackFrame::Function(frame) => {
+                let cached = frame.local_variables.get(&handle).cloned();
+                let init = frame.function.local_variables[handle].init;
+                (cached, init)
+            }
+            StackFrame::Block(_) => return Value::Uninitialized,
+        };
+
+        if let Some(value) = cached {
             return value;
         }
 
-        let local_variable = &state.function.local_variables[handle];
-
         Value::Pointer(Rc::new(RefCell::new(self.evaluate_expression(
-            local_variable.init.unwrap(),
-            state_index,
-            parent_state_index,
+            init_expr.unwrap(),
+            func_idx,
+            parent_func_idx,
         ))))
     }
 
     fn evaluate_binary(
         &self,
         op: naga::BinaryOperator,
-        left: naga::Handle<Expression>,
-        right: naga::Handle<Expression>,
-        state_index: usize,
-        parent_state_index: Option<usize>,
+        left: Handle<Expression>,
+        right: Handle<Expression>,
+        func_idx: usize,
+        parent_func_idx: Option<usize>,
     ) -> Value {
         use naga::BinaryOperator::*;
 
-        let l = self
-            .evaluate_expression(left, state_index, parent_state_index)
-            .leaf_value();
-        let r = self
-            .evaluate_expression(right, state_index, parent_state_index)
-            .leaf_value();
+        let l = self.evaluate_expression(left, func_idx, parent_func_idx).leaf_value();
+        let r = self.evaluate_expression(right, func_idx, parent_func_idx).leaf_value();
 
         match op {
             // Arithmetic — Value trait impls handle all scalars, vectors, and scalar×vector
@@ -592,7 +911,7 @@ impl Evaluator {
         }
     }
 
-    fn evaluate_global_variable(&self, handle: naga::Handle<GlobalVariable>) -> Value {
+    fn evaluate_global_variable(&self, handle: Handle<GlobalVariable>) -> Value {
         self.global_values
             .get(&handle)
             .cloned()
@@ -601,17 +920,13 @@ impl Evaluator {
 
     fn evaluate_access(
         &self,
-        base: naga::Handle<Expression>,
-        index: naga::Handle<Expression>,
-        state_index: usize,
-        parent_state_index: Option<usize>,
+        base: Handle<Expression>,
+        index: Handle<Expression>,
+        func_idx: usize,
+        parent_func_idx: Option<usize>,
     ) -> Value {
-        let base_value = self
-            .evaluate_expression(base, state_index, parent_state_index)
-            .leaf_value();
-        let index_value = self
-            .evaluate_expression(index, state_index, parent_state_index)
-            .leaf_value();
+        let base_value = self.evaluate_expression(base, func_idx, parent_func_idx).leaf_value();
+        let index_value = self.evaluate_expression(index, func_idx, parent_func_idx).leaf_value();
 
         let index: usize = match index_value {
             Value::Primitive(Primitive::U32(i)) => i as usize,
@@ -623,7 +938,7 @@ impl Evaluator {
     }
 
     /// Evaluate an expression from the module's global_expressions arena (used for constants/overrides).
-    fn evaluate_global_expression(&self, expr_handle: naga::Handle<Expression>) -> Value {
+    fn evaluate_global_expression(&self, expr_handle: Handle<Expression>) -> Value {
         let expression = &self.module.global_expressions[expr_handle];
         match expression {
             Expression::Literal(literal) => self.evaluate_literal(literal),
@@ -679,8 +994,8 @@ impl Evaluator {
                 }
                 match (scalar.kind, scalar.width) {
                     (ScalarKind::Float, 4) => compose_vec!(Value::collect_f32_components),
-                    (ScalarKind::Sint,  4) => compose_vec!(Value::collect_i32_components),
-                    (ScalarKind::Uint,  4) => compose_vec!(Value::collect_u32_components),
+                    (ScalarKind::Sint, 4) => compose_vec!(Value::collect_i32_components),
+                    (ScalarKind::Uint, 4) => compose_vec!(Value::collect_u32_components),
                     _ => Value::Uninitialized,
                 }
             }
@@ -691,17 +1006,14 @@ impl Evaluator {
     fn evaluate_compose(
         &self,
         ty: naga::Handle<Type>,
-        components: &[naga::Handle<Expression>],
-        state_index: usize,
-        parent_state_index: Option<usize>,
+        components: &[Handle<Expression>],
+        func_idx: usize,
+        parent_func_idx: Option<usize>,
     ) -> Value {
         let ty_inner = &self.module.types[ty].inner;
         let vals: Vec<Value> = components
             .iter()
-            .map(|c| {
-                self.evaluate_expression(*c, state_index, parent_state_index)
-                    .leaf_value()
-            })
+            .map(|c| self.evaluate_expression(*c, func_idx, parent_func_idx).leaf_value())
             .collect();
         self.assemble_compose(ty_inner, &vals)
     }
@@ -743,27 +1055,23 @@ impl Evaluator {
     fn evaluate_splat(
         &self,
         size: VectorSize,
-        value: naga::Handle<Expression>,
-        state_index: usize,
-        parent_state_index: Option<usize>,
+        value: Handle<Expression>,
+        func_idx: usize,
+        parent_func_idx: Option<usize>,
     ) -> Value {
-        let val = self
-            .evaluate_expression(value, state_index, parent_state_index)
-            .leaf_value();
+        let val = self.evaluate_expression(value, func_idx, parent_func_idx).leaf_value();
         self.splat_value(size, val)
     }
 
     fn evaluate_swizzle(
         &self,
         size: VectorSize,
-        vector: naga::Handle<Expression>,
+        vector: Handle<Expression>,
         pattern: [SwizzleComponent; 4],
-        state_index: usize,
-        parent_state_index: Option<usize>,
+        func_idx: usize,
+        parent_func_idx: Option<usize>,
     ) -> Value {
-        let vec_val = self
-            .evaluate_expression(vector, state_index, parent_state_index)
-            .leaf_value();
+        let vec_val = self.evaluate_expression(vector, func_idx, parent_func_idx).leaf_value();
 
         let count = match size {
             VectorSize::Bi => 2,
@@ -811,15 +1119,13 @@ impl Evaluator {
 
     fn evaluate_select(
         &self,
-        condition: naga::Handle<Expression>,
-        accept: naga::Handle<Expression>,
-        reject: naga::Handle<Expression>,
-        state_index: usize,
-        parent_state_index: Option<usize>,
+        condition: Handle<Expression>,
+        accept: Handle<Expression>,
+        reject: Handle<Expression>,
+        func_idx: usize,
+        parent_func_idx: Option<usize>,
     ) -> Value {
-        let cond = self
-            .evaluate_expression(condition, state_index, parent_state_index)
-            .leaf_value();
+        let cond = self.evaluate_expression(condition, func_idx, parent_func_idx).leaf_value();
 
         let is_true = match cond {
             Value::Primitive(Primitive::U32(v)) => v != 0,
@@ -827,9 +1133,9 @@ impl Evaluator {
         };
 
         if is_true {
-            self.evaluate_expression(accept, state_index, parent_state_index)
+            self.evaluate_expression(accept, func_idx, parent_func_idx)
         } else {
-            self.evaluate_expression(reject, state_index, parent_state_index)
+            self.evaluate_expression(reject, func_idx, parent_func_idx)
         }
     }
 
@@ -871,17 +1177,20 @@ impl Evaluator {
                 (Bool, I32(v)) => U32(u32::from(*v != 0)).into(),
                 (Bool, F32(v)) => U32(u32::from(*v != 0.0)).into(),
                 // Scalar/Vector → F32xN (from i32 or u32 sources, or identity for f32)
-                (Float, _) => p.map_i32_to_f32(|v| v as f32)
+                (Float, _) => p
+                    .map_i32_to_f32(|v| v as f32)
                     .or_else(|| p.map_u32_to_f32(|v| v as f32))
                     .map(Value::from)
                     .unwrap_or(Value::Uninitialized),
                 // Scalar/Vector → I32xN (from f32 or u32 sources, or identity for i32)
-                (Sint, _) => p.map_f32_to_i32(|v| v as i32)
+                (Sint, _) => p
+                    .map_f32_to_i32(|v| v as i32)
                     .or_else(|| p.map_u32_to_i32(|v| v as i32))
                     .map(Value::from)
                     .unwrap_or(Value::Uninitialized),
                 // Scalar/Vector → U32xN (from f32 or i32 sources, or identity for u32)
-                (Uint, _) => p.map_f32_to_u32(|v| v as u32)
+                (Uint, _) => p
+                    .map_f32_to_u32(|v| v as u32)
                     .or_else(|| p.map_i32_to_u32(|v| v as u32))
                     .map(Value::from)
                     .unwrap_or(Value::Uninitialized),
@@ -916,15 +1225,18 @@ impl Evaluator {
                 (Sint, U32(v)) => I32(*v as i32).into(),
                 (Uint, F32(v)) => U32(v.to_bits()).into(),
                 (Uint, I32(v)) => U32(*v as u32).into(),
-                (Float, _) => p.map_i32_to_f32(|v| f32::from_bits(v as u32))
+                (Float, _) => p
+                    .map_i32_to_f32(|v| f32::from_bits(v as u32))
                     .or_else(|| p.map_u32_to_f32(f32::from_bits))
                     .map(Value::from)
                     .unwrap_or(Value::Uninitialized),
-                (Sint, _) => p.map_f32_to_i32(|v| v.to_bits() as i32)
+                (Sint, _) => p
+                    .map_f32_to_i32(|v| v.to_bits() as i32)
                     .or_else(|| p.map_u32_to_i32(|v| v as i32))
                     .map(Value::from)
                     .unwrap_or(Value::Uninitialized),
-                (Uint, _) => p.map_f32_to_u32(|v| v.to_bits())
+                (Uint, _) => p
+                    .map_f32_to_u32(|v| v.to_bits())
                     .or_else(|| p.map_i32_to_u32(|v| v as u32))
                     .map(Value::from)
                     .unwrap_or(Value::Uninitialized),
@@ -938,28 +1250,17 @@ impl Evaluator {
     fn evaluate_math(
         &self,
         fun: MathFunction,
-        arg: naga::Handle<Expression>,
-        arg1: Option<naga::Handle<Expression>>,
-        arg2: Option<naga::Handle<Expression>>,
-        arg3: Option<naga::Handle<Expression>>,
-        state_index: usize,
-        parent_state_index: Option<usize>,
+        arg: Handle<Expression>,
+        arg1: Option<Handle<Expression>>,
+        arg2: Option<Handle<Expression>>,
+        arg3: Option<Handle<Expression>>,
+        func_idx: usize,
+        parent_func_idx: Option<usize>,
     ) -> Value {
-        let a = self
-            .evaluate_expression(arg, state_index, parent_state_index)
-            .leaf_value();
-        let b = arg1.map(|h| {
-            self.evaluate_expression(h, state_index, parent_state_index)
-                .leaf_value()
-        });
-        let c = arg2.map(|h| {
-            self.evaluate_expression(h, state_index, parent_state_index)
-                .leaf_value()
-        });
-        let _d = arg3.map(|h| {
-            self.evaluate_expression(h, state_index, parent_state_index)
-                .leaf_value()
-        });
+        let a = self.evaluate_expression(arg, func_idx, parent_func_idx).leaf_value();
+        let b = arg1.map(|h| self.evaluate_expression(h, func_idx, parent_func_idx).leaf_value());
+        let c = arg2.map(|h| self.evaluate_expression(h, func_idx, parent_func_idx).leaf_value());
+        let _d = arg3.map(|h| self.evaluate_expression(h, func_idx, parent_func_idx).leaf_value());
 
         match fun {
             // --- Comparison ---
@@ -1023,13 +1324,13 @@ impl Evaluator {
                 let b_val = b.unwrap();
                 let exponent = b_val.as_primitive().and_then(|p| p.as_i32_slice()).unwrap();
 
-                let f: Vec<f32> = base
+                let floats: Vec<f32> = base
                     .iter()
                     .zip(exponent)
                     .map(|(base, exp)| base * i32::pow(2, *exp as u32) as f32)
                     .collect();
 
-                Value::Primitive(Primitive::from(f.as_slice()))
+                Value::Primitive(Primitive::from(floats.as_slice()))
             }
 
             // --- Exponent ---
@@ -1190,15 +1491,7 @@ impl Evaluator {
             },
             MathFunction::FaceForward => {
                 let dot_val = if let (Some(e2), Some(e3)) = (arg1, arg2) {
-                    self.evaluate_math(
-                        MathFunction::Dot,
-                        e2,
-                        Some(e3),
-                        None,
-                        None,
-                        state_index,
-                        parent_state_index,
-                    )
+                    self.evaluate_math(MathFunction::Dot, e2, Some(e3), None, None, func_idx, parent_func_idx)
                 } else {
                     Value::Uninitialized
                 };
@@ -1525,20 +1818,15 @@ impl Evaluator {
     }
 
     // --- Math helper methods ---
-    // These delegate to Value's generic component-wise operations.
 
-    /// Apply a unary f32 function to a scalar or vector.
     fn math_unary_f32(&self, val: Value, f: impl Fn(f32) -> f32) -> Value {
         val.map_f32(f)
     }
 
-    /// Apply a binary f32 function to scalars or vectors.
     fn math_binary_f32(&self, a: Value, b: Value, f: impl Fn(f32, f32) -> f32) -> Value {
         a.zip_map_f32(b, f)
     }
 
-    /// Apply a unary function that works on both float and int types.
-    /// F64 is handled as a special case since it's not in map_numeric.
     fn math_unary_float_or_int(
         &self,
         val: Value,
@@ -1553,8 +1841,6 @@ impl Evaluator {
         }
     }
 
-    /// Apply a binary function that works on both float and int types.
-    /// F64 is handled as a special case since it's not in zip_map_numeric.
     fn math_binary_float_or_int(
         &self,
         a: Value,
@@ -1572,19 +1858,15 @@ impl Evaluator {
         }
     }
 
-    /// Apply a unary integer function to i32 or u32 scalars/vectors.
     fn math_unary_int(
         &self,
         val: Value,
         fi32: impl Fn(i32) -> i32,
         fu32: impl Fn(u32) -> u32,
     ) -> Value {
-        // Use map_numeric with a no-op for f32 (will return Uninitialized for f32 inputs
-        // since int functions shouldn't be called on floats, but map_numeric handles all types)
         val.map_numeric(|_| 0.0, fi32, fu32)
     }
 
-    /// Clamp a value between min and max.
     fn math_clamp(&self, val: Value, min_val: Value, max_val: Value) -> Value {
         val.zip3_map_numeric(
             min_val,
