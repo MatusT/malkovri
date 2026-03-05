@@ -162,10 +162,96 @@ impl Evaluator {
         if let Some(binding) = &function_argument.binding {
             match binding {
                 naga::ir::Binding::BuiltIn(built_in) => match built_in {
+                    // vertex
+                    naga::ir::BuiltIn::BaseInstance => {
+                        Primitive::U32(self.entry_point_inputs.base_instance).into()
+                    }
+                    naga::ir::BuiltIn::BaseVertex => {
+                        Primitive::I32(self.entry_point_inputs.base_vertex).into()
+                    }
+                    naga::ir::BuiltIn::ClipDistance => Value::Array(
+                        self.entry_point_inputs
+                            .clip_distance
+                            .iter()
+                            .map(|&v| Primitive::F32(v).into())
+                            .collect(),
+                    ),
+                    naga::ir::BuiltIn::CullDistance => Value::Array(
+                        self.entry_point_inputs
+                            .cull_distance
+                            .iter()
+                            .map(|&v| Primitive::F32(v).into())
+                            .collect(),
+                    ),
+                    naga::ir::BuiltIn::InstanceIndex => {
+                        Primitive::U32(self.entry_point_inputs.instance_index).into()
+                    }
+                    naga::ir::BuiltIn::PointSize => {
+                        Primitive::F32(self.entry_point_inputs.point_size).into()
+                    }
+                    naga::ir::BuiltIn::VertexIndex => {
+                        Primitive::U32(self.entry_point_inputs.vertex_index).into()
+                    }
+                    naga::ir::BuiltIn::DrawID => {
+                        Primitive::U32(self.entry_point_inputs.draw_id).into()
+                    }
+                    // fragment
+                    naga::ir::BuiltIn::Position { .. } => {
+                        Primitive::F32x4(self.entry_point_inputs.position).into()
+                    }
+                    naga::ir::BuiltIn::ViewIndex => {
+                        Primitive::I32(self.entry_point_inputs.view_index).into()
+                    }
+                    naga::ir::BuiltIn::FragDepth => {
+                        Primitive::F32(self.entry_point_inputs.frag_depth).into()
+                    }
+                    naga::ir::BuiltIn::PointCoord => {
+                        Primitive::F32x2(self.entry_point_inputs.point_coord).into()
+                    }
+                    naga::ir::BuiltIn::FrontFacing => {
+                        Primitive::U32(self.entry_point_inputs.front_facing as u32).into()
+                    }
+                    naga::ir::BuiltIn::PrimitiveIndex => {
+                        Primitive::U32(self.entry_point_inputs.primitive_index).into()
+                    }
+                    naga::ir::BuiltIn::SampleIndex => {
+                        Primitive::U32(self.entry_point_inputs.sample_index).into()
+                    }
+                    naga::ir::BuiltIn::SampleMask => {
+                        Primitive::U32(self.entry_point_inputs.sample_mask).into()
+                    }
+                    // compute
                     naga::ir::BuiltIn::GlobalInvocationId => {
                         Primitive::U32x3(self.entry_point_inputs.global_invocation_id).into()
                     }
-                    _ => Value::Uninitialized,
+                    naga::ir::BuiltIn::LocalInvocationId => {
+                        Primitive::U32x3(self.entry_point_inputs.local_invocation_id).into()
+                    }
+                    naga::ir::BuiltIn::LocalInvocationIndex => {
+                        Primitive::U32(self.entry_point_inputs.local_invocation_index).into()
+                    }
+                    naga::ir::BuiltIn::WorkGroupId => {
+                        Primitive::U32x3(self.entry_point_inputs.workgroup_id).into()
+                    }
+                    naga::ir::BuiltIn::WorkGroupSize => {
+                        Primitive::U32x3(self.entry_point_inputs.workgroup_size).into()
+                    }
+                    naga::ir::BuiltIn::NumWorkGroups => {
+                        Primitive::U32x3(self.entry_point_inputs.num_workgroups).into()
+                    }
+                    // subgroup
+                    naga::ir::BuiltIn::NumSubgroups => {
+                        Primitive::U32(self.entry_point_inputs.num_subgroups).into()
+                    }
+                    naga::ir::BuiltIn::SubgroupId => {
+                        Primitive::U32(self.entry_point_inputs.subgroup_id).into()
+                    }
+                    naga::ir::BuiltIn::SubgroupSize => {
+                        Primitive::U32(self.entry_point_inputs.subgroup_size).into()
+                    }
+                    naga::ir::BuiltIn::SubgroupInvocationId => {
+                        Primitive::U32(self.entry_point_inputs.subgroup_invocation_id).into()
+                    }
                 },
                 naga::ir::Binding::Location { .. } => Value::Uninitialized,
             }

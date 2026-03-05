@@ -316,7 +316,10 @@ impl DebugAdapter {
         self.evaluator = Some(Evaluator::new(
             module,
             0,
-            EntryPointInputs { global_invocation_id },
+            EntryPointInputs {
+                global_invocation_id,
+                ..Default::default()
+            },
             bindings,
         ));
 
