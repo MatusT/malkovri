@@ -20,7 +20,6 @@ const ARGUMENTS_SCOPE_REF: u32 = 2;
 /// Main thread ID
 const MAIN_THREAD_ID: u64 = 1;
 
-
 #[derive(Debug)]
 pub enum ServerState {
     /// Expecting a header
@@ -115,7 +114,7 @@ fn parse_inline(
         _ => {
             return Err(DebugAdapterError::Parse(format!(
                 "Unknown type '{type_str}' for binding '{key}'"
-            )))
+            )));
         }
     })
 }
@@ -133,25 +132,31 @@ fn parse_file(
                 "f32" => Value::Array(
                     bytes
                         .chunks_exact(4)
-                        .map(|c| Primitive::F32(f32::from_le_bytes([c[0], c[1], c[2], c[3]])).into())
+                        .map(|c| {
+                            Primitive::F32(f32::from_le_bytes([c[0], c[1], c[2], c[3]])).into()
+                        })
                         .collect(),
                 ),
                 "i32" => Value::Array(
                     bytes
                         .chunks_exact(4)
-                        .map(|c| Primitive::I32(i32::from_le_bytes([c[0], c[1], c[2], c[3]])).into())
+                        .map(|c| {
+                            Primitive::I32(i32::from_le_bytes([c[0], c[1], c[2], c[3]])).into()
+                        })
                         .collect(),
                 ),
                 "u32" => Value::Array(
                     bytes
                         .chunks_exact(4)
-                        .map(|c| Primitive::U32(u32::from_le_bytes([c[0], c[1], c[2], c[3]])).into())
+                        .map(|c| {
+                            Primitive::U32(u32::from_le_bytes([c[0], c[1], c[2], c[3]])).into()
+                        })
                         .collect(),
                 ),
                 _ => {
                     return Err(DebugAdapterError::Parse(format!(
                         "Unknown type '{type_str}' for binding '{key}'"
-                    )))
+                    )));
                 }
             })
         }
@@ -160,7 +165,9 @@ fn parse_file(
             Ok(match type_str {
                 "f32" => {
                     let vals: Vec<f64> = ron::from_str(&content).map_err(|e| {
-                        DebugAdapterError::Parse(format!("RON parse error for binding '{key}': {e}"))
+                        DebugAdapterError::Parse(format!(
+                            "RON parse error for binding '{key}': {e}"
+                        ))
                     })?;
                     Value::Array(
                         vals.into_iter()
@@ -170,7 +177,9 @@ fn parse_file(
                 }
                 "i32" => {
                     let vals: Vec<i64> = ron::from_str(&content).map_err(|e| {
-                        DebugAdapterError::Parse(format!("RON parse error for binding '{key}': {e}"))
+                        DebugAdapterError::Parse(format!(
+                            "RON parse error for binding '{key}': {e}"
+                        ))
                     })?;
                     Value::Array(
                         vals.into_iter()
@@ -180,7 +189,9 @@ fn parse_file(
                 }
                 "u32" => {
                     let vals: Vec<u64> = ron::from_str(&content).map_err(|e| {
-                        DebugAdapterError::Parse(format!("RON parse error for binding '{key}': {e}"))
+                        DebugAdapterError::Parse(format!(
+                            "RON parse error for binding '{key}': {e}"
+                        ))
                     })?;
                     Value::Array(
                         vals.into_iter()
@@ -191,7 +202,7 @@ fn parse_file(
                 _ => {
                     return Err(DebugAdapterError::Parse(format!(
                         "Unknown type '{type_str}' for binding '{key}'"
-                    )))
+                    )));
                 }
             })
         }
@@ -282,9 +293,10 @@ impl DebugAdapter {
     }
 
     fn handle_launch(&mut self, req: &dapts::Request) -> Result<(), DebugAdapterError> {
-        let arguments = req.arguments.as_object().ok_or_else(|| {
-            DebugAdapterError::Parse("arguments is not an object".to_string())
-        })?;
+        let arguments = req
+            .arguments
+            .as_object()
+            .ok_or_else(|| DebugAdapterError::Parse("arguments is not an object".to_string()))?;
 
         let program_name = arguments
             .get("program")
@@ -296,13 +308,13 @@ impl DebugAdapter {
         self.program_path = Some(std::path::Path::new(&program_name).to_path_buf());
         self.program_name = Some(program_name);
 
-        self.program_source = fs::read_to_string(
-            self.program_path.as_ref().ok_or_else(|| {
-                DebugAdapterError::InvalidProgram("program_path not set".to_string())
-            })?,
-        )?;
+        self.program_source = fs::read_to_string(self.program_path.as_ref().ok_or_else(|| {
+            DebugAdapterError::InvalidProgram("program_path not set".to_string())
+        })?)?;
 
-        let module = Arc::new(malkovri_wgsl_debugger::wgsl_to_module(&self.program_source)?);
+        let module = Arc::new(malkovri_wgsl_debugger::wgsl_to_module(
+            &self.program_source,
+        )?);
 
         let global_invocation_id = parse_global_invocation_id(arguments);
         let program_dir = self
@@ -350,20 +362,17 @@ impl DebugAdapter {
             DebugAdapterError::InvalidProgram("evaluator not initialized".to_string())
         })?;
 
-        let current_fn = evaluator.current_function().ok_or_else(|| {
-            DebugAdapterError::InvalidProgram("no current function".to_string())
+        let current_fn = evaluator
+            .current_function()
+            .ok_or_else(|| DebugAdapterError::InvalidProgram("no current function".to_string()))?;
+
+        let (active_block, active_index) = evaluator
+            .current_active_block()
+            .ok_or_else(|| DebugAdapterError::InvalidProgram("stack is empty".to_string()))?;
+
+        let current_statement = active_block.get(active_index).ok_or_else(|| {
+            DebugAdapterError::InvalidProgram("invalid statement index".to_string())
         })?;
-
-        let (active_block, active_index) =
-            evaluator.current_active_block().ok_or_else(|| {
-                DebugAdapterError::InvalidProgram("stack is empty".to_string())
-            })?;
-
-        let current_statement = active_block
-            .get(active_index)
-            .ok_or_else(|| {
-                DebugAdapterError::InvalidProgram("invalid statement index".to_string())
-            })?;
 
         let spans = active_block
             .span_iter()
@@ -372,12 +381,7 @@ impl DebugAdapter {
 
         let relevant_span = spans[active_index].location(&self.program_source);
 
-        let total_span = naga::Span::total_span(
-            current_fn
-                .body
-                .span_iter()
-                .map(|(_, span)| *span),
-        );
+        let total_span = naga::Span::total_span(current_fn.body.span_iter().map(|(_, span)| *span));
 
         let (line, column) = if let Statement::Return { .. } = current_statement {
             let total_span_range = total_span.to_range().unwrap();
@@ -391,14 +395,10 @@ impl DebugAdapter {
         let path = self
             .program_path
             .as_ref()
-            .ok_or_else(|| {
-                DebugAdapterError::InvalidProgram("program_path not set".to_string())
-            })?
+            .ok_or_else(|| DebugAdapterError::InvalidProgram("program_path not set".to_string()))?
             .as_os_str()
             .to_str()
-            .ok_or_else(|| {
-                DebugAdapterError::InvalidProgram("invalid path encoding".to_string())
-            })?
+            .ok_or_else(|| DebugAdapterError::InvalidProgram("invalid path encoding".to_string()))?
             .to_string();
 
         self.send_response(
@@ -439,8 +439,8 @@ impl DebugAdapter {
         })?;
 
         let current_fn = evaluator.current_function().unwrap();
-        let named_variables_len = current_fn.local_variables.len()
-            + current_fn.named_expressions.len();
+        let named_variables_len =
+            current_fn.local_variables.len() + current_fn.named_expressions.len();
         let function_arguments_len = current_fn.arguments.len();
 
         let mut scopes = vec![dapts::Scope {
@@ -478,8 +478,7 @@ impl DebugAdapter {
     }
 
     fn handle_source(&mut self, req: &dapts::Request) -> Result<(), DebugAdapterError> {
-        let arguments =
-            serde_json::from_value::<dapts::SourceArguments>(req.arguments.clone())?;
+        let arguments = serde_json::from_value::<dapts::SourceArguments>(req.arguments.clone())?;
 
         let content = fs::read_to_string(
             arguments
@@ -504,12 +503,14 @@ impl DebugAdapter {
         let arguments =
             serde_json::from_value::<dapts::SetBreakpointsArguments>(req.arguments.clone())?;
 
-        let source_name = arguments.source.name.ok_or_else(|| {
-            DebugAdapterError::Parse("missing source name".to_string())
-        })?;
-        let program_name = self.program_name.clone().ok_or_else(|| {
-            DebugAdapterError::InvalidProgram("program_name not set".to_string())
-        })?;
+        let source_name = arguments
+            .source
+            .name
+            .ok_or_else(|| DebugAdapterError::Parse("missing source name".to_string()))?;
+        let program_name = self
+            .program_name
+            .clone()
+            .ok_or_else(|| DebugAdapterError::InvalidProgram("program_name not set".to_string()))?;
         let source_matches = source_name == program_name;
 
         self.breakpoints = arguments
@@ -595,7 +596,7 @@ impl DebugAdapter {
                 }
             }
         }
-        
+
         self.send_response(seq, &serde_json::json!({}))?;
 
         self.send_event(
@@ -615,8 +616,7 @@ impl DebugAdapter {
     }
 
     fn handle_variables(&mut self, req: &dapts::Request) -> Result<(), DebugAdapterError> {
-        let argument =
-            serde_json::from_value::<dapts::VariablesArguments>(req.arguments.clone())?;
+        let argument = serde_json::from_value::<dapts::VariablesArguments>(req.arguments.clone())?;
 
         let evaluator = self.evaluator.as_ref().ok_or_else(|| {
             DebugAdapterError::InvalidProgram("evaluator not initialized".to_string())
@@ -640,10 +640,7 @@ impl DebugAdapter {
                         evaluate_name: local_variable.name.clone(),
                         indexed_variables: None,
                         memory_reference: None,
-                        name: local_variable
-                            .name
-                            .clone()
-                            .unwrap_or("unnamed".to_string()),
+                        name: local_variable.name.clone().unwrap_or("unnamed".to_string()),
                         named_variables: None,
                         presentation_hint: None,
                         ty: None,
@@ -716,13 +713,11 @@ impl DebugAdapter {
                             if parts.len() == 2 {
                                 match parts[0] {
                                     "Content-Length" => {
-                                        content_length =
-                                            parts[1].trim().parse().map_err(|_| {
-                                                DebugAdapterError::Parse(
-                                                    "Content-Length is not a valid number"
-                                                        .to_string(),
-                                                )
-                                            })?;
+                                        content_length = parts[1].trim().parse().map_err(|_| {
+                                            DebugAdapterError::Parse(
+                                                "Content-Length is not a valid number".to_string(),
+                                            )
+                                        })?;
                                         buffer.clear();
                                         buffer.reserve(content_length);
                                         state = ServerState::Content;
@@ -745,10 +740,9 @@ impl DebugAdapter {
                             let mut content = vec![0; content_length];
                             self.reader.read_exact(content.as_mut_slice())?;
 
-                            let content =
-                                std::str::from_utf8(content.as_slice()).map_err(|e| {
-                                    DebugAdapterError::Parse(format!("Invalid UTF-8: {}", e))
-                                })?;
+                            let content = std::str::from_utf8(content.as_slice()).map_err(|e| {
+                                DebugAdapterError::Parse(format!("Invalid UTF-8: {}", e))
+                            })?;
                             let request: dapts::Request = serde_json::from_str(content)?;
 
                             return Ok(Some(request));
@@ -828,6 +822,3 @@ impl DebugAdapter {
         Ok(())
     }
 }
-
-
-
