@@ -595,22 +595,7 @@ impl DebugAdapter {
                 }
             }
         }
-
-        self.send_event(
-            "output",
-            &dapts::OutputEvent {
-                category: Some(dapts::OutputEventCategory::Console),
-                output: format!("Next statement: {:?}\n", next_statement),
-                group: None,
-                data: None,
-                variables_reference: None,
-                source: None,
-                line: None,
-                column: None,
-                location_reference: None,
-            },
-        )?;
-
+        
         self.send_response(seq, &serde_json::json!({}))?;
 
         self.send_event(

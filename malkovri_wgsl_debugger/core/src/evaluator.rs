@@ -107,6 +107,13 @@ impl Evaluator {
         Some(self.resolve_function(&frame.function_ref))
     }
 
+    /// Index of the topmost `Function` frame, used to look up expressions and variables.
+    pub(crate) fn current_function_frame_index(&self) -> Option<usize> {
+        self.stack
+            .iter()
+            .rposition(|sf| matches!(sf, StackFrame::Function(_)))
+    }
+
     /// Return a reference to the current function frame (the nearest `Function` variant on the
     /// stack), or `None` if the stack is empty.
     pub fn current_function_frame(&self) -> Option<&FunctionFrame> {
@@ -123,13 +130,6 @@ impl Evaluator {
     pub fn current_active_block(&self) -> Option<(&naga::Block, usize)> {
         let top = self.stack.last()?;
         Some((top.statements(), top.current_statement_index()))
-    }
-
-    /// Index of the topmost `Function` frame, used to look up expressions and variables.
-    pub(crate) fn current_function_frame_index(&self) -> Option<usize> {
-        self.stack
-            .iter()
-            .rposition(|sf| matches!(sf, StackFrame::Function(_)))
     }
 
     /// Index of the `Function` frame below `function_index` — the caller's frame, used for `CallResult`.
@@ -156,11 +156,10 @@ impl Evaluator {
             .map(|(handle, name)| (name.clone(), self.evaluate_expression(*handle)))
             .collect()
     }
+}
 
-    // -------------------------------------------------------------------------
-    // Core execution loop
-    // -------------------------------------------------------------------------
-
+// Core execution loop
+impl Evaluator {
     /// Advance past any pending control-flow signals and exhausted frames until
     /// a live statement is ready to execute (or the stack is empty).
     fn advance_to_live_statement(&mut self) -> bool {
@@ -230,49 +229,56 @@ impl Evaluator {
             return None;
         }
 
-        let top = self.stack.len() - 1;
-        let stmt_idx = self.stack[top].current_statement_index();
-        let function_index = self.current_function_frame_index().unwrap();
+        let caller_frame_index = self.stack.len() - 1;
 
-        let stmt = self.stack[top].statements()[stmt_idx].clone();
-        self.handle_statement(stmt, function_index);
-        self.stack[top].increment_statement_index();
+        {
+            let current_function_index = self.current_function_frame_index()?;
+            let current_statement_index = self.stack.last()?.current_statement_index();
+            let current_statement =
+                self.stack.last()?.statements()[current_statement_index].clone();
+
+            self.handle_statement(current_statement, current_function_index);
+        }
+
+        self.stack[caller_frame_index].increment_statement_index();
 
         // Resolve any signals/exhaustion produced by the statement we just ran,
         // then return whatever is live next (or None if execution finished).
         self.advance_to_live_statement();
+
         self.peek_next_statement()
     }
 
     fn peek_next_statement(&self) -> Option<NextStatement> {
-        let function_index = self.current_function_frame_index()?;
-        let StackFrame::Function(ref frame) = self.stack[function_index] else {
-            return None;
-        };
-        let top = self.stack.len() - 1;
-        let stmt_idx = self.stack[top].current_statement_index();
-        let stmt = self.stack[top].statements().get(stmt_idx)?.clone();
+        let frame = self.current_function_frame()?;
+
+        let current_statement_index = self.stack.last()?.current_statement_index();
+        let current_statement = self
+            .stack
+            .last()?
+            .statements()
+            .get(current_statement_index)?
+            .clone();
+
         Some(NextStatement {
             function_ref: frame.function_ref.clone(),
-            statement: stmt,
-            statement_index: stmt_idx,
+            statement: current_statement,
+            statement_index: current_statement_index,
         })
     }
+}
 
-    // -------------------------------------------------------------------------
-    // Control-flow signal handlers
-    // -------------------------------------------------------------------------
-
+// Control-flow signal handlers
+impl Evaluator {
     /// Pop block frames above `function_index` until (and including) the nearest `Loop` or `Switch` frame.
     fn apply_break(&mut self, function_index: usize) {
         while self.stack.len() > function_index + 1 {
-            let top = self.stack.len() - 1;
             let is_target = matches!(
-                &self.stack[top],
-                StackFrame::Block(BlockFrame {
+                self.stack.last(),
+                Some(StackFrame::Block(BlockFrame {
                     kind: BlockKind::Loop { .. } | BlockKind::Switch,
                     ..
-                })
+                }))
             );
             self.stack.pop();
             if is_target {
@@ -285,13 +291,12 @@ impl Evaluator {
     /// it to its `continuing` block.
     fn apply_continue(&mut self, function_index: usize) {
         while self.stack.len() > function_index + 1 {
-            let top = self.stack.len() - 1;
             if matches!(
-                &self.stack[top],
-                StackFrame::Block(BlockFrame {
+                self.stack.last(),
+                Some(StackFrame::Block(BlockFrame {
                     kind: BlockKind::Loop { .. },
                     ..
-                })
+                }))
             ) {
                 break;
             }
@@ -328,11 +333,10 @@ impl Evaluator {
         }
         self.stack.truncate(function_index);
     }
+}
 
-    // -------------------------------------------------------------------------
-    // Exhausted-frame handler
-    // -------------------------------------------------------------------------
-
+// Exhausted-frame handler
+impl Evaluator {
     fn handle_exhausted_frame(&mut self, top: usize) {
         match &self.stack[top] {
             StackFrame::Function(_) => {
@@ -370,11 +374,10 @@ impl Evaluator {
             },
         }
     }
+}
 
-    // -------------------------------------------------------------------------
-    // Statement dispatch
-    // -------------------------------------------------------------------------
-
+// Statement dispatch
+impl Evaluator {
     fn handle_statement(&mut self, statement: Statement, function_index: usize) {
         match statement {
             Statement::Emit(_) => {
