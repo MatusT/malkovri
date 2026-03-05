@@ -579,7 +579,7 @@ impl DebugAdapter {
         })?;
 
         let mut next_statement: Option<NextStatement> = None;
-        while let Some(statement) = evaluator.next_statement() {
+        while let Some(statement) = evaluator.step() {
             match statement {
                 NextStatement {
                     statement: Statement::Emit(_),

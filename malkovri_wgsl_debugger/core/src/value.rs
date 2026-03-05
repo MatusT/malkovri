@@ -18,6 +18,17 @@ pub enum Value {
 // ── Core accessors ─────────────────────────────────────────────────────────────
 
 impl Value {
+    /// Check if this value represents a truthy boolean.
+    /// WGSL booleans are typically lowered to U32 (0 or 1), but this also
+    /// handles I32 for robustness.
+    pub fn is_truthy(&self) -> bool {
+        match self {
+            Value::Primitive(Primitive::U32(v)) => *v != 0,
+            Value::Primitive(Primitive::I32(v)) => *v != 0,
+            _ => false,
+        }
+    }
+
     pub fn leaf_value(&self) -> Value {
         match self {
             Value::Pointer(inner) => inner.borrow().leaf_value(),

@@ -5,7 +5,7 @@ use naga::{Expression, Function, Handle, LocalVariable};
 use crate::value::Value;
 
 /// Control-flow signal set on a [`FunctionFrame`] by `break`, `continue`, or `return`.
-/// [`Evaluator::next_statement`] reads these signals and performs the appropriate stack
+/// [`Evaluator::step`] reads these signals and performs the appropriate stack
 /// manipulation before continuing execution.
 #[derive(Clone, Debug, Default)]
 pub enum ControlFlow {
@@ -64,6 +64,36 @@ pub struct BlockFrame {
     pub kind: BlockKind,
 }
 
+impl BlockFrame {
+    /// Switch this loop frame to its continuing block. No-op if not a Loop.
+    pub fn switch_to_continuing(&mut self) {
+        if let BlockKind::Loop {
+            ref continuing,
+            ref mut in_continuing,
+            ..
+        } = self.kind
+        {
+            self.statements = continuing.clone();
+            self.current_statement_index = 0;
+            *in_continuing = true;
+        }
+    }
+
+    /// Restart the loop body from the beginning. No-op if not a Loop.
+    pub fn restart_body(&mut self) {
+        if let BlockKind::Loop {
+            ref body,
+            ref mut in_continuing,
+            ..
+        } = self.kind
+        {
+            self.statements = body.clone();
+            self.current_statement_index = 0;
+            *in_continuing = false;
+        }
+    }
+}
+
 /// A single entry on the evaluator's unified execution stack.
 /// Function calls push a [`StackFrame::Function`]; entering any nested block
 /// (`if`, `loop`, `switch`, bare block) pushes a [`StackFrame::Block`].
@@ -105,6 +135,8 @@ impl StackFrame {
 }
 
 /// The statement that will be executed next, along with its context.
+// TODO: Consider storing only the function name or Handle<Function> instead of
+// cloning the entire Function to reduce allocation on every step.
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct NextStatement {

@@ -1,4 +1,8 @@
 mod error;
+mod eval_binary;
+mod eval_cast;
+mod eval_expressions;
+mod eval_math;
 mod evaluator;
 mod function_state;
 mod primitive;
