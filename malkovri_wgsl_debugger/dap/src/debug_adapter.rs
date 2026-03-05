@@ -8,6 +8,7 @@ use std::{
 use dapts::Breakpoint;
 use naga::{ResourceBinding, Statement};
 use serde::Serialize;
+use std::sync::Arc;
 
 use crate::error::DebugAdapterError;
 use malkovri_wgsl_debugger::{EntryPointInputs, Evaluator, NextStatement, Primitive, Value};
@@ -301,7 +302,7 @@ impl DebugAdapter {
             })?,
         )?;
 
-        let module = malkovri_wgsl_debugger::wgsl_to_module(&self.program_source)?;
+        let module = Arc::new(malkovri_wgsl_debugger::wgsl_to_module(&self.program_source)?);
 
         let global_invocation_id = parse_global_invocation_id(arguments);
         let program_dir = self
@@ -313,7 +314,7 @@ impl DebugAdapter {
         let bindings = parse_bindings(arguments, &program_dir)?;
 
         self.evaluator = Some(Evaluator::new(
-            &module,
+            module,
             0,
             EntryPointInputs { global_invocation_id },
             bindings,
@@ -342,11 +343,13 @@ impl DebugAdapter {
     }
 
     fn handle_stack_trace(&mut self, seq: i64) -> Result<(), DebugAdapterError> {
-        let evaluator = self.evaluator.as_mut().ok_or_else(|| {
+        let evaluator = self.evaluator.as_ref().ok_or_else(|| {
             DebugAdapterError::InvalidProgram("evaluator not initialized".to_string())
         })?;
 
-        let current_state = evaluator.current_function_frame().unwrap();
+        let current_fn = evaluator.current_function().ok_or_else(|| {
+            DebugAdapterError::InvalidProgram("no current function".to_string())
+        })?;
 
         let (active_block, active_index) =
             evaluator.current_active_block().ok_or_else(|| {
@@ -355,7 +358,6 @@ impl DebugAdapter {
 
         let current_statement = active_block
             .get(active_index)
-            .cloned()
             .ok_or_else(|| {
                 DebugAdapterError::InvalidProgram("invalid statement index".to_string())
             })?;
@@ -368,8 +370,7 @@ impl DebugAdapter {
         let relevant_span = spans[active_index].location(&self.program_source);
 
         let total_span = naga::Span::total_span(
-            current_state
-                .function
+            current_fn
                 .body
                 .span_iter()
                 .map(|(_, span)| *span),
@@ -430,14 +431,14 @@ impl DebugAdapter {
     }
 
     fn handle_scopes(&mut self, seq: i64) -> Result<(), DebugAdapterError> {
-        let evaluator = self.evaluator.as_mut().ok_or_else(|| {
+        let evaluator = self.evaluator.as_ref().ok_or_else(|| {
             DebugAdapterError::InvalidProgram("evaluator not initialized".to_string())
         })?;
 
-        let current_state = evaluator.current_function_frame().unwrap();
-        let named_variables_len = current_state.function.local_variables.len()
-            + current_state.function.named_expressions.len();
-        let function_arguments_len = current_state.function.arguments.len();
+        let current_fn = evaluator.current_function().unwrap();
+        let named_variables_len = current_fn.local_variables.len()
+            + current_fn.named_expressions.len();
+        let function_arguments_len = current_fn.arguments.len();
 
         let mut scopes = vec![dapts::Scope {
             name: "Locals".to_string(),
@@ -586,7 +587,7 @@ impl DebugAdapter {
                     ..
                 } => continue,
                 _ => {
-                    next_statement = Some(statement.clone());
+                    next_statement = Some(statement);
                     break;
                 }
             }
@@ -629,16 +630,16 @@ impl DebugAdapter {
         let argument =
             serde_json::from_value::<dapts::VariablesArguments>(req.arguments.clone())?;
 
-        let evaluator = self.evaluator.as_mut().ok_or_else(|| {
+        let evaluator = self.evaluator.as_ref().ok_or_else(|| {
             DebugAdapterError::InvalidProgram("evaluator not initialized".to_string())
         })?;
 
+        let current_fn = evaluator.current_function().unwrap();
         let current_state = evaluator.current_function_frame().unwrap();
 
         if argument.variables_reference == LOCALS_SCOPE_REF {
             // var declarations
-            let mut variables: Vec<dapts::Variable> = current_state
-                .function
+            let mut variables: Vec<dapts::Variable> = current_fn
                 .local_variables
                 .iter()
                 .map(|(local_variable_handle, local_variable)| {
@@ -685,8 +686,7 @@ impl DebugAdapter {
 
             self.send_response(req.seq, &dapts::VariablesResponse { variables })?;
         } else if argument.variables_reference == ARGUMENTS_SCOPE_REF {
-            let variables: Vec<dapts::Variable> = current_state
-                .function
+            let variables: Vec<dapts::Variable> = current_fn
                 .arguments
                 .iter()
                 .zip(current_state.evaluated_function_arguments.iter())

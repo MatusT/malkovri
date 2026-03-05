@@ -11,13 +11,12 @@ pub(crate) fn evaluate_as(
     use naga::ScalarKind::*;
 
     let val = val.leaf_value();
-    let p = match val {
-        Value::Primitive(ref p) => p.clone(),
-        _ => return Value::Uninitialized,
+    let Value::Primitive(ref p) = val else {
+        return Value::Uninitialized;
     };
 
     match convert {
-        Some(4) => match (kind, &p) {
+        Some(4) => match (kind, p) {
             // Scalar → F32
             (Float, F32(v)) => F32(*v).into(),
             (Float, F64(v)) => F32(*v as f32).into(),
@@ -58,28 +57,28 @@ pub(crate) fn evaluate_as(
             _ => Value::Uninitialized,
         },
         Some(8) => match (kind, p) {
-            (Float, F32(v)) => F64(v as f64).into(),
-            (Float, F64(v)) => F64(v).into(),
-            (Float, I32(v)) => F64(v as f64).into(),
-            (Float, U32(v)) => F64(v as f64).into(),
-            (Float, I64(v)) => F64(v as f64).into(),
-            (Float, U64(v)) => F64(v as f64).into(),
-            (Sint, I32(v)) => I64(v as i64).into(),
-            (Sint, U32(v)) => I64(v as i64).into(),
-            (Sint, I64(v)) => I64(v).into(),
-            (Sint, U64(v)) => I64(v as i64).into(),
-            (Sint, F32(v)) => I64(v as i64).into(),
-            (Sint, F64(v)) => I64(v as i64).into(),
-            (Uint, I32(v)) => U64(v as u64).into(),
-            (Uint, U32(v)) => U64(v as u64).into(),
-            (Uint, I64(v)) => U64(v as u64).into(),
-            (Uint, U64(v)) => U64(v).into(),
-            (Uint, F32(v)) => U64(v as u64).into(),
-            (Uint, F64(v)) => U64(v as u64).into(),
+            (Float, F32(v)) => F64(*v as f64).into(),
+            (Float, F64(v)) => F64(*v).into(),
+            (Float, I32(v)) => F64(*v as f64).into(),
+            (Float, U32(v)) => F64(*v as f64).into(),
+            (Float, I64(v)) => F64(*v as f64).into(),
+            (Float, U64(v)) => F64(*v as f64).into(),
+            (Sint, I32(v)) => I64(*v as i64).into(),
+            (Sint, U32(v)) => I64(*v as i64).into(),
+            (Sint, I64(v)) => I64(*v).into(),
+            (Sint, U64(v)) => I64(*v as i64).into(),
+            (Sint, F32(v)) => I64(*v as i64).into(),
+            (Sint, F64(v)) => I64(*v as i64).into(),
+            (Uint, I32(v)) => U64(*v as u64).into(),
+            (Uint, U32(v)) => U64(*v as u64).into(),
+            (Uint, I64(v)) => U64(*v as u64).into(),
+            (Uint, U64(v)) => U64(*v).into(),
+            (Uint, F32(v)) => U64(*v as u64).into(),
+            (Uint, F64(v)) => U64(*v as u64).into(),
             _ => Value::Uninitialized,
         },
         // Bitcast — reinterpret bits (scalars handled explicitly, vectors via cross-type maps)
-        None => match (kind, &p) {
+        None => match (kind, p) {
             (Float, I32(v)) => F32(f32::from_bits(*v as u32)).into(),
             (Float, U32(v)) => F32(f32::from_bits(*v)).into(),
             (Sint, F32(v)) => I32(v.to_bits() as i32).into(),

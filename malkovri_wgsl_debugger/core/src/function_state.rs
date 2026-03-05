@@ -16,17 +16,27 @@ pub enum ControlFlow {
     Return(Option<Value>),
 }
 
+/// Identifies a function in the module without owning/cloning it.
+#[derive(Clone, Debug)]
+pub enum FunctionRef {
+    /// An entry-point function, looked up via `module.entry_points[index].function`.
+    EntryPoint(usize),
+    /// A regular function, looked up via `module.functions[handle]`.
+    Called(Handle<Function>),
+}
+
 /// The kind of block a [`BlockFrame`] represents, carrying the information needed to
 /// implement its control-flow semantics.
 #[derive(Clone, Debug)]
 pub enum BlockKind {
     /// Plain block: the body of an `if`/`else`, or a bare `Statement::Block`.
     Plain,
-    /// A loop body with its associated `continuing` block.
-    /// `body` is stored separately so the loop can restart after continuing finishes.
+    /// A loop with body and continuing phases.
+    /// `other_block` holds whichever block is *not* currently executing:
+    /// while running the body it holds `continuing`, and vice versa.
+    /// Switching phases is done via `std::mem::swap` — no cloning needed.
     Loop {
-        body: naga::Block,
-        continuing: naga::Block,
+        other_block: naga::Block,
         break_if: Option<Handle<Expression>>,
         /// `true` once we have finished the body and are executing the continuing block.
         in_continuing: bool,
@@ -38,8 +48,8 @@ pub enum BlockKind {
 /// A function call frame on the unified execution stack.
 #[derive(Clone, Debug)]
 pub struct FunctionFrame {
-    pub function: Function,
-    pub function_handle: Option<Handle<Function>>,
+    /// Reference to the function in the module (no owned clone).
+    pub function_ref: FunctionRef,
     pub local_variables: HashMap<Handle<LocalVariable>, Value>,
     pub evaluated_expressions: HashMap<Handle<Expression>, Value>,
     pub evaluated_function_arguments: Vec<Value>,
@@ -68,12 +78,12 @@ impl BlockFrame {
     /// Switch this loop frame to its continuing block. No-op if not a Loop.
     pub fn switch_to_continuing(&mut self) {
         if let BlockKind::Loop {
-            ref continuing,
+            ref mut other_block,
             ref mut in_continuing,
             ..
         } = self.kind
         {
-            self.statements = continuing.clone();
+            std::mem::swap(&mut self.statements, other_block);
             self.current_statement_index = 0;
             *in_continuing = true;
         }
@@ -82,12 +92,12 @@ impl BlockFrame {
     /// Restart the loop body from the beginning. No-op if not a Loop.
     pub fn restart_body(&mut self) {
         if let BlockKind::Loop {
-            ref body,
+            ref mut other_block,
             ref mut in_continuing,
             ..
         } = self.kind
         {
-            self.statements = body.clone();
+            std::mem::swap(&mut self.statements, other_block);
             self.current_statement_index = 0;
             *in_continuing = false;
         }
@@ -135,12 +145,9 @@ impl StackFrame {
 }
 
 /// The statement that will be executed next, along with its context.
-// TODO: Consider storing only the function name or Handle<Function> instead of
-// cloning the entire Function to reduce allocation on every step.
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct NextStatement {
-    pub function: Function,
+    pub function_ref: FunctionRef,
     pub statement: naga::Statement,
     pub statement_index: usize,
 }

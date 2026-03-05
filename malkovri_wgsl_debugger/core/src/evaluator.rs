@@ -1,12 +1,12 @@
 use crate::{
     function_state::{
-        BlockFrame, BlockKind, ControlFlow, FunctionFrame, NextStatement, StackFrame,
+        BlockFrame, BlockKind, ControlFlow, FunctionFrame, FunctionRef, NextStatement, StackFrame,
     },
     primitive::Primitive,
     value::Value,
 };
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 
 use naga::{Expression, GlobalVariable, Handle, LocalVariable, Module, Statement};
 
@@ -16,9 +16,7 @@ pub struct EntryPointInputs {
 }
 
 pub struct Evaluator {
-    pub(crate) module: Module,
-    #[allow(dead_code)]
-    pub(crate) entry_point: naga::ir::EntryPoint,
+    pub(crate) module: Arc<Module>,
     pub(crate) entry_point_inputs: EntryPointInputs,
     pub(crate) global_values: HashMap<naga::Handle<GlobalVariable>, Value>,
     pub(crate) stack: Vec<StackFrame>,
@@ -26,18 +24,14 @@ pub struct Evaluator {
 
 impl Evaluator {
     pub fn new(
-        module: &Module,
+        module: Arc<Module>,
         entry_point_index: usize,
         entry_point_inputs: EntryPointInputs,
         global_values: HashMap<naga::ResourceBinding, Value>,
     ) -> Self {
-        let entry_fn = module.entry_points[entry_point_index].function.clone();
-        let statements = entry_fn.body.clone();
+        let statements = module.entry_points[entry_point_index].function.body.clone();
 
         let mut evaluator = Evaluator {
-            module: module.clone(),
-            entry_point: module.entry_points[entry_point_index].clone(),
-            entry_point_inputs,
             global_values: global_values
                 .iter()
                 .map(|(k, v)| {
@@ -50,9 +44,10 @@ impl Evaluator {
                     )
                 })
                 .collect(),
+            module,
+            entry_point_inputs,
             stack: vec![StackFrame::Function(Box::new(FunctionFrame {
-                function: entry_fn,
-                function_handle: None,
+                function_ref: FunctionRef::EntryPoint(entry_point_index),
                 local_variables: HashMap::new(),
                 evaluated_expressions: HashMap::new(),
                 evaluated_function_arguments: Vec::new(),
@@ -64,6 +59,20 @@ impl Evaluator {
         };
         evaluator.initialize_local_variables();
         evaluator
+    }
+
+    /// Resolve a [`FunctionRef`] to the actual `naga::Function` in the module.
+    pub fn resolve_function(&self, fref: &FunctionRef) -> &naga::Function {
+        match fref {
+            FunctionRef::EntryPoint(idx) => &self.module.entry_points[*idx].function,
+            FunctionRef::Called(handle) => &self.module.functions[*handle],
+        }
+    }
+
+    /// Return a reference to the `naga::Function` for the current call frame.
+    pub fn current_function(&self) -> Option<&naga::Function> {
+        let frame = self.current_function_frame()?;
+        Some(self.resolve_function(&frame.function_ref))
     }
 
     /// Return a reference to the current function frame (the nearest `Function` variant on the
@@ -108,8 +117,8 @@ impl Evaluator {
         let StackFrame::Function(ref frame) = self.stack[func_idx] else {
             return vec![];
         };
-        frame
-            .function
+        let function = self.resolve_function(&frame.function_ref);
+        function
             .named_expressions
             .iter()
             .map(|(handle, name)| (name.clone(), self.evaluate_expression(*handle)))
@@ -191,9 +200,9 @@ impl Evaluator {
 
         let top = self.stack.len() - 1;
         let stmt_idx = self.stack[top].current_statement_index();
-        let stmt = self.stack[top].statements()[stmt_idx].clone();
         let function_index = self.current_function_frame_index().unwrap();
 
+        let stmt = self.stack[top].statements()[stmt_idx].clone();
         self.handle_statement(stmt, function_index);
         self.stack[top].increment_statement_index();
 
@@ -212,7 +221,7 @@ impl Evaluator {
         let stmt_idx = self.stack[top].current_statement_index();
         let stmt = self.stack[top].statements().get(stmt_idx)?.clone();
         Some(NextStatement {
-            function: frame.function.clone(),
+            function_ref: frame.function_ref.clone(),
             statement: stmt,
             statement_index: stmt_idx,
         })
@@ -375,11 +384,10 @@ impl Evaluator {
                 break_if,
             } => {
                 self.stack.push(StackFrame::Block(BlockFrame {
-                    statements: body.clone(),
+                    statements: body,
                     current_statement_index: 0,
                     kind: BlockKind::Loop {
-                        body,
-                        continuing,
+                        other_block: continuing,
                         break_if,
                         in_continuing: false,
                     },
@@ -423,13 +431,11 @@ impl Evaluator {
             .map(|&arg| self.evaluate_expression(arg))
             .collect();
 
-        let callee = self.module.functions[function_handle].clone();
-        let statements = callee.body.clone();
+        let statements = self.module.functions[function_handle].body.clone();
 
         self.stack
             .push(StackFrame::Function(Box::new(FunctionFrame {
-                function: callee,
-                function_handle: Some(function_handle),
+                function_ref: FunctionRef::Called(function_handle),
                 local_variables: HashMap::new(),
                 evaluated_expressions: HashMap::new(),
                 evaluated_function_arguments,
@@ -450,10 +456,11 @@ impl Evaluator {
 
         let mut insert_variables: Vec<(Handle<LocalVariable>, Value)> = Vec::new();
 
-        let local_vars: Vec<_> = match &self.stack[func_idx] {
-            StackFrame::Function(frame) => frame.function.local_variables.iter().collect(),
-            StackFrame::Block(_) => return,
+        let StackFrame::Function(ref frame) = self.stack[func_idx] else {
+            return;
         };
+        let function = self.resolve_function(&frame.function_ref);
+        let local_vars: Vec<_> = function.local_variables.iter().collect();
 
         for (handle, local_var) in local_vars {
             let value = match &local_var.init {
@@ -471,20 +478,6 @@ impl Evaluator {
                 frame
                     .local_variables
                     .insert(handle, Value::Pointer(Rc::new(RefCell::new(value))));
-            }
-        }
-    }
-
-    fn handle_store(&mut self, pointer: Handle<Expression>, value: Handle<Expression>) {
-        let evaluated_value = self.evaluate_expression(value);
-        let evaluated_pointer = self.evaluate_expression(pointer);
-
-        match evaluated_pointer {
-            Value::Pointer(inner) => {
-                *inner.borrow_mut() = evaluated_value;
-            }
-            _ => {
-                eprintln!("Store to non-pointer value: {:?}", evaluated_pointer);
             }
         }
     }
@@ -543,6 +536,20 @@ impl Evaluator {
                 current_statement_index: 0,
                 kind: BlockKind::Switch,
             }));
+        }
+    }
+
+    fn handle_store(&mut self, pointer: Handle<Expression>, value: Handle<Expression>) {
+        let evaluated_value = self.evaluate_expression(value);
+        let evaluated_pointer = self.evaluate_expression(pointer);
+
+        match evaluated_pointer {
+            Value::Pointer(inner) => {
+                *inner.borrow_mut() = evaluated_value;
+            }
+            _ => {
+                eprintln!("Store to non-pointer value: {:?}", evaluated_pointer);
+            }
         }
     }
 }

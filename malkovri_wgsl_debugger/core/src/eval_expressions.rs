@@ -27,7 +27,8 @@ impl Evaluator {
         let StackFrame::Function(ref frame) = self.stack[func_idx] else {
             return Value::Uninitialized;
         };
-        let expression = &frame.function.expressions[expression_handle];
+        let function = self.resolve_function(&frame.function_ref);
+        let expression = &function.expressions[expression_handle];
 
         match expression {
             Expression::Literal(literal) => self.evaluate_literal(literal),
@@ -155,7 +156,8 @@ impl Evaluator {
         let StackFrame::Function(ref frame) = self.stack[func_idx] else {
             return Value::Uninitialized;
         };
-        let function_argument = &frame.function.arguments[index];
+        let function = self.resolve_function(&frame.function_ref);
+        let function_argument = &function.arguments[index];
 
         if let Some(binding) = &function_argument.binding {
             match binding {
@@ -177,7 +179,8 @@ impl Evaluator {
         let (cached, init_expr) = match &self.stack[func_idx] {
             StackFrame::Function(frame) => {
                 let cached = frame.local_variables.get(&handle).cloned();
-                let init = frame.function.local_variables[handle].init;
+                let function = self.resolve_function(&frame.function_ref);
+                let init = function.local_variables[handle].init;
                 (cached, init)
             }
             StackFrame::Block(_) => return Value::Uninitialized,
