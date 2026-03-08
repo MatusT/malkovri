@@ -104,7 +104,7 @@ fn control_flow_session_matches_vscode_request_flow() {
 
     let launch = s.send("launch", json!({
         "program": shader,
-        "global_invocation_id": [5, 0, 0],
+        "shaderInputs": { "global_invocation_id": [5, 0, 0] },
     }));
     assert!(find_response(&launch, s.last_seq()).is_none());
     assert_eq!(event_body(&launch, "stopped")["reason"], "entry");
@@ -168,7 +168,7 @@ fn expression_shader_variables_include_binding_backed_values() {
     s.send("initialize", json!({}));
     s.send("launch", json!({
         "program": shader,
-        "global_invocation_id": [2, 0, 0],
+        "shaderInputs": { "global_invocation_id": [2, 0, 0] },
         "bindings": {
             "0:0": { "type": "f32", "inline": [1.0, 2.0, 3.0, 4.0] },
             "0:1": { "type": "u32", "inline": [0, 0, 0, 0] },

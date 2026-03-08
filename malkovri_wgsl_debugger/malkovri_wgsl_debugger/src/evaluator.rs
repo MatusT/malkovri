@@ -10,7 +10,8 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 
 use naga::{Expression, GlobalVariable, Handle, LocalVariable, Module, Statement};
 
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, serde::Deserialize)]
+#[serde(default)]
 pub struct EntryPointInputs {
     // vertex
     pub base_instance: u32,

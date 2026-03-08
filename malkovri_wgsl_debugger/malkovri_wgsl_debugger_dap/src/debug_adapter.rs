@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use crate::error::DebugAdapterError;
 use crate::parse_input;
-use malkovri_wgsl_debugger::{EntryPointInputs, Evaluator, NextStatement, Value};
+use malkovri_wgsl_debugger::{Evaluator, NextStatement, Value};
 
 const LOCALS_SCOPE_REF: u32 = 1;
 const ARGUMENTS_SCOPE_REF: u32 = 2;
@@ -271,7 +271,7 @@ impl DebugAdapter {
         let module = Arc::new(malkovri_wgsl_debugger::wgsl_to_module(
             &self.program_source,
         )?);
-        let global_invocation_id = parse_input::parse_global_invocation_id(arguments);
+        let entry_point_inputs = parse_input::parse_shader_inputs(arguments)?;
         #[cfg(not(target_arch = "wasm32"))]
         let bindings = {
             let program_dir = program_path
@@ -286,10 +286,7 @@ impl DebugAdapter {
         self.evaluator = Some(Evaluator::new(
             module,
             0,
-            EntryPointInputs {
-                global_invocation_id,
-                ..Default::default()
-            },
+            entry_point_inputs,
             bindings,
         ));
 

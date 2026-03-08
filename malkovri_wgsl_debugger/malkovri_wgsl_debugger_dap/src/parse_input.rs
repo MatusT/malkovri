@@ -6,22 +6,15 @@ use std::{fs, path::Path};
 use naga::ResourceBinding;
 
 use crate::error::DebugAdapterError;
-use malkovri_wgsl_debugger::{Primitive, Value};
+use malkovri_wgsl_debugger::{EntryPointInputs, Primitive, Value};
 
-pub fn parse_global_invocation_id(
+pub fn parse_shader_inputs(
     arguments: &serde_json::Map<String, serde_json::Value>,
-) -> [u32; 3] {
-    arguments
-        .get("global_invocation_id")
-        .and_then(|v| v.as_array())
-        .and_then(|arr| {
-            Some([
-                arr.first()?.as_u64()? as u32,
-                arr.get(1)?.as_u64()? as u32,
-                arr.get(2)?.as_u64()? as u32,
-            ])
-        })
-        .unwrap_or([0, 0, 0])
+) -> Result<EntryPointInputs, DebugAdapterError> {
+    match arguments.get("shaderInputs") {
+        Some(value) => Ok(serde_json::from_value(value.clone())?),
+        None => Ok(EntryPointInputs::default()),
+    }
 }
 
 pub fn parse_bindings(
