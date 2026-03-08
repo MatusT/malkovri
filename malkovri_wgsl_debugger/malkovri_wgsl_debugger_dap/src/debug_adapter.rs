@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     fmt::Debug,
     fs,
     io::{BufRead, BufReader, BufWriter, Write},
@@ -7,22 +6,17 @@ use std::{
 };
 
 use dapts::Breakpoint;
-use naga::{ResourceBinding, Statement};
+use naga::Statement;
 use serde::Serialize;
 use std::sync::Arc;
 
 use crate::error::DebugAdapterError;
-use malkovri_wgsl_debugger::{EntryPointInputs, Evaluator, NextStatement, Primitive, Value};
+use crate::parse_input;
+use malkovri_wgsl_debugger::{EntryPointInputs, Evaluator, NextStatement, Value};
 
 const LOCALS_SCOPE_REF: u32 = 1;
 const ARGUMENTS_SCOPE_REF: u32 = 2;
 const MAIN_THREAD_ID: u64 = 1;
-
-#[derive(Debug)]
-enum ServerState {
-    Header,
-    Content,
-}
 
 #[derive(Clone, Debug)]
 pub enum OutgoingMessage {
@@ -83,187 +77,19 @@ impl OutgoingMessage {
     }
 }
 
-fn parse_global_invocation_id(arguments: &serde_json::Map<String, serde_json::Value>) -> [u32; 3] {
-    arguments
-        .get("global_invocation_id")
-        .and_then(|v| v.as_array())
-        .and_then(|arr| {
-            Some([
-                arr.first()?.as_u64()? as u32,
-                arr.get(1)?.as_u64()? as u32,
-                arr.get(2)?.as_u64()? as u32,
-            ])
-        })
-        .unwrap_or([0, 0, 0])
-}
-
-fn parse_bindings(
-    arguments: &serde_json::Map<String, serde_json::Value>,
-    program_dir: &Path,
-) -> Result<HashMap<ResourceBinding, Value>, DebugAdapterError> {
-    let Some(bindings) = arguments.get("bindings").and_then(|v| v.as_object()) else {
-        return Ok(HashMap::new());
-    };
-
-    bindings
-        .iter()
-        .map(|(key, config)| {
-            let parts: Vec<&str> = key.split(':').collect();
-            if parts.len() != 2 {
-                return Err(DebugAdapterError::Parse(format!(
-                    "Invalid binding key '{key}': expected 'group:binding'"
-                )));
-            }
-            let group = parts[0].parse::<u32>().map_err(|_| {
-                DebugAdapterError::Parse(format!("Invalid group in binding key '{key}'"))
-            })?;
-            let binding = parts[1].parse::<u32>().map_err(|_| {
-                DebugAdapterError::Parse(format!("Invalid binding in binding key '{key}'"))
-            })?;
-
-            let obj = config.as_object().ok_or_else(|| {
-                DebugAdapterError::Parse(format!("Binding '{key}' is not an object"))
-            })?;
-
-            let type_str = obj.get("type").and_then(|v| v.as_str()).unwrap_or("f32");
-            let value = if let Some(inline) = obj.get("inline") {
-                parse_inline(key, type_str, inline)?
-            } else if let Some(path) = obj.get("file").and_then(|v| v.as_str()) {
-                let format = obj.get("format").and_then(|v| v.as_str()).unwrap_or("ron");
-                parse_file(key, type_str, format, &program_dir.join(path))?
-            } else {
-                return Err(DebugAdapterError::Parse(format!(
-                    "Binding '{key}' has neither 'inline' nor 'file'"
-                )));
-            };
-
-            Ok((ResourceBinding { group, binding }, value))
-        })
-        .collect()
-}
-
-fn parse_inline(
-    key: &str,
-    type_str: &str,
-    inline: &serde_json::Value,
-) -> Result<Value, DebugAdapterError> {
-    let arr = inline.as_array().ok_or_else(|| {
-        DebugAdapterError::Parse(format!("Binding '{key}' inline value is not an array"))
-    })?;
-    Ok(match type_str {
-        "f32" => Value::Array(
-            arr.iter()
-                .map(|v| Primitive::F32(v.as_f64().unwrap_or(0.0) as f32).into())
-                .collect(),
-        ),
-        "i32" => Value::Array(
-            arr.iter()
-                .map(|v| Primitive::I32(v.as_i64().unwrap_or(0) as i32).into())
-                .collect(),
-        ),
-        "u32" => Value::Array(
-            arr.iter()
-                .map(|v| Primitive::U32(v.as_u64().unwrap_or(0) as u32).into())
-                .collect(),
-        ),
-        _ => {
-            return Err(DebugAdapterError::Parse(format!(
-                "Unknown type '{type_str}' for binding '{key}'"
-            )));
-        }
-    })
-}
-
-fn parse_file(
-    key: &str,
-    type_str: &str,
-    format: &str,
-    path: &Path,
-) -> Result<Value, DebugAdapterError> {
-    match format {
-        "binary" => {
-            let bytes = fs::read(path)?;
-            Ok(match type_str {
-                "f32" => Value::Array(
-                    bytes
-                        .chunks_exact(4)
-                        .map(|c| {
-                            Primitive::F32(f32::from_le_bytes([c[0], c[1], c[2], c[3]])).into()
-                        })
-                        .collect(),
-                ),
-                "i32" => Value::Array(
-                    bytes
-                        .chunks_exact(4)
-                        .map(|c| {
-                            Primitive::I32(i32::from_le_bytes([c[0], c[1], c[2], c[3]])).into()
-                        })
-                        .collect(),
-                ),
-                "u32" => Value::Array(
-                    bytes
-                        .chunks_exact(4)
-                        .map(|c| {
-                            Primitive::U32(u32::from_le_bytes([c[0], c[1], c[2], c[3]])).into()
-                        })
-                        .collect(),
-                ),
-                _ => {
-                    return Err(DebugAdapterError::Parse(format!(
-                        "Unknown type '{type_str}' for binding '{key}'"
-                    )));
-                }
-            })
-        }
-        "ron" => {
-            let content = fs::read_to_string(path)?;
-            Ok(match type_str {
-                "f32" => {
-                    let vals: Vec<f64> = ron::from_str(&content).map_err(|e| {
-                        DebugAdapterError::Parse(format!(
-                            "RON parse error for binding '{key}': {e}"
-                        ))
-                    })?;
-                    Value::Array(
-                        vals.into_iter()
-                            .map(|v| Primitive::F32(v as f32).into())
-                            .collect(),
-                    )
-                }
-                "i32" => {
-                    let vals: Vec<i64> = ron::from_str(&content).map_err(|e| {
-                        DebugAdapterError::Parse(format!(
-                            "RON parse error for binding '{key}': {e}"
-                        ))
-                    })?;
-                    Value::Array(
-                        vals.into_iter()
-                            .map(|v| Primitive::I32(v as i32).into())
-                            .collect(),
-                    )
-                }
-                "u32" => {
-                    let vals: Vec<u64> = ron::from_str(&content).map_err(|e| {
-                        DebugAdapterError::Parse(format!(
-                            "RON parse error for binding '{key}': {e}"
-                        ))
-                    })?;
-                    Value::Array(
-                        vals.into_iter()
-                            .map(|v| Primitive::U32(v as u32).into())
-                            .collect(),
-                    )
-                }
-                _ => {
-                    return Err(DebugAdapterError::Parse(format!(
-                        "Unknown type '{type_str}' for binding '{key}'"
-                    )));
-                }
-            })
-        }
-        _ => Err(DebugAdapterError::Parse(format!(
-            "Unknown format '{format}' for binding '{key}'"
-        ))),
+fn make_variable(name: Option<String>, value: &str) -> dapts::Variable {
+    dapts::Variable {
+        name: name.clone().unwrap_or("unnamed".to_string()),
+        evaluate_name: name,
+        value: value.to_string(),
+        variables_reference: 0,
+        declaration_location_reference: None,
+        indexed_variables: None,
+        memory_reference: None,
+        named_variables: None,
+        presentation_hint: None,
+        ty: None,
+        value_location_reference: None,
     }
 }
 
@@ -298,15 +124,15 @@ impl DebugAdapter {
         }
     }
 
-    pub fn start(&mut self) -> Result<(), DebugAdapterError> {
+    pub fn from_stdio(&mut self) -> Result<(), DebugAdapterError> {
         let stdin = std::io::stdin();
         let stdout = std::io::stdout();
         let mut reader = BufReader::new(stdin.lock());
         let mut writer = BufWriter::new(stdout.lock());
-        self.run(&mut reader, &mut writer)
+        self.from_streams(&mut reader, &mut writer)
     }
 
-    pub fn run<R: BufRead, W: Write>(
+    pub fn from_streams<R: BufRead, W: Write>(
         &mut self,
         reader: &mut R,
         writer: &mut W,
@@ -323,6 +149,17 @@ impl DebugAdapter {
         }
 
         Ok(())
+    }
+
+    /// Process a single DAP request from a raw JSON string.
+    /// Returns serialized JSON responses/events.
+    pub fn handle_message(&mut self, json: &str) -> Result<Vec<String>, DebugAdapterError> {
+        let request: dapts::Request = serde_json::from_str(json)?;
+        let messages = self.handle_request(&request)?;
+        messages
+            .iter()
+            .map(|m| serde_json::to_string(&m.to_json()).map_err(DebugAdapterError::from))
+            .collect()
     }
 
     pub fn handle_request(
@@ -346,6 +183,18 @@ impl DebugAdapter {
         }
 
         Ok(messages)
+    }
+
+    fn evaluator(&self) -> Result<&Evaluator, DebugAdapterError> {
+        self.evaluator
+            .as_ref()
+            .ok_or_else(|| DebugAdapterError::InvalidProgram("evaluator not initialized".into()))
+    }
+
+    fn evaluator_mut(&mut self) -> Result<&mut Evaluator, DebugAdapterError> {
+        self.evaluator
+            .as_mut()
+            .ok_or_else(|| DebugAdapterError::InvalidProgram("evaluator not initialized".into()))
     }
 
     fn handle_initialize(
@@ -402,12 +251,12 @@ impl DebugAdapter {
         let module = Arc::new(malkovri_wgsl_debugger::wgsl_to_module(
             &self.program_source,
         )?);
-        let global_invocation_id = parse_global_invocation_id(arguments);
+        let global_invocation_id = parse_input::parse_global_invocation_id(arguments);
         let program_dir = program_path
             .parent()
             .unwrap_or_else(|| Path::new(""))
             .to_path_buf();
-        let bindings = parse_bindings(arguments, &program_dir)?;
+        let bindings = parse_input::parse_bindings(arguments, &program_dir)?;
 
         self.evaluator = Some(Evaluator::new(
             module,
@@ -434,20 +283,18 @@ impl DebugAdapter {
         seq: i64,
         messages: &mut Vec<OutgoingMessage>,
     ) -> Result<(), DebugAdapterError> {
-        let evaluator = self.evaluator.as_ref().ok_or_else(|| {
-            DebugAdapterError::InvalidProgram("evaluator not initialized".to_string())
-        })?;
+        let evaluator = self.evaluator()?;
 
         let current_fn = evaluator
             .current_function()
-            .ok_or_else(|| DebugAdapterError::InvalidProgram("no current function".to_string()))?;
+            .ok_or_else(|| DebugAdapterError::InvalidProgram("no current function".into()))?;
 
         let (active_block, active_index) = evaluator
             .current_active_block()
-            .ok_or_else(|| DebugAdapterError::InvalidProgram("stack is empty".to_string()))?;
+            .ok_or_else(|| DebugAdapterError::InvalidProgram("stack is empty".into()))?;
 
         let current_statement = active_block.get(active_index).ok_or_else(|| {
-            DebugAdapterError::InvalidProgram("invalid statement index".to_string())
+            DebugAdapterError::InvalidProgram("invalid statement index".into())
         })?;
 
         let spans = active_block
@@ -470,7 +317,7 @@ impl DebugAdapter {
         let path = self
             .program_path
             .as_ref()
-            .ok_or_else(|| DebugAdapterError::InvalidProgram("program_path not set".to_string()))?
+            .ok_or_else(|| DebugAdapterError::InvalidProgram("program_path not set".into()))?
             .to_string_lossy()
             .to_string();
 
@@ -512,9 +359,7 @@ impl DebugAdapter {
         seq: i64,
         messages: &mut Vec<OutgoingMessage>,
     ) -> Result<(), DebugAdapterError> {
-        let evaluator = self.evaluator.as_ref().ok_or_else(|| {
-            DebugAdapterError::InvalidProgram("evaluator not initialized".to_string())
-        })?;
+        let evaluator = self.evaluator()?;
 
         let current_fn = evaluator.current_function().unwrap();
         let named_variables_len =
@@ -561,13 +406,18 @@ impl DebugAdapter {
         messages: &mut Vec<OutgoingMessage>,
     ) -> Result<(), DebugAdapterError> {
         let arguments = serde_json::from_value::<dapts::SourceArguments>(req.arguments.clone())?;
-        let content = fs::read_to_string(
-            arguments
-                .source
-                .ok_or_else(|| DebugAdapterError::Parse("missing source".to_string()))?
-                .path
-                .ok_or_else(|| DebugAdapterError::Parse("missing path".to_string()))?,
-        )?;
+        let requested_path = arguments
+            .source
+            .ok_or_else(|| DebugAdapterError::Parse("missing source".to_string()))?
+            .path
+            .ok_or_else(|| DebugAdapterError::Parse("missing path".to_string()))?;
+
+        let content =
+            if self.program_path.as_deref() == Some(Path::new(&requested_path)) {
+                self.program_source.clone()
+            } else {
+                fs::read_to_string(&requested_path)?
+            };
 
         self.queue_response(
             messages,
@@ -592,11 +442,11 @@ impl DebugAdapter {
         let program_path = self
             .program_path
             .as_deref()
-            .ok_or_else(|| DebugAdapterError::InvalidProgram("program_path not set".to_string()))?;
+            .ok_or_else(|| DebugAdapterError::InvalidProgram("program_path not set".into()))?;
         let program_name = self
             .program_name
             .as_deref()
-            .ok_or_else(|| DebugAdapterError::InvalidProgram("program_name not set".to_string()))?;
+            .ok_or_else(|| DebugAdapterError::InvalidProgram("program_name not set".into()))?;
 
         let source_matches = arguments.source.path.as_deref().map(Path::new) == Some(program_path)
             || arguments.source.name.as_deref() == Some(program_name);
@@ -668,9 +518,7 @@ impl DebugAdapter {
         seq: i64,
         messages: &mut Vec<OutgoingMessage>,
     ) -> Result<(), DebugAdapterError> {
-        let evaluator = self.evaluator.as_mut().ok_or_else(|| {
-            DebugAdapterError::InvalidProgram("evaluator not initialized".to_string())
-        })?;
+        let evaluator = self.evaluator_mut()?;
 
         while let Some(statement) = evaluator.step() {
             if !matches!(
@@ -695,146 +543,86 @@ impl DebugAdapter {
         messages: &mut Vec<OutgoingMessage>,
     ) -> Result<(), DebugAdapterError> {
         let argument = serde_json::from_value::<dapts::VariablesArguments>(req.arguments.clone())?;
-        let evaluator = self.evaluator.as_ref().ok_or_else(|| {
-            DebugAdapterError::InvalidProgram("evaluator not initialized".to_string())
-        })?;
+        let evaluator = self.evaluator()?;
 
         let current_fn = evaluator.current_function().unwrap();
         let current_state = evaluator.current_function_frame().unwrap();
 
-        if argument.variables_reference == LOCALS_SCOPE_REF {
-            let mut variables: Vec<dapts::Variable> = current_fn
-                .local_variables
-                .iter()
-                .map(|(local_variable_handle, local_variable)| {
-                    let local_variable_value = current_state
-                        .local_variables
-                        .get(&local_variable_handle)
-                        .unwrap_or(&Value::Uninitialized);
-                    dapts::Variable {
-                        declaration_location_reference: None,
-                        evaluate_name: local_variable.name.clone(),
-                        indexed_variables: None,
-                        memory_reference: None,
-                        name: local_variable.name.clone().unwrap_or("unnamed".to_string()),
-                        named_variables: None,
-                        presentation_hint: None,
-                        ty: None,
-                        value: format!("{:?}", local_variable_value.leaf_value()),
-                        value_location_reference: None,
-                        variables_reference: 0,
-                    }
-                })
-                .collect();
+        let variables = match argument.variables_reference {
+            LOCALS_SCOPE_REF => {
+                let mut vars: Vec<dapts::Variable> = current_fn
+                    .local_variables
+                    .iter()
+                    .map(|(handle, local)| {
+                        let val = current_state
+                            .local_variables
+                            .get(&handle)
+                            .unwrap_or(&Value::Uninitialized);
+                        make_variable(
+                            local.name.clone(),
+                            &format!("{:?}", val.leaf_value()),
+                        )
+                    })
+                    .collect();
 
-            for (name, value) in evaluator.named_expression_values() {
-                variables.push(dapts::Variable {
-                    declaration_location_reference: None,
-                    evaluate_name: Some(name.clone()),
-                    indexed_variables: None,
-                    memory_reference: None,
-                    name,
-                    named_variables: None,
-                    presentation_hint: None,
-                    ty: None,
-                    value: format!("{:?}", value.leaf_value()),
-                    value_location_reference: None,
-                    variables_reference: 0,
-                });
+                for (name, value) in evaluator.named_expression_values() {
+                    vars.push(make_variable(
+                        Some(name),
+                        &format!("{:?}", value.leaf_value()),
+                    ));
+                }
+
+                vars
             }
-
-            self.queue_response(messages, req.seq, &dapts::VariablesResponse { variables })?;
-            return Ok(());
-        }
-
-        if argument.variables_reference == ARGUMENTS_SCOPE_REF {
-            let variables: Vec<dapts::Variable> = evaluator
+            ARGUMENTS_SCOPE_REF => evaluator
                 .current_function_argument_values()
                 .into_iter()
-                .map(|(name, value)| dapts::Variable {
-                    declaration_location_reference: None,
-                    evaluate_name: name.clone(),
-                    indexed_variables: None,
-                    memory_reference: None,
-                    name: name.unwrap_or("unnamed".to_string()),
-                    named_variables: None,
-                    presentation_hint: None,
-                    ty: None,
-                    value: format!("{:?}", value.leaf_value()),
-                    value_location_reference: None,
-                    variables_reference: 0,
+                .map(|(name, value)| {
+                    make_variable(name, &format!("{:?}", value.leaf_value()))
                 })
-                .collect();
+                .collect(),
+            _ => vec![],
+        };
 
-            self.queue_response(messages, req.seq, &dapts::VariablesResponse { variables })?;
-            return Ok(());
-        }
-
-        self.queue_response(
-            messages,
-            req.seq,
-            &dapts::VariablesResponse { variables: vec![] },
-        )?;
+        self.queue_response(messages, req.seq, &dapts::VariablesResponse { variables })?;
         Ok(())
     }
 
     pub fn poll_request<R: BufRead>(
         reader: &mut R,
     ) -> Result<Option<dapts::Request>, DebugAdapterError> {
-        let mut state = ServerState::Header;
         let mut buffer = String::new();
-        let mut content_length: usize = 0;
 
-        loop {
-            match reader.read_line(&mut buffer) {
-                Ok(read_size) => {
-                    if read_size == 0 {
-                        return Ok(None);
-                    }
-                    match state {
-                        ServerState::Header => {
-                            let parts: Vec<&str> = buffer.trim_end().split(':').collect();
-                            if parts.len() == 2 {
-                                match parts[0] {
-                                    "Content-Length" => {
-                                        content_length = parts[1].trim().parse().map_err(|_| {
-                                            DebugAdapterError::Parse(
-                                                "Content-Length is not a valid number".to_string(),
-                                            )
-                                        })?;
-                                        buffer.clear();
-                                        buffer.reserve(content_length);
-                                        state = ServerState::Content;
-                                    }
-                                    other => {
-                                        return Err(DebugAdapterError::Parse(format!(
-                                            "Unknown header: {other}"
-                                        )));
-                                    }
-                                }
-                            } else {
-                                return Err(DebugAdapterError::Parse(
-                                    "Header is incorrect".to_string(),
-                                ));
-                            }
-                        }
-                        ServerState::Content => {
-                            buffer.clear();
-                            let mut content = vec![0; content_length];
-                            reader.read_exact(content.as_mut_slice())?;
-
-                            let content = std::str::from_utf8(content.as_slice()).map_err(|e| {
-                                DebugAdapterError::Parse(format!("Invalid UTF-8: {e}"))
-                            })?;
-                            let request: dapts::Request = serde_json::from_str(content)?;
-
-                            return Ok(Some(request));
-                        }
-                    }
-                }
-                Err(e) => return Err(DebugAdapterError::Io(e)),
-            }
+        // Read header line
+        if reader.read_line(&mut buffer)? == 0 {
+            return Ok(None);
         }
+        let (name, value) = buffer.trim_end().split_once(':').ok_or_else(|| {
+            DebugAdapterError::Parse("Header is incorrect".to_string())
+        })?;
+        let content_length: usize = match name {
+            "Content-Length" => value.trim().parse().map_err(|_| {
+                DebugAdapterError::Parse("Content-Length is not a valid number".to_string())
+            })?,
+            other => {
+                return Err(DebugAdapterError::Parse(format!(
+                    "Unknown header: {other}"
+                )));
+            }
+        };
+
+        // Skip blank line separator
+        buffer.clear();
+        reader.read_line(&mut buffer)?;
+
+        // Read content body
+        let mut content = vec![0; content_length];
+        reader.read_exact(&mut content)?;
+        let content = std::str::from_utf8(&content)
+            .map_err(|e| DebugAdapterError::Parse(format!("Invalid UTF-8: {e}")))?;
+        let request: dapts::Request = serde_json::from_str(content)?;
+
+        Ok(Some(request))
     }
 
     pub fn write_message<W: Write>(
