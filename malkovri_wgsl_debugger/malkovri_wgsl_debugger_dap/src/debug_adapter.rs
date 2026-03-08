@@ -2,7 +2,8 @@ use std::{
     collections::HashMap,
     fmt::Debug,
     fs,
-    io::{BufRead, BufReader, BufWriter, Read, Write},
+    io::{BufRead, BufReader, BufWriter, Write},
+    path::{Path, PathBuf},
 };
 
 use dapts::Breakpoint;
@@ -13,19 +14,73 @@ use std::sync::Arc;
 use crate::error::DebugAdapterError;
 use malkovri_wgsl_debugger::{EntryPointInputs, Evaluator, NextStatement, Primitive, Value};
 
-// Variables reference IDs for scopes
 const LOCALS_SCOPE_REF: u32 = 1;
 const ARGUMENTS_SCOPE_REF: u32 = 2;
-
-/// Main thread ID
 const MAIN_THREAD_ID: u64 = 1;
 
 #[derive(Debug)]
-pub enum ServerState {
-    /// Expecting a header
+enum ServerState {
     Header,
-    /// Expecting content
     Content,
+}
+
+#[derive(Clone, Debug)]
+pub enum OutgoingMessage {
+    Response {
+        seq: i64,
+        request_seq: i64,
+        body: serde_json::Value,
+    },
+    Event {
+        seq: i64,
+        event: String,
+        body: serde_json::Value,
+    },
+}
+
+impl OutgoingMessage {
+    pub fn request_seq(&self) -> Option<i64> {
+        match self {
+            OutgoingMessage::Response { request_seq, .. } => Some(*request_seq),
+            OutgoingMessage::Event { .. } => None,
+        }
+    }
+
+    pub fn event_name(&self) -> Option<&str> {
+        match self {
+            OutgoingMessage::Event { event, .. } => Some(event),
+            OutgoingMessage::Response { .. } => None,
+        }
+    }
+
+    pub fn body(&self) -> &serde_json::Value {
+        match self {
+            OutgoingMessage::Response { body, .. } | OutgoingMessage::Event { body, .. } => body,
+        }
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            OutgoingMessage::Response {
+                seq,
+                request_seq,
+                body,
+            } => serde_json::json!({
+                "seq": seq,
+                "type": "response",
+                "request_seq": request_seq,
+                "success": true,
+                "message": null,
+                "body": body,
+            }),
+            OutgoingMessage::Event { seq, event, body } => serde_json::json!({
+                "seq": seq,
+                "type": "event",
+                "event": event,
+                "body": body,
+            }),
+        }
+    }
 }
 
 fn parse_global_invocation_id(arguments: &serde_json::Map<String, serde_json::Value>) -> [u32; 3] {
@@ -44,7 +99,7 @@ fn parse_global_invocation_id(arguments: &serde_json::Map<String, serde_json::Va
 
 fn parse_bindings(
     arguments: &serde_json::Map<String, serde_json::Value>,
-    program_dir: &std::path::Path,
+    program_dir: &Path,
 ) -> Result<HashMap<ResourceBinding, Value>, DebugAdapterError> {
     let Some(bindings) = arguments.get("bindings").and_then(|v| v.as_object()) else {
         return Ok(HashMap::new());
@@ -123,7 +178,7 @@ fn parse_file(
     key: &str,
     type_str: &str,
     format: &str,
-    path: &std::path::Path,
+    path: &Path,
 ) -> Result<Value, DebugAdapterError> {
     match format {
         "binary" => {
@@ -213,35 +268,29 @@ fn parse_file(
 }
 
 pub struct DebugAdapter {
-    reader: BufReader<std::io::Stdin>,
-    writer: BufWriter<std::io::Stdout>,
-
     sequence_number: i64,
-
     breakpoints: Vec<Breakpoint>,
-
     program_name: Option<String>,
-    program_path: Option<std::path::PathBuf>,
+    program_path: Option<PathBuf>,
     program_source: String,
-
     evaluator: Option<Evaluator>,
-
     delayed_init_seq: Option<i64>,
     configuration_done: bool,
+}
+
+impl Default for DebugAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DebugAdapter {
     pub fn new() -> Self {
         DebugAdapter {
-            reader: BufReader::new(std::io::stdin()),
-            writer: BufWriter::new(std::io::stdout()),
-
             sequence_number: 1,
-
             breakpoints: Vec::new(),
             evaluator: None,
             program_source: String::new(),
-
             program_name: None,
             program_path: None,
             delayed_init_seq: None,
@@ -250,31 +299,62 @@ impl DebugAdapter {
     }
 
     pub fn start(&mut self) -> Result<(), DebugAdapterError> {
+        let stdin = std::io::stdin();
+        let stdout = std::io::stdout();
+        let mut reader = BufReader::new(stdin.lock());
+        let mut writer = BufWriter::new(stdout.lock());
+        self.run(&mut reader, &mut writer)
+    }
+
+    pub fn run<R: BufRead, W: Write>(
+        &mut self,
+        reader: &mut R,
+        writer: &mut W,
+    ) -> Result<(), DebugAdapterError> {
         loop {
-            match self.poll_request() {
-                Ok(Some(req)) => match req.command.as_str() {
-                    "initialize" => self.handle_initialize(req.seq)?,
-                    "launch" => self.handle_launch(&req)?,
-                    "stackTrace" => self.handle_stack_trace(req.seq)?,
-                    "scopes" => self.handle_scopes(req.seq)?,
-                    "source" => self.handle_source(&req)?,
-                    "setBreakpoints" => self.handle_set_breakpoints(&req)?,
-                    "configurationDone" => self.handle_configuration_done(req.seq)?,
-                    "threads" => self.handle_threads(req.seq)?,
-                    "next" => self.handle_next(req.seq)?,
-                    "variables" => self.handle_variables(&req)?,
-                    _ => {}
-                },
-                Ok(None) => break,
-                Err(e) => return Err(e),
+            match Self::poll_request(reader)? {
+                Some(req) => {
+                    for message in self.handle_request(&req)? {
+                        Self::write_message(writer, &message)?;
+                    }
+                }
+                None => break,
             }
         }
 
         Ok(())
     }
 
-    fn handle_initialize(&mut self, seq: i64) -> Result<(), DebugAdapterError> {
-        self.send_response(
+    pub fn handle_request(
+        &mut self,
+        req: &dapts::Request,
+    ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
+        let mut messages = Vec::new();
+
+        match req.command.as_str() {
+            "initialize" => self.handle_initialize(req.seq, &mut messages)?,
+            "launch" => self.handle_launch(req, &mut messages)?,
+            "stackTrace" => self.handle_stack_trace(req.seq, &mut messages)?,
+            "scopes" => self.handle_scopes(req.seq, &mut messages)?,
+            "source" => self.handle_source(req, &mut messages)?,
+            "setBreakpoints" => self.handle_set_breakpoints(req, &mut messages)?,
+            "configurationDone" => self.handle_configuration_done(req.seq, &mut messages)?,
+            "threads" => self.handle_threads(req.seq, &mut messages)?,
+            "next" => self.handle_next(req.seq, &mut messages)?,
+            "variables" => self.handle_variables(req, &mut messages)?,
+            _ => {}
+        }
+
+        Ok(messages)
+    }
+
+    fn handle_initialize(
+        &mut self,
+        seq: i64,
+        messages: &mut Vec<OutgoingMessage>,
+    ) -> Result<(), DebugAdapterError> {
+        self.queue_response(
+            messages,
             seq,
             &dapts::Capabilities {
                 supports_cancel_request: Some(true),
@@ -288,40 +368,44 @@ impl DebugAdapter {
                 ..Default::default()
             },
         )?;
-        self.send_event("initialized", &serde_json::json!({}))?;
+        self.queue_event(messages, "initialized", &serde_json::json!({}))?;
         Ok(())
     }
 
-    fn handle_launch(&mut self, req: &dapts::Request) -> Result<(), DebugAdapterError> {
+    fn handle_launch(
+        &mut self,
+        req: &dapts::Request,
+        messages: &mut Vec<OutgoingMessage>,
+    ) -> Result<(), DebugAdapterError> {
         let arguments = req
             .arguments
             .as_object()
             .ok_or_else(|| DebugAdapterError::Parse("arguments is not an object".to_string()))?;
 
-        let program_name = arguments
+        let program = arguments
             .get("program")
             .ok_or_else(|| DebugAdapterError::Parse("missing 'program' argument".to_string()))?
             .as_str()
-            .ok_or_else(|| DebugAdapterError::Parse("'program' is not a string".to_string()))?
+            .ok_or_else(|| DebugAdapterError::Parse("'program' is not a string".to_string()))?;
+
+        let program_path = Path::new(program).to_path_buf();
+        let program_name = program_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(program)
             .to_string();
 
-        self.program_path = Some(std::path::Path::new(&program_name).to_path_buf());
+        self.program_path = Some(program_path.clone());
         self.program_name = Some(program_name);
-
-        self.program_source = fs::read_to_string(self.program_path.as_ref().ok_or_else(|| {
-            DebugAdapterError::InvalidProgram("program_path not set".to_string())
-        })?)?;
+        self.program_source = fs::read_to_string(&program_path)?;
 
         let module = Arc::new(malkovri_wgsl_debugger::wgsl_to_module(
             &self.program_source,
         )?);
-
         let global_invocation_id = parse_global_invocation_id(arguments);
-        let program_dir = self
-            .program_path
-            .as_deref()
-            .and_then(|p| p.parent())
-            .unwrap_or(std::path::Path::new(""))
+        let program_dir = program_path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
             .to_path_buf();
         let bindings = parse_bindings(arguments, &program_dir)?;
 
@@ -338,26 +422,18 @@ impl DebugAdapter {
         if !self.configuration_done {
             self.delayed_init_seq = Some(req.seq);
         } else {
-            self.send_response(req.seq, &serde_json::json!({}))?;
+            self.queue_response(messages, req.seq, &serde_json::json!({}))?;
         }
 
-        self.send_event(
-            "stopped",
-            &dapts::StoppedEvent {
-                reason: dapts::StoppedEventReason::Entry,
-                description: None,
-                thread_id: Some(MAIN_THREAD_ID),
-                preserve_focus_hint: None,
-                text: None,
-                all_threads_stopped: Some(true),
-                hit_breakpoint_ids: None,
-            },
-        )?;
-
+        self.queue_stopped_event(messages, dapts::StoppedEventReason::Entry)?;
         Ok(())
     }
 
-    fn handle_stack_trace(&mut self, seq: i64) -> Result<(), DebugAdapterError> {
+    fn handle_stack_trace(
+        &mut self,
+        seq: i64,
+        messages: &mut Vec<OutgoingMessage>,
+    ) -> Result<(), DebugAdapterError> {
         let evaluator = self.evaluator.as_ref().ok_or_else(|| {
             DebugAdapterError::InvalidProgram("evaluator not initialized".to_string())
         })?;
@@ -380,7 +456,6 @@ impl DebugAdapter {
             .collect::<Vec<_>>();
 
         let relevant_span = spans[active_index].location(&self.program_source);
-
         let total_span = naga::Span::total_span(current_fn.body.span_iter().map(|(_, span)| *span));
 
         let (line, column) = if let Statement::Return { .. } = current_statement {
@@ -396,12 +471,11 @@ impl DebugAdapter {
             .program_path
             .as_ref()
             .ok_or_else(|| DebugAdapterError::InvalidProgram("program_path not set".to_string()))?
-            .as_os_str()
-            .to_str()
-            .ok_or_else(|| DebugAdapterError::InvalidProgram("invalid path encoding".to_string()))?
+            .to_string_lossy()
             .to_string();
 
-        self.send_response(
+        self.queue_response(
+            messages,
             seq,
             &dapts::StackTraceResponse {
                 stack_frames: vec![dapts::StackFrame {
@@ -433,7 +507,11 @@ impl DebugAdapter {
         Ok(())
     }
 
-    fn handle_scopes(&mut self, seq: i64) -> Result<(), DebugAdapterError> {
+    fn handle_scopes(
+        &mut self,
+        seq: i64,
+        messages: &mut Vec<OutgoingMessage>,
+    ) -> Result<(), DebugAdapterError> {
         let evaluator = self.evaluator.as_ref().ok_or_else(|| {
             DebugAdapterError::InvalidProgram("evaluator not initialized".to_string())
         })?;
@@ -473,13 +551,16 @@ impl DebugAdapter {
             });
         }
 
-        self.send_response(seq, &dapts::ScopesResponse { scopes })?;
+        self.queue_response(messages, seq, &dapts::ScopesResponse { scopes })?;
         Ok(())
     }
 
-    fn handle_source(&mut self, req: &dapts::Request) -> Result<(), DebugAdapterError> {
+    fn handle_source(
+        &mut self,
+        req: &dapts::Request,
+        messages: &mut Vec<OutgoingMessage>,
+    ) -> Result<(), DebugAdapterError> {
         let arguments = serde_json::from_value::<dapts::SourceArguments>(req.arguments.clone())?;
-
         let content = fs::read_to_string(
             arguments
                 .source
@@ -488,7 +569,8 @@ impl DebugAdapter {
                 .ok_or_else(|| DebugAdapterError::Parse("missing path".to_string()))?,
         )?;
 
-        self.send_response(
+        self.queue_response(
+            messages,
             req.seq,
             &dapts::SourceResponse {
                 content,
@@ -499,19 +581,25 @@ impl DebugAdapter {
         Ok(())
     }
 
-    fn handle_set_breakpoints(&mut self, req: &dapts::Request) -> Result<(), DebugAdapterError> {
+    fn handle_set_breakpoints(
+        &mut self,
+        req: &dapts::Request,
+        messages: &mut Vec<OutgoingMessage>,
+    ) -> Result<(), DebugAdapterError> {
         let arguments =
             serde_json::from_value::<dapts::SetBreakpointsArguments>(req.arguments.clone())?;
 
-        let source_name = arguments
-            .source
-            .name
-            .ok_or_else(|| DebugAdapterError::Parse("missing source name".to_string()))?;
+        let program_path = self
+            .program_path
+            .as_deref()
+            .ok_or_else(|| DebugAdapterError::InvalidProgram("program_path not set".to_string()))?;
         let program_name = self
             .program_name
-            .clone()
+            .as_deref()
             .ok_or_else(|| DebugAdapterError::InvalidProgram("program_name not set".to_string()))?;
-        let source_matches = source_name == program_name;
+
+        let source_matches = arguments.source.path.as_deref().map(Path::new) == Some(program_path)
+            || arguments.source.name.as_deref() == Some(program_name);
 
         self.breakpoints = arguments
             .breakpoints
@@ -537,36 +625,33 @@ impl DebugAdapter {
             })
             .collect();
 
-        self.send_response(req.seq, &self.breakpoints.clone())?;
+        self.queue_response(messages, req.seq, &self.breakpoints.clone())?;
         Ok(())
     }
 
-    fn handle_configuration_done(&mut self, seq: i64) -> Result<(), DebugAdapterError> {
-        self.send_response(seq, &serde_json::json!({}))?;
+    fn handle_configuration_done(
+        &mut self,
+        seq: i64,
+        messages: &mut Vec<OutgoingMessage>,
+    ) -> Result<(), DebugAdapterError> {
+        self.configuration_done = true;
+        self.queue_response(messages, seq, &serde_json::json!({}))?;
 
-        if let Some(delayed_init_seq) = self.delayed_init_seq {
-            self.send_response(delayed_init_seq, &serde_json::json!({}))?;
-            self.delayed_init_seq = None;
+        if let Some(delayed_init_seq) = self.delayed_init_seq.take() {
+            self.queue_response(messages, delayed_init_seq, &serde_json::json!({}))?;
         }
 
-        self.send_event(
-            "stopped",
-            &dapts::StoppedEvent {
-                reason: dapts::StoppedEventReason::Entry,
-                description: None,
-                thread_id: Some(MAIN_THREAD_ID),
-                preserve_focus_hint: None,
-                text: None,
-                all_threads_stopped: Some(true),
-                hit_breakpoint_ids: None,
-            },
-        )?;
-
+        self.queue_stopped_event(messages, dapts::StoppedEventReason::Entry)?;
         Ok(())
     }
 
-    fn handle_threads(&mut self, seq: i64) -> Result<(), DebugAdapterError> {
-        self.send_response(
+    fn handle_threads(
+        &mut self,
+        seq: i64,
+        messages: &mut Vec<OutgoingMessage>,
+    ) -> Result<(), DebugAdapterError> {
+        self.queue_response(
+            messages,
             seq,
             &dapts::ThreadsResponse {
                 threads: vec![dapts::Thread {
@@ -578,46 +663,38 @@ impl DebugAdapter {
         Ok(())
     }
 
-    fn handle_next(&mut self, seq: i64) -> Result<(), DebugAdapterError> {
+    fn handle_next(
+        &mut self,
+        seq: i64,
+        messages: &mut Vec<OutgoingMessage>,
+    ) -> Result<(), DebugAdapterError> {
         let evaluator = self.evaluator.as_mut().ok_or_else(|| {
             DebugAdapterError::InvalidProgram("evaluator not initialized".to_string())
         })?;
 
-        let mut next_statement: Option<NextStatement> = None;
         while let Some(statement) = evaluator.step() {
-            match statement {
+            if !matches!(
+                statement,
                 NextStatement {
                     statement: Statement::Emit(_),
                     ..
-                } => continue,
-                _ => {
-                    next_statement = Some(statement);
-                    break;
                 }
+            ) {
+                break;
             }
         }
 
-        self.send_response(seq, &serde_json::json!({}))?;
-
-        self.send_event(
-            "stopped",
-            &dapts::StoppedEvent {
-                reason: dapts::StoppedEventReason::Step,
-                description: None,
-                thread_id: Some(MAIN_THREAD_ID),
-                preserve_focus_hint: None,
-                text: None,
-                all_threads_stopped: Some(true),
-                hit_breakpoint_ids: None,
-            },
-        )?;
-
+        self.queue_response(messages, seq, &serde_json::json!({}))?;
+        self.queue_stopped_event(messages, dapts::StoppedEventReason::Step)?;
         Ok(())
     }
 
-    fn handle_variables(&mut self, req: &dapts::Request) -> Result<(), DebugAdapterError> {
+    fn handle_variables(
+        &mut self,
+        req: &dapts::Request,
+        messages: &mut Vec<OutgoingMessage>,
+    ) -> Result<(), DebugAdapterError> {
         let argument = serde_json::from_value::<dapts::VariablesArguments>(req.arguments.clone())?;
-
         let evaluator = self.evaluator.as_ref().ok_or_else(|| {
             DebugAdapterError::InvalidProgram("evaluator not initialized".to_string())
         })?;
@@ -626,7 +703,6 @@ impl DebugAdapter {
         let current_state = evaluator.current_function_frame().unwrap();
 
         if argument.variables_reference == LOCALS_SCOPE_REF {
-            // var declarations
             let mut variables: Vec<dapts::Variable> = current_fn
                 .local_variables
                 .iter()
@@ -651,9 +727,7 @@ impl DebugAdapter {
                 })
                 .collect();
 
-            // let bindings (named expressions in naga IR)
-            let named_values = evaluator.named_expression_values();
-            for (name, value) in named_values {
+            for (name, value) in evaluator.named_expression_values() {
                 variables.push(dapts::Variable {
                     declaration_location_reference: None,
                     evaluate_name: Some(name.clone()),
@@ -669,40 +743,50 @@ impl DebugAdapter {
                 });
             }
 
-            self.send_response(req.seq, &dapts::VariablesResponse { variables })?;
-        } else if argument.variables_reference == ARGUMENTS_SCOPE_REF {
-            let variables: Vec<dapts::Variable> = current_fn
-                .arguments
-                .iter()
-                .zip(current_state.evaluated_function_arguments.iter())
-                .map(|(argument, argument_value)| dapts::Variable {
+            self.queue_response(messages, req.seq, &dapts::VariablesResponse { variables })?;
+            return Ok(());
+        }
+
+        if argument.variables_reference == ARGUMENTS_SCOPE_REF {
+            let variables: Vec<dapts::Variable> = evaluator
+                .current_function_argument_values()
+                .into_iter()
+                .map(|(name, value)| dapts::Variable {
                     declaration_location_reference: None,
-                    evaluate_name: argument.name.clone(),
+                    evaluate_name: name.clone(),
                     indexed_variables: None,
                     memory_reference: None,
-                    name: argument.name.clone().unwrap_or("unnamed".to_string()),
+                    name: name.unwrap_or("unnamed".to_string()),
                     named_variables: None,
                     presentation_hint: None,
                     ty: None,
-                    value: format!("{:?}", argument_value.leaf_value()),
+                    value: format!("{:?}", value.leaf_value()),
                     value_location_reference: None,
                     variables_reference: 0,
                 })
                 .collect();
 
-            self.send_response(req.seq, &dapts::VariablesResponse { variables })?;
+            self.queue_response(messages, req.seq, &dapts::VariablesResponse { variables })?;
+            return Ok(());
         }
 
+        self.queue_response(
+            messages,
+            req.seq,
+            &dapts::VariablesResponse { variables: vec![] },
+        )?;
         Ok(())
     }
 
-    pub fn poll_request(&mut self) -> Result<Option<dapts::Request>, DebugAdapterError> {
+    pub fn poll_request<R: BufRead>(
+        reader: &mut R,
+    ) -> Result<Option<dapts::Request>, DebugAdapterError> {
         let mut state = ServerState::Header;
         let mut buffer = String::new();
         let mut content_length: usize = 0;
 
         loop {
-            match self.reader.read_line(&mut buffer) {
+            match reader.read_line(&mut buffer) {
                 Ok(read_size) => {
                     if read_size == 0 {
                         return Ok(None);
@@ -724,8 +808,7 @@ impl DebugAdapter {
                                     }
                                     other => {
                                         return Err(DebugAdapterError::Parse(format!(
-                                            "Unknown header: {}",
-                                            other
+                                            "Unknown header: {other}"
                                         )));
                                     }
                                 }
@@ -738,10 +821,10 @@ impl DebugAdapter {
                         ServerState::Content => {
                             buffer.clear();
                             let mut content = vec![0; content_length];
-                            self.reader.read_exact(content.as_mut_slice())?;
+                            reader.read_exact(content.as_mut_slice())?;
 
                             let content = std::str::from_utf8(content.as_slice()).map_err(|e| {
-                                DebugAdapterError::Parse(format!("Invalid UTF-8: {}", e))
+                                DebugAdapterError::Parse(format!("Invalid UTF-8: {e}"))
                             })?;
                             let request: dapts::Request = serde_json::from_str(content)?;
 
@@ -754,71 +837,68 @@ impl DebugAdapter {
         }
     }
 
-    pub fn send_response<T: Serialize + Debug>(
-        &mut self,
-        request_seq: i64,
-        body: &T,
+    pub fn write_message<W: Write>(
+        writer: &mut W,
+        message: &OutgoingMessage,
     ) -> Result<(), DebugAdapterError> {
-        let body = serde_json::to_value(body)?;
-
-        let response = dapts::Response {
-            request_seq,
-            success: true,
-            message: None,
-            body: Some(body),
-        };
-
-        let mut response_json = serde_json::to_value(response)?;
-        response_json.as_object_mut().unwrap().insert(
-            "seq".to_string(),
-            serde_json::Value::Number(self.sequence_number.into()),
-        );
-        response_json.as_object_mut().unwrap().insert(
-            "type".to_string(),
-            serde_json::Value::String("response".to_string()),
-        );
-
-        let response_str = serde_json::to_string(&response_json)?;
-        let response_msg = format!(
-            "Content-Length: {}\r\n\r\n{}",
-            response_str.len(),
-            response_str
-        );
-        self.writer.write_all(response_msg.as_bytes())?;
-        self.writer.flush()?;
-
-        self.sequence_number += 1;
-
+        let payload = serde_json::to_string(&message.to_json())?;
+        let framed = format!("Content-Length: {}\r\n\r\n{}", payload.len(), payload);
+        writer.write_all(framed.as_bytes())?;
+        writer.flush()?;
         Ok(())
     }
 
-    pub fn send_event<T: Serialize + Debug>(
+    fn queue_response<T: Serialize + Debug>(
         &mut self,
-        name: &str,
-        event: &T,
+        messages: &mut Vec<OutgoingMessage>,
+        request_seq: i64,
+        body: &T,
     ) -> Result<(), DebugAdapterError> {
-        let mut event_json = serde_json::to_value(dapts::Event {
-            seq: 1,
-            event: name.to_string(),
-            body: serde_json::to_value(event)?,
-        })?;
-
-        event_json.as_object_mut().unwrap().insert(
-            "seq".to_string(),
-            serde_json::Value::Number(self.sequence_number.into()),
-        );
-        event_json.as_object_mut().unwrap().insert(
-            "type".to_string(),
-            serde_json::Value::String("event".to_string()),
-        );
-
-        let event_str = serde_json::to_string(&event_json)?;
-        let event_msg = format!("Content-Length: {}\r\n\r\n{}", event_str.len(), event_str);
-        self.writer.write_all(event_msg.as_bytes())?;
-        self.writer.flush()?;
-
-        self.sequence_number += 1;
-
+        messages.push(OutgoingMessage::Response {
+            seq: self.next_sequence_number(),
+            request_seq,
+            body: serde_json::to_value(body)?,
+        });
         Ok(())
+    }
+
+    fn queue_event<T: Serialize + Debug>(
+        &mut self,
+        messages: &mut Vec<OutgoingMessage>,
+        event: &str,
+        body: &T,
+    ) -> Result<(), DebugAdapterError> {
+        messages.push(OutgoingMessage::Event {
+            seq: self.next_sequence_number(),
+            event: event.to_string(),
+            body: serde_json::to_value(body)?,
+        });
+        Ok(())
+    }
+
+    fn queue_stopped_event(
+        &mut self,
+        messages: &mut Vec<OutgoingMessage>,
+        reason: dapts::StoppedEventReason,
+    ) -> Result<(), DebugAdapterError> {
+        self.queue_event(
+            messages,
+            "stopped",
+            &dapts::StoppedEvent {
+                reason,
+                description: None,
+                thread_id: Some(MAIN_THREAD_ID),
+                preserve_focus_hint: None,
+                text: None,
+                all_threads_stopped: Some(true),
+                hit_breakpoint_ids: None,
+            },
+        )
+    }
+
+    fn next_sequence_number(&mut self) -> i64 {
+        let seq = self.sequence_number;
+        self.sequence_number += 1;
+        seq
     }
 }

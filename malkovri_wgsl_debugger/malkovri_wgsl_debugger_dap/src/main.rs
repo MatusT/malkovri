@@ -1,7 +1,4 @@
-mod debug_adapter;
-mod error;
-
-use debug_adapter::DebugAdapter;
+use malkovri_wgsl_debugger_dap::DebugAdapter;
 
 fn main() {
     let mut debug_adapter = DebugAdapter::new();

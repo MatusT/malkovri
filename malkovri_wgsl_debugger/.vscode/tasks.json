@@ -6,7 +6,7 @@
 			"type": "shell",
 			"command": "cargo build",
 			"options": {
-				"cwd": "${workspaceFolder}/dap"
+				"cwd": "${workspaceFolder}/malkovri_wgsl_debugger_dap"
 			},
 			"group": "build",
 			"presentation": { "reveal": "silent" },

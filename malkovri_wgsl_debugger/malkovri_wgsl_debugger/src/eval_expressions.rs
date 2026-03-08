@@ -152,7 +152,7 @@ impl Evaluator {
         value.index_into(index as usize)
     }
 
-    fn evaluate_function_argument(&self, index: usize, func_idx: usize) -> Value {
+    pub(crate) fn evaluate_function_argument(&self, index: usize, func_idx: usize) -> Value {
         let StackFrame::Function(ref frame) = self.stack[func_idx] else {
             return Value::Uninitialized;
         };

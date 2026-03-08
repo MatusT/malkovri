@@ -132,6 +132,30 @@ impl Evaluator {
         Some((top.statements(), top.current_statement_index()))
     }
 
+    /// Evaluate the current function arguments in declaration order.
+    pub fn current_function_argument_values(&self) -> Vec<(Option<String>, Value)> {
+        let func_idx = match self.current_function_frame_index() {
+            Some(i) => i,
+            None => return vec![],
+        };
+        let StackFrame::Function(ref frame) = self.stack[func_idx] else {
+            return vec![];
+        };
+
+        let function = self.resolve_function(&frame.function_ref);
+        function
+            .arguments
+            .iter()
+            .enumerate()
+            .map(|(index, argument)| {
+                (
+                    argument.name.clone(),
+                    self.evaluate_function_argument(index, func_idx),
+                )
+            })
+            .collect()
+    }
+
     /// Index of the `Function` frame below `function_index` — the caller's frame, used for `CallResult`.
     fn parent_function_frame_index(&self, function_index: usize) -> Option<usize> {
         self.stack[..function_index]
