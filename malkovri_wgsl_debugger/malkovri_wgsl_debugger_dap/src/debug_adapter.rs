@@ -1,8 +1,12 @@
 use std::{
     fmt::Debug,
+    path::{Path, PathBuf},
+};
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::{
     fs,
     io::{BufRead, BufReader, BufWriter, Write},
-    path::{Path, PathBuf},
 };
 
 use dapts::Breakpoint;
@@ -124,6 +128,7 @@ impl DebugAdapter {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn from_stdio(&mut self) -> Result<(), DebugAdapterError> {
         let stdin = std::io::stdin();
         let stdout = std::io::stdout();
@@ -132,6 +137,7 @@ impl DebugAdapter {
         self.from_streams(&mut reader, &mut writer)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn from_streams<R: BufRead, W: Write>(
         &mut self,
         reader: &mut R,
@@ -246,17 +252,36 @@ impl DebugAdapter {
 
         self.program_path = Some(program_path.clone());
         self.program_name = Some(program_name);
-        self.program_source = fs::read_to_string(&program_path)?;
+        self.program_source = if let Some(source) = arguments.get("source").and_then(|v| v.as_str())
+        {
+            source.to_string()
+        } else {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                fs::read_to_string(&program_path)?
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                return Err(DebugAdapterError::Parse(
+                    "missing 'source' argument (required in WASM)".to_string(),
+                ));
+            }
+        };
 
         let module = Arc::new(malkovri_wgsl_debugger::wgsl_to_module(
             &self.program_source,
         )?);
         let global_invocation_id = parse_input::parse_global_invocation_id(arguments);
-        let program_dir = program_path
-            .parent()
-            .unwrap_or_else(|| Path::new(""))
-            .to_path_buf();
-        let bindings = parse_input::parse_bindings(arguments, &program_dir)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let bindings = {
+            let program_dir = program_path
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .to_path_buf();
+            parse_input::parse_bindings(arguments, &program_dir)?
+        };
+        #[cfg(target_arch = "wasm32")]
+        let bindings = parse_input::parse_bindings(arguments)?;
 
         self.evaluator = Some(Evaluator::new(
             module,
@@ -416,7 +441,16 @@ impl DebugAdapter {
             if self.program_path.as_deref() == Some(Path::new(&requested_path)) {
                 self.program_source.clone()
             } else {
-                fs::read_to_string(&requested_path)?
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    fs::read_to_string(&requested_path)?
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    return Err(DebugAdapterError::Parse(format!(
+                        "cannot read file '{requested_path}' in WASM"
+                    )));
+                }
             };
 
         self.queue_response(
@@ -588,6 +622,7 @@ impl DebugAdapter {
         Ok(())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn poll_request<R: BufRead>(
         reader: &mut R,
     ) -> Result<Option<dapts::Request>, DebugAdapterError> {
@@ -625,6 +660,7 @@ impl DebugAdapter {
         Ok(Some(request))
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn write_message<W: Write>(
         writer: &mut W,
         message: &OutgoingMessage,

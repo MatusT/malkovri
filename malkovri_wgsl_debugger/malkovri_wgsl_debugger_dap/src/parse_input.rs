@@ -1,8 +1,7 @@
-use std::{
-    collections::HashMap,
-    fs,
-    path::Path,
-};
+use std::collections::HashMap;
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::{fs, path::Path};
 
 use naga::ResourceBinding;
 
@@ -27,7 +26,7 @@ pub fn parse_global_invocation_id(
 
 pub fn parse_bindings(
     arguments: &serde_json::Map<String, serde_json::Value>,
-    program_dir: &Path,
+    #[cfg(not(target_arch = "wasm32"))] program_dir: &Path,
 ) -> Result<HashMap<ResourceBinding, Value>, DebugAdapterError> {
     let Some(bindings) = arguments.get("bindings").and_then(|v| v.as_object()) else {
         return Ok(HashMap::new());
@@ -45,13 +44,22 @@ pub fn parse_bindings(
             let type_str = obj.get("type").and_then(|v| v.as_str()).unwrap_or("f32");
             let value = if let Some(inline) = obj.get("inline") {
                 parse_inline(key, type_str, inline)?
-            } else if let Some(path) = obj.get("file").and_then(|v| v.as_str()) {
-                let format = obj.get("format").and_then(|v| v.as_str()).unwrap_or("ron");
-                parse_file(key, type_str, format, &program_dir.join(path))?
             } else {
-                return Err(DebugAdapterError::Parse(format!(
-                    "Binding '{key}' has neither 'inline' nor 'file'"
-                )));
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(path) = obj.get("file").and_then(|v| v.as_str()) {
+                    let format = obj.get("format").and_then(|v| v.as_str()).unwrap_or("ron");
+                    parse_file(key, type_str, format, &program_dir.join(path))?
+                } else {
+                    return Err(DebugAdapterError::Parse(format!(
+                        "Binding '{key}' has neither 'inline' nor 'file'"
+                    )));
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    return Err(DebugAdapterError::Parse(format!(
+                        "Binding '{key}' missing 'inline' data (file bindings not supported in WASM)"
+                    )));
+                }
             };
 
             Ok((ResourceBinding { group, binding }, value))
@@ -114,6 +122,7 @@ fn typed_array_from_json(
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn typed_array_from_bytes(
     key: &str,
     type_str: &str,
@@ -146,6 +155,7 @@ fn typed_array_from_bytes(
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_file(
     key: &str,
     type_str: &str,
@@ -167,6 +177,7 @@ fn parse_file(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_ron(key: &str, type_str: &str, content: &str) -> Result<Value, DebugAdapterError> {
     let ron_err = |e| DebugAdapterError::Parse(format!("RON parse error for binding '{key}': {e}"));
     Ok(match type_str {
