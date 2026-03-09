@@ -2,11 +2,11 @@
 	"version": "2.0.0",
 	"tasks": [
 		{
-			"label": "cargo build dap",
+			"label": "wasm-pack build",
 			"type": "shell",
-			"command": "cargo build",
+			"command": "wasm-pack build --target web",
 			"options": {
-				"cwd": "${workspaceFolder}/malkovri_wgsl_debugger_dap"
+				"cwd": "${workspaceFolder}/malkovri_wgsl_debugger_wasm"
 			},
 			"group": "build",
 			"presentation": { "reveal": "silent" },
@@ -24,21 +24,20 @@
 			"problemMatcher": []
 		},
 		{
-			"label": "npm compile",
+			"label": "deno build",
 			"type": "shell",
-			"command": "npm run compile",
+			"command": "deno task build",
 			"options": {
 				"cwd": "${workspaceFolder}/vscode_extension"
 			},
-			"dependsOn": ["npm install"],
+			"dependsOn": ["npm install", "wasm-pack build"],
 			"group": "build",
 			"presentation": { "reveal": "silent" },
-			"problemMatcher": "$tsc"
+			"problemMatcher": []
 		},
 		{
 			"label": "build",
-			"dependsOn": ["cargo build dap", "npm compile"],
-			"dependsOrder": "parallel",
+			"dependsOn": ["deno build"],
 			"group": { "kind": "build", "isDefault": true },
 			"problemMatcher": []
 		}

@@ -37,6 +37,9 @@ pub fn parse_bindings(
             let type_str = obj.get("type").and_then(|v| v.as_str()).unwrap_or("f32");
             let value = if let Some(inline) = obj.get("inline") {
                 parse_inline(key, type_str, inline)?
+            } else if let Some(content) = obj.get("fileContent").and_then(|v| v.as_str()) {
+                let format = obj.get("format").and_then(|v| v.as_str()).unwrap_or("ron");
+                parse_file_content(key, type_str, format, content)?
             } else {
                 #[cfg(not(target_arch = "wasm32"))]
                 if let Some(path) = obj.get("file").and_then(|v| v.as_str()) {
@@ -170,7 +173,20 @@ fn parse_file(
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+fn parse_file_content(
+    key: &str,
+    type_str: &str,
+    format: &str,
+    content: &str,
+) -> Result<Value, DebugAdapterError> {
+    match format {
+        "ron" => parse_ron(key, type_str, content),
+        other => Err(DebugAdapterError::Parse(format!(
+            "Format '{other}' with fileContent is not supported for binding '{key}'; use 'inline' instead"
+        ))),
+    }
+}
+
 fn parse_ron(key: &str, type_str: &str, content: &str) -> Result<Value, DebugAdapterError> {
     let ron_err = |e| DebugAdapterError::Parse(format!("RON parse error for binding '{key}': {e}"));
     Ok(match type_str {

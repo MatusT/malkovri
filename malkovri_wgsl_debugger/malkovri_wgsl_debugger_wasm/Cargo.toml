@@ -1,0 +1,12 @@
+[package]
+name = "malkovri_wgsl_debugger_wasm"
+version = "0.1.0"
+edition = "2024"
+license = "EUPL-1.2"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+malkovri_wgsl_debugger_dap = { path = "../malkovri_wgsl_debugger_dap" }
+wasm-bindgen = "0.2"

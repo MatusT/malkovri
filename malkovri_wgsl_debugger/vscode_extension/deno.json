@@ -1,0 +1,10 @@
+{
+  "tasks": {
+    "build": "deno run --allow-read --allow-write --allow-run --allow-env build/build.ts",
+    "watch": "deno run --allow-read --allow-write --allow-run --allow-env build/build.ts --watch"
+  },
+  "compilerOptions": {
+    "strict": true
+  },
+  "nodeModulesDir": "manual"
+}

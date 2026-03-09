@@ -1,3 +1,3 @@
 [workspace]
-members = ["malkovri_wgsl_debugger", "malkovri_wgsl_debugger_dap"]
+members = ["malkovri_wgsl_debugger", "malkovri_wgsl_debugger_dap", "malkovri_wgsl_debugger_wasm"]
 resolver = "2"
