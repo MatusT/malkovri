@@ -1,0 +1,37 @@
+name: Build VSIX
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack
+
+      - name: Build WASM
+        run: wasm-pack build --target bundler malkovri_wgsl_debugger_wasm
+
+      - name: Build extension and package VSIX
+        working-directory: vscode_extension
+        run: deno task package
+
+      - name: Upload VSIX
+        uses: actions/upload-artifact@v4
+        with:
+          name: malkovri-wgsl-debugger-vsix
+          path: vscode_extension/*.vsix
