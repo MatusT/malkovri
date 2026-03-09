@@ -184,7 +184,10 @@ impl DebugAdapter {
             "configurationDone" => self.handle_configuration_done(req.seq, &mut messages)?,
             "threads" => self.handle_threads(req.seq, &mut messages)?,
             "next" => self.handle_next(req.seq, &mut messages)?,
+            "continue" => self.handle_continue(req.seq, &mut messages)?,
             "variables" => self.handle_variables(req, &mut messages)?,
+            "disconnect" => self.handle_disconnect(req.seq, &mut messages)?,
+            "terminate" => self.handle_terminate(req.seq, &mut messages)?,
             _ => {}
         }
 
@@ -551,6 +554,7 @@ impl DebugAdapter {
     ) -> Result<(), DebugAdapterError> {
         let evaluator = self.evaluator_mut()?;
 
+        let mut has_more = false;
         while let Some(statement) = evaluator.step() {
             if !matches!(
                 statement,
@@ -559,12 +563,82 @@ impl DebugAdapter {
                     ..
                 }
             ) {
+                has_more = true;
                 break;
             }
         }
 
         self.queue_response(messages, seq, &serde_json::json!({}))?;
-        self.queue_stopped_event(messages, dapts::StoppedEventReason::Step)?;
+        if has_more {
+            self.queue_stopped_event(messages, dapts::StoppedEventReason::Step)?;
+        } else {
+            self.queue_event(messages, "terminated", &serde_json::json!({}))?;
+        }
+        Ok(())
+    }
+
+    fn handle_continue(
+        &mut self,
+        seq: i64,
+        messages: &mut Vec<OutgoingMessage>,
+    ) -> Result<(), DebugAdapterError> {
+        let evaluator = self
+            .evaluator
+            .as_mut()
+            .ok_or_else(|| DebugAdapterError::InvalidProgram("evaluator not initialized".into()))?;
+
+        let mut has_more = false;
+        while let Some(statement) = evaluator.step() {
+            if matches!(
+                statement,
+                NextStatement {
+                    statement: Statement::Emit(_),
+                    ..
+                }
+            ) {
+                continue;
+            }
+
+            let line = evaluator.current_active_block().and_then(|(block, idx)| {
+                let spans: Vec<_> = block.span_iter().map(|(_, span)| span).collect();
+                Some(spans.get(idx)?.location(&self.program_source).line_number)
+            });
+
+            if let Some(line) = line {
+                if self.breakpoints.iter().any(|bp| bp.verified && bp.line == Some(line)) {
+                    has_more = true;
+                    break;
+                }
+            }
+        }
+
+        self.queue_response(messages, seq, &serde_json::json!({}))?;
+        if has_more {
+            self.queue_stopped_event(messages, dapts::StoppedEventReason::Breakpoint)?;
+        } else {
+            self.queue_event(messages, "terminated", &serde_json::json!({}))?;
+        }
+        Ok(())
+    }
+
+    fn handle_disconnect(
+        &mut self,
+        seq: i64,
+        messages: &mut Vec<OutgoingMessage>,
+    ) -> Result<(), DebugAdapterError> {
+        self.evaluator = None;
+        self.queue_response(messages, seq, &serde_json::json!({}))?;
+        Ok(())
+    }
+
+    fn handle_terminate(
+        &mut self,
+        seq: i64,
+        messages: &mut Vec<OutgoingMessage>,
+    ) -> Result<(), DebugAdapterError> {
+        self.evaluator = None;
+        self.queue_response(messages, seq, &serde_json::json!({}))?;
+        self.queue_event(messages, "terminated", &serde_json::json!({}))?;
         Ok(())
     }
 
