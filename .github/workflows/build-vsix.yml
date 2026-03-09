@@ -27,7 +27,7 @@ jobs:
         run: cargo install wasm-pack
 
       - name: Build WASM
-        run: wasm-pack build --target bundler malkovri_wgsl_debugger_wasm
+        run: wasm-pack build --target web malkovri_wgsl_debugger_wasm
 
       - name: Install dependencies
         working-directory: malkovri_wgsl_debugger/vscode_extension
