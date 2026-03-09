@@ -1,7 +1,7 @@
 {
   "tasks": {
     "build": "deno run --allow-read --allow-write --allow-run --allow-env build/build.ts",
-    "watch": "deno run --allow-read --allow-write --allow-run --allow-env build/build.ts --watch"
+    "package": "deno task build && npx @vscode/vsce package --no-dependencies"
   },
   "compilerOptions": {
     "strict": true
