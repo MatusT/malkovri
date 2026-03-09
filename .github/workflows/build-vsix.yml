@@ -9,6 +9,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: malkovri_wgsl_debugger
     steps:
       - uses: actions/checkout@v4
 
@@ -27,11 +30,11 @@ jobs:
         run: wasm-pack build --target bundler malkovri_wgsl_debugger_wasm
 
       - name: Build extension and package VSIX
-        working-directory: vscode_extension
+        working-directory: malkovri_wgsl_debugger/vscode_extension
         run: deno task package
 
       - name: Upload VSIX
         uses: actions/upload-artifact@v4
         with:
           name: malkovri-wgsl-debugger-vsix
-          path: vscode_extension/*.vsix
+          path: malkovri_wgsl_debugger/vscode_extension/*.vsix
