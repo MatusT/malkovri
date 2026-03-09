@@ -172,26 +172,22 @@ impl DebugAdapter {
         &mut self,
         req: &dapts::Request,
     ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
-        let mut messages = Vec::new();
-
         match req.command.as_str() {
-            "initialize" => self.handle_initialize(req.seq, &mut messages)?,
-            "launch" => self.handle_launch(req, &mut messages)?,
-            "stackTrace" => self.handle_stack_trace(req.seq, &mut messages)?,
-            "scopes" => self.handle_scopes(req.seq, &mut messages)?,
-            "source" => self.handle_source(req, &mut messages)?,
-            "setBreakpoints" => self.handle_set_breakpoints(req, &mut messages)?,
-            "configurationDone" => self.handle_configuration_done(req.seq, &mut messages)?,
-            "threads" => self.handle_threads(req.seq, &mut messages)?,
-            "next" => self.handle_next(req.seq, &mut messages)?,
-            "continue" => self.handle_continue(req.seq, &mut messages)?,
-            "variables" => self.handle_variables(req, &mut messages)?,
-            "disconnect" => self.handle_disconnect(req.seq, &mut messages)?,
-            "terminate" => self.handle_terminate(req.seq, &mut messages)?,
-            _ => {}
+            "initialize" => self.handle_initialize(req.seq),
+            "launch" => self.handle_launch(req),
+            "stackTrace" => self.handle_stack_trace(req.seq),
+            "scopes" => self.handle_scopes(req.seq),
+            "source" => self.handle_source(req),
+            "setBreakpoints" => self.handle_set_breakpoints(req),
+            "configurationDone" => self.handle_configuration_done(req.seq),
+            "threads" => self.handle_threads(req.seq),
+            "next" => self.handle_next(req.seq),
+            "continue" => self.handle_continue(req.seq),
+            "variables" => self.handle_variables(req),
+            "disconnect" => self.handle_disconnect(req.seq),
+            "terminate" => self.handle_terminate(req.seq),
+            _ => Ok(vec![]),
         }
-
-        Ok(messages)
     }
 
     fn evaluator(&self) -> Result<&Evaluator, DebugAdapterError> {
@@ -209,32 +205,30 @@ impl DebugAdapter {
     fn handle_initialize(
         &mut self,
         seq: i64,
-        messages: &mut Vec<OutgoingMessage>,
-    ) -> Result<(), DebugAdapterError> {
-        self.queue_response(
-            messages,
-            seq,
-            &dapts::Capabilities {
-                supports_cancel_request: Some(true),
-                supports_exception_info_request: Some(true),
-                supports_terminate_request: Some(true),
-                supports_restart_request: Some(true),
-                supports_set_variable: Some(true),
-                supports_configuration_done_request: Some(true),
-                supports_conditional_breakpoints: Some(true),
-                supports_hit_conditional_breakpoints: Some(true),
-                ..Default::default()
-            },
-        )?;
-        self.queue_event(messages, "initialized", &serde_json::json!({}))?;
-        Ok(())
+    ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
+        Ok(vec![
+            self.make_response(
+                seq,
+                &dapts::Capabilities {
+                    supports_cancel_request: Some(true),
+                    supports_exception_info_request: Some(true),
+                    supports_terminate_request: Some(true),
+                    supports_restart_request: Some(true),
+                    supports_set_variable: Some(true),
+                    supports_configuration_done_request: Some(true),
+                    supports_conditional_breakpoints: Some(true),
+                    supports_hit_conditional_breakpoints: Some(true),
+                    ..Default::default()
+                },
+            )?,
+            self.make_event("initialized", &serde_json::json!({}))?,
+        ])
     }
 
     fn handle_launch(
         &mut self,
         req: &dapts::Request,
-        messages: &mut Vec<OutgoingMessage>,
-    ) -> Result<(), DebugAdapterError> {
+    ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         let arguments = req
             .arguments
             .as_object()
@@ -293,21 +287,21 @@ impl DebugAdapter {
             bindings,
         ));
 
+        let mut messages = Vec::new();
         if !self.configuration_done {
             self.delayed_init_seq = Some(req.seq);
         } else {
-            self.queue_response(messages, req.seq, &serde_json::json!({}))?;
+            messages.push(self.make_response(req.seq, &serde_json::json!({}))?);
         }
 
-        self.queue_stopped_event(messages, dapts::StoppedEventReason::Entry)?;
-        Ok(())
+        messages.push(self.make_stopped_event(dapts::StoppedEventReason::Entry)?);
+        Ok(messages)
     }
 
     fn handle_stack_trace(
         &mut self,
         seq: i64,
-        messages: &mut Vec<OutgoingMessage>,
-    ) -> Result<(), DebugAdapterError> {
+    ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         let evaluator = self.evaluator()?;
 
         let current_fn = evaluator
@@ -346,8 +340,7 @@ impl DebugAdapter {
             .to_string_lossy()
             .to_string();
 
-        self.queue_response(
-            messages,
+        Ok(vec![self.make_response(
             seq,
             &dapts::StackTraceResponse {
                 stack_frames: vec![dapts::StackFrame {
@@ -374,16 +367,13 @@ impl DebugAdapter {
                 }],
                 total_frames: None,
             },
-        )?;
-
-        Ok(())
+        )?])
     }
 
     fn handle_scopes(
         &mut self,
         seq: i64,
-        messages: &mut Vec<OutgoingMessage>,
-    ) -> Result<(), DebugAdapterError> {
+    ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         let evaluator = self.evaluator()?;
 
         let current_fn = evaluator.current_function().unwrap();
@@ -421,15 +411,13 @@ impl DebugAdapter {
             });
         }
 
-        self.queue_response(messages, seq, &dapts::ScopesResponse { scopes })?;
-        Ok(())
+        Ok(vec![self.make_response(seq, &dapts::ScopesResponse { scopes })?])
     }
 
     fn handle_source(
         &mut self,
         req: &dapts::Request,
-        messages: &mut Vec<OutgoingMessage>,
-    ) -> Result<(), DebugAdapterError> {
+    ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         let arguments = serde_json::from_value::<dapts::SourceArguments>(req.arguments.clone())?;
         let requested_path = arguments
             .source
@@ -453,23 +441,19 @@ impl DebugAdapter {
                 }
             };
 
-        self.queue_response(
-            messages,
+        Ok(vec![self.make_response(
             req.seq,
             &dapts::SourceResponse {
                 content,
                 mime_type: Some("text/plain".to_string()),
             },
-        )?;
-
-        Ok(())
+        )?])
     }
 
     fn handle_set_breakpoints(
         &mut self,
         req: &dapts::Request,
-        messages: &mut Vec<OutgoingMessage>,
-    ) -> Result<(), DebugAdapterError> {
+    ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         let arguments =
             serde_json::from_value::<dapts::SetBreakpointsArguments>(req.arguments.clone())?;
 
@@ -509,33 +493,29 @@ impl DebugAdapter {
             })
             .collect();
 
-        self.queue_response(messages, req.seq, &self.breakpoints.clone())?;
-        Ok(())
+        Ok(vec![self.make_response(req.seq, &self.breakpoints.clone())?])
     }
 
     fn handle_configuration_done(
         &mut self,
         seq: i64,
-        messages: &mut Vec<OutgoingMessage>,
-    ) -> Result<(), DebugAdapterError> {
+    ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         self.configuration_done = true;
-        self.queue_response(messages, seq, &serde_json::json!({}))?;
+        let mut messages = vec![self.make_response(seq, &serde_json::json!({}))?];
 
         if let Some(delayed_init_seq) = self.delayed_init_seq.take() {
-            self.queue_response(messages, delayed_init_seq, &serde_json::json!({}))?;
+            messages.push(self.make_response(delayed_init_seq, &serde_json::json!({}))?);
         }
 
-        self.queue_stopped_event(messages, dapts::StoppedEventReason::Entry)?;
-        Ok(())
+        messages.push(self.make_stopped_event(dapts::StoppedEventReason::Entry)?);
+        Ok(messages)
     }
 
     fn handle_threads(
         &mut self,
         seq: i64,
-        messages: &mut Vec<OutgoingMessage>,
-    ) -> Result<(), DebugAdapterError> {
-        self.queue_response(
-            messages,
+    ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
+        Ok(vec![self.make_response(
             seq,
             &dapts::ThreadsResponse {
                 threads: vec![dapts::Thread {
@@ -543,15 +523,13 @@ impl DebugAdapter {
                     name: "Main Thread".to_string(),
                 }],
             },
-        )?;
-        Ok(())
+        )?])
     }
 
     fn handle_next(
         &mut self,
         seq: i64,
-        messages: &mut Vec<OutgoingMessage>,
-    ) -> Result<(), DebugAdapterError> {
+    ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         let evaluator = self.evaluator_mut()?;
 
         let mut has_more = false;
@@ -568,24 +546,24 @@ impl DebugAdapter {
             }
         }
 
-        self.queue_response(messages, seq, &serde_json::json!({}))?;
+        let mut messages = vec![self.make_response(seq, &serde_json::json!({}))?];
         if has_more {
-            self.queue_stopped_event(messages, dapts::StoppedEventReason::Step)?;
+            messages.push(self.make_stopped_event(dapts::StoppedEventReason::Step)?);
         } else {
-            self.queue_event(messages, "terminated", &serde_json::json!({}))?;
+            messages.push(self.make_event("terminated", &serde_json::json!({}))?);
         }
-        Ok(())
+        Ok(messages)
     }
 
     fn handle_continue(
         &mut self,
         seq: i64,
-        messages: &mut Vec<OutgoingMessage>,
-    ) -> Result<(), DebugAdapterError> {
-        let evaluator = self
-            .evaluator
-            .as_mut()
-            .ok_or_else(|| DebugAdapterError::InvalidProgram("evaluator not initialized".into()))?;
+    ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
+        let evaluator = self.evaluator.as_mut().ok_or_else(|| {
+            DebugAdapterError::InvalidProgram("evaluator not initialized".into())
+        })?;
+        let source = &self.program_source;
+        let breakpoints = &self.breakpoints;
 
         let mut has_more = false;
         while let Some(statement) = evaluator.step() {
@@ -599,54 +577,46 @@ impl DebugAdapter {
                 continue;
             }
 
-            let line = evaluator.current_active_block().and_then(|(block, idx)| {
-                let spans: Vec<_> = block.span_iter().map(|(_, span)| span).collect();
-                Some(spans.get(idx)?.location(&self.program_source).line_number)
-            });
-
-            if let Some(line) = line {
-                if self.breakpoints.iter().any(|bp| bp.verified && bp.line == Some(line)) {
+            if let Some(line) = evaluator.current_line(source) {
+                if breakpoints.iter().any(|bp| bp.verified && bp.line == Some(line)) {
                     has_more = true;
                     break;
                 }
             }
         }
 
-        self.queue_response(messages, seq, &serde_json::json!({}))?;
+        let mut messages = vec![self.make_response(seq, &serde_json::json!({}))?];
         if has_more {
-            self.queue_stopped_event(messages, dapts::StoppedEventReason::Breakpoint)?;
+            messages.push(self.make_stopped_event(dapts::StoppedEventReason::Breakpoint)?);
         } else {
-            self.queue_event(messages, "terminated", &serde_json::json!({}))?;
+            messages.push(self.make_event("terminated", &serde_json::json!({}))?);
         }
-        Ok(())
+        Ok(messages)
     }
 
     fn handle_disconnect(
         &mut self,
         seq: i64,
-        messages: &mut Vec<OutgoingMessage>,
-    ) -> Result<(), DebugAdapterError> {
+    ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         self.evaluator = None;
-        self.queue_response(messages, seq, &serde_json::json!({}))?;
-        Ok(())
+        Ok(vec![self.make_response(seq, &serde_json::json!({}))?])
     }
 
     fn handle_terminate(
         &mut self,
         seq: i64,
-        messages: &mut Vec<OutgoingMessage>,
-    ) -> Result<(), DebugAdapterError> {
+    ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         self.evaluator = None;
-        self.queue_response(messages, seq, &serde_json::json!({}))?;
-        self.queue_event(messages, "terminated", &serde_json::json!({}))?;
-        Ok(())
+        Ok(vec![
+            self.make_response(seq, &serde_json::json!({}))?,
+            self.make_event("terminated", &serde_json::json!({}))?,
+        ])
     }
 
     fn handle_variables(
         &mut self,
         req: &dapts::Request,
-        messages: &mut Vec<OutgoingMessage>,
-    ) -> Result<(), DebugAdapterError> {
+    ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         let argument = serde_json::from_value::<dapts::VariablesArguments>(req.arguments.clone())?;
         let evaluator = self.evaluator()?;
 
@@ -689,8 +659,7 @@ impl DebugAdapter {
             _ => vec![],
         };
 
-        self.queue_response(messages, req.seq, &dapts::VariablesResponse { variables })?;
-        Ok(())
+        Ok(vec![self.make_response(req.seq, &dapts::VariablesResponse { variables })?])
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -743,41 +712,35 @@ impl DebugAdapter {
         Ok(())
     }
 
-    fn queue_response<T: Serialize + Debug>(
+    fn make_response<T: Serialize + Debug>(
         &mut self,
-        messages: &mut Vec<OutgoingMessage>,
         request_seq: i64,
         body: &T,
-    ) -> Result<(), DebugAdapterError> {
-        messages.push(OutgoingMessage::Response {
+    ) -> Result<OutgoingMessage, DebugAdapterError> {
+        Ok(OutgoingMessage::Response {
             seq: self.next_sequence_number(),
             request_seq,
             body: serde_json::to_value(body)?,
-        });
-        Ok(())
+        })
     }
 
-    fn queue_event<T: Serialize + Debug>(
+    fn make_event<T: Serialize + Debug>(
         &mut self,
-        messages: &mut Vec<OutgoingMessage>,
         event: &str,
         body: &T,
-    ) -> Result<(), DebugAdapterError> {
-        messages.push(OutgoingMessage::Event {
+    ) -> Result<OutgoingMessage, DebugAdapterError> {
+        Ok(OutgoingMessage::Event {
             seq: self.next_sequence_number(),
             event: event.to_string(),
             body: serde_json::to_value(body)?,
-        });
-        Ok(())
+        })
     }
 
-    fn queue_stopped_event(
+    fn make_stopped_event(
         &mut self,
-        messages: &mut Vec<OutgoingMessage>,
         reason: dapts::StoppedEventReason,
-    ) -> Result<(), DebugAdapterError> {
-        self.queue_event(
-            messages,
+    ) -> Result<OutgoingMessage, DebugAdapterError> {
+        self.make_event(
             "stopped",
             &dapts::StoppedEvent {
                 reason,

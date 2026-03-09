@@ -133,6 +133,12 @@ impl Evaluator {
         Some((top.statements(), top.current_statement_index()))
     }
 
+    pub fn current_line(&self, source: &str) -> Option<u32> {
+        let (block, idx) = self.current_active_block()?;
+        let spans: Vec<_> = block.span_iter().map(|(_, span)| span).collect();
+        Some(spans.get(idx)?.location(source).line_number)
+    }
+
     /// Evaluate the current function arguments in declaration order.
     pub fn current_function_argument_values(&self) -> Vec<(Option<String>, Value)> {
         let func_idx = match self.current_function_frame_index() {
