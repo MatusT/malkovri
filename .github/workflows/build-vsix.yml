@@ -29,6 +29,10 @@ jobs:
       - name: Build WASM
         run: wasm-pack build --target bundler malkovri_wgsl_debugger_wasm
 
+      - name: Install dependencies
+        working-directory: malkovri_wgsl_debugger/vscode_extension
+        run: deno install
+
       - name: Build extension and package VSIX
         working-directory: malkovri_wgsl_debugger/vscode_extension
         run: deno task package
