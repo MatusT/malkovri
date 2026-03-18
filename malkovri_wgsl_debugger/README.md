@@ -1,5 +1,8 @@
 # WGSL Debugger
 
+[![Build VSIX](https://github.com/MatusT/malkovri/actions/workflows/build-vsix.yml/badge.svg)](https://github.com/MatusT/malkovri/actions/workflows/build-vsix.yml)
+[![Download VSIX](https://img.shields.io/badge/download-VSIX-blue)](https://nightly.link/MatusT/malkovri/workflows/build-vsix/main/malkovri-wgsl-debugger-vsix.zip)
+
 A DAP (Debug Adapter Protocol) debugger for WGSL shaders, with a VS Code extension.
 
 Simulates shader execution on the CPU using [naga](https://github.com/gfx-rs/naga) and exposes (so far) step-through, and variable inspection via the standard debug adapter protocol.
