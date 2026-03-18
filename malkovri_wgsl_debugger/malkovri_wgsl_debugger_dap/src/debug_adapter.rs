@@ -377,8 +377,9 @@ impl DebugAdapter {
         let evaluator = self.evaluator()?;
 
         let current_fn = evaluator.current_function().unwrap();
+        let in_scope_locals = evaluator.local_variables_in_current_scope();
         let named_variables_len =
-            current_fn.local_variables.len() + current_fn.named_expressions.len();
+            in_scope_locals.len() + evaluator.named_expression_values().len();
         let function_arguments_len = current_fn.arguments.len();
 
         let mut scopes = vec![dapts::Scope {
@@ -623,11 +624,14 @@ impl DebugAdapter {
         let current_fn = evaluator.current_function().unwrap();
         let current_state = evaluator.current_function_frame().unwrap();
 
+        let local_variables_in_scope = evaluator.local_variables_in_current_scope();
+
         let variables = match argument.variables_reference {
             LOCALS_SCOPE_REF => {
                 let mut vars: Vec<dapts::Variable> = current_fn
                     .local_variables
                     .iter()
+                    .filter(|(handle, _)| local_variables_in_scope.contains(handle))
                     .map(|(handle, local)| {
                         let val = current_state
                             .local_variables

@@ -17,7 +17,7 @@ pub enum ControlFlow {
 }
 
 /// Identifies a function in the module without owning/cloning it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum FunctionRef {
     /// An entry-point function, looked up via `module.entry_points[index].function`.
     EntryPoint(usize),
@@ -34,7 +34,6 @@ pub enum BlockKind {
     /// A loop with body and continuing phases.
     /// `other_block` holds whichever block is *not* currently executing:
     /// while running the body it holds `continuing`, and vice versa.
-    /// Switching phases is done via `std::mem::swap` — no cloning needed.
     Loop {
         other_block: naga::Block,
         break_if: Option<Handle<Expression>>,
@@ -48,7 +47,7 @@ pub enum BlockKind {
 /// A function call frame on the unified execution stack.
 #[derive(Clone, Debug)]
 pub struct FunctionFrame {
-    /// Reference to the function in the module (no owned clone).
+    /// Reference to the function in the module.
     pub function_ref: FunctionRef,
     pub local_variables: HashMap<Handle<LocalVariable>, Value>,
     pub evaluated_expressions: HashMap<Handle<Expression>, Value>,
@@ -72,6 +71,10 @@ pub struct BlockFrame {
     pub statements: naga::Block,
     pub current_statement_index: usize,
     pub kind: BlockKind,
+    /// The source span of the statement that created this block frame (e.g. the
+    /// `for`/`loop`/`if`/`switch` statement span from the parent block).
+    /// Used to reconstruct lexical scoping for local variables.
+    pub source_span: naga::Span,
 }
 
 impl BlockFrame {
@@ -135,6 +138,16 @@ impl StackFrame {
         match self {
             StackFrame::Function(f) => f.current_statement_index += 1,
             StackFrame::Block(b) => b.current_statement_index += 1,
+        }
+    }
+
+    /// The source span of this frame's block.
+    pub fn source_span(&self) -> naga::Span {
+        match self {
+            StackFrame::Function(f) => {
+                naga::Span::total_span(f.statements.span_iter().map(|(_, s)| *s))
+            }
+            StackFrame::Block(b) => b.source_span,
         }
     }
 

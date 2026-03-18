@@ -6,9 +6,9 @@ use crate::{
     value::Value,
 };
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, collections::HashSet, rc::Rc, sync::Arc};
 
-use naga::{Expression, GlobalVariable, Handle, LocalVariable, Module, Statement};
+use naga::{Expression, GlobalVariable, Handle, LocalVariable, Module, Span, Statement};
 
 #[derive(Copy, Clone, Debug, Default, serde::Deserialize)]
 #[serde(default)]
@@ -53,6 +53,13 @@ pub struct Evaluator {
     pub(crate) entry_point_inputs: EntryPointInputs,
     pub(crate) global_values: HashMap<naga::Handle<GlobalVariable>, Value>,
     pub(crate) stack: Vec<StackFrame>,
+    /// Pre-computed: maps each local variable to the span of the block that declares it.
+    function_declaring_scopes:
+        HashMap<FunctionRef, HashMap<Handle<LocalVariable>, std::ops::Range<usize>>>,
+    /// Pre-computed: maps each named expression to the span of the block that declares it
+    /// (determined by the `Emit` statement that covers the expression handle).
+    named_expr_declaring_scopes:
+        HashMap<FunctionRef, HashMap<Handle<Expression>, std::ops::Range<usize>>>,
 }
 
 impl Evaluator {
@@ -63,6 +70,33 @@ impl Evaluator {
         global_values: HashMap<naga::ResourceBinding, Value>,
     ) -> Self {
         let statements = module.entry_points[entry_point_index].function.body.clone();
+
+        let mut function_declaring_scopes = HashMap::new();
+        let mut named_expr_declaring_scopes = HashMap::new();
+        for (handle, function) in module.functions.iter() {
+            let fref = FunctionRef::Called(handle);
+            let block_scopes = Self::collect_all_block_scopes(function);
+            function_declaring_scopes.insert(
+                fref.clone(),
+                Self::local_declaring_scopes(function, &block_scopes),
+            );
+            named_expr_declaring_scopes.insert(
+                fref,
+                Self::named_expression_declaring_scopes(function, &block_scopes),
+            );
+        }
+        for (i, entry_point) in module.entry_points.iter().enumerate() {
+            let fref = FunctionRef::EntryPoint(i);
+            let block_scopes = Self::collect_all_block_scopes(&entry_point.function);
+            function_declaring_scopes.insert(
+                fref.clone(),
+                Self::local_declaring_scopes(&entry_point.function, &block_scopes),
+            );
+            named_expr_declaring_scopes.insert(
+                fref,
+                Self::named_expression_declaring_scopes(&entry_point.function, &block_scopes),
+            );
+        }
 
         let mut evaluator = Evaluator {
             global_values: global_values
@@ -89,9 +123,104 @@ impl Evaluator {
                 call_result_handle: None,
                 control_flow: ControlFlow::None,
             }))],
+            function_declaring_scopes,
+            named_expr_declaring_scopes,
         };
         evaluator.initialize_local_variables();
         evaluator
+    }
+
+    /// Collect all block scopes (the function body + nested blocks) for scope analysis.
+    fn collect_all_block_scopes(function: &naga::Function) -> Vec<Span> {
+        let mut block_scopes = vec![Span::total_span(function.body.span_iter().map(|(_, s)| *s))];
+        block_scopes.extend(Self::collect_block_spans(function.body.span_iter()));
+        block_scopes
+    }
+
+    /// Find the smallest block scope that fully contains `item_range`.
+    fn smallest_enclosing_scope(
+        block_scopes: &[Span],
+        item_range: &std::ops::Range<usize>,
+    ) -> std::ops::Range<usize> {
+        block_scopes
+            .iter()
+            .filter_map(|scope| {
+                scope
+                    .to_range()
+                    .filter(|s| s.start <= item_range.start && item_range.end <= s.end)
+            })
+            .min_by_key(|s| s.end - s.start)
+            .unwrap_or(0..usize::MAX)
+    }
+
+    fn local_declaring_scopes(
+        function: &naga::Function,
+        block_scopes: &[Span],
+    ) -> HashMap<Handle<LocalVariable>, std::ops::Range<usize>> {
+        function
+            .local_variables
+            .iter()
+            .filter_map(|(handle, _)| {
+                let variable_range = function.local_variables.get_span(handle).to_range()?;
+                Some((
+                    handle,
+                    Self::smallest_enclosing_scope(block_scopes, &variable_range),
+                ))
+            })
+            .collect()
+    }
+
+    fn named_expression_declaring_scopes(
+        function: &naga::Function,
+        block_scopes: &[Span],
+    ) -> HashMap<Handle<Expression>, std::ops::Range<usize>> {
+        // Build a map from expression handle → span of the Emit statement that covers it.
+        let mut emit_spans: HashMap<Handle<Expression>, Span> = HashMap::new();
+        Self::collect_emit_spans(&function.body, &mut emit_spans);
+
+        function
+            .named_expressions
+            .iter()
+            .map(|(handle, _)| {
+                let scope = emit_spans
+                    .get(handle)
+                    .and_then(|sp| sp.to_range())
+                    .map(|r| Self::smallest_enclosing_scope(block_scopes, &r))
+                    .unwrap_or(0..usize::MAX);
+                (*handle, scope)
+            })
+            .collect()
+    }
+
+    /// Walk all blocks recursively and record the span of each `Emit` statement
+    /// for every expression handle it covers.
+    fn collect_emit_spans(block: &naga::Block, out: &mut HashMap<Handle<Expression>, Span>) {
+        for (statement, span) in block.span_iter() {
+            match statement {
+                Statement::Emit(range) => {
+                    for handle in range.clone() {
+                        out.insert(handle, *span);
+                    }
+                }
+                Statement::Block(inner) => Self::collect_emit_spans(inner, out),
+                Statement::If { accept, reject, .. } => {
+                    Self::collect_emit_spans(accept, out);
+                    Self::collect_emit_spans(reject, out);
+                }
+                Statement::Loop {
+                    body, continuing, ..
+                } => {
+                    Self::collect_emit_spans(body, out);
+                    Self::collect_emit_spans(continuing, out);
+                }
+                Statement::Switch { cases, .. } => {
+                    for case in cases {
+                        Self::collect_emit_spans(&case.body, out);
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Resolve a [`FunctionRef`] to the actual `naga::Function` in the module.
@@ -99,6 +228,14 @@ impl Evaluator {
         match fref {
             FunctionRef::EntryPoint(idx) => &self.module.entry_points[*idx].function,
             FunctionRef::Called(handle) => &self.module.functions[*handle],
+        }
+    }
+
+    /// Resolve the `naga::Function` for the function frame at `function_index`.
+    fn resolve_function_at(&self, function_index: usize) -> &naga::Function {
+        match &self.stack[function_index] {
+            StackFrame::Function(f) => self.resolve_function(&f.function_ref),
+            _ => unreachable!(),
         }
     }
 
@@ -120,6 +257,16 @@ impl Evaluator {
     pub fn current_function_frame(&self) -> Option<&FunctionFrame> {
         let function_index = self.current_function_frame_index()?;
         match &self.stack[function_index] {
+            StackFrame::Function(f) => Some(f),
+            StackFrame::Block(_) => None,
+        }
+    }
+
+    /// Return a mutable reference to the current function frame (the nearest `Function` variant on the
+    /// stack), or `None` if the stack is empty.
+    pub fn current_function_frame_mut(&mut self) -> Option<&mut FunctionFrame> {
+        let function_index = self.current_function_frame_index()?;
+        match &mut self.stack[function_index] {
             StackFrame::Function(f) => Some(f),
             StackFrame::Block(_) => None,
         }
@@ -170,7 +317,100 @@ impl Evaluator {
             .rposition(|sf| matches!(sf, StackFrame::Function(_)))
     }
 
-    /// Evaluate all named expressions (WGSL `let` bindings) in the current function frame.
+    /// Returns local variable handles that are lexically in scope at the
+    /// current execution point: declared before the current position and
+    /// owned by a block that contains the current scope.
+    pub fn local_variables_in_current_scope(&self) -> HashSet<Handle<LocalVariable>> {
+        let func_idx = match self.current_function_frame_index() {
+            Some(i) => i,
+            None => return HashSet::new(),
+        };
+
+        let function = self.resolve_function_at(func_idx);
+        let frame = self.current_function_frame().unwrap();
+        let declaring_scopes = self
+            .function_declaring_scopes
+            .get(&frame.function_ref)
+            .unwrap();
+
+        let current_block = self.stack.last();
+
+        // The span of the current (innermost) execution scope.
+        let current_scope = current_block
+            .and_then(|frame| frame.source_span().to_range())
+            .unwrap_or(0..usize::MAX);
+
+        // Current execution position for the "declared before" check.
+        let current_pos = current_block.and_then(|frame| {
+            let idx = frame.current_statement_index();
+            frame
+                .statements()
+                .span_iter()
+                .nth(idx)
+                .and_then(|(_, sp)| sp.to_range())
+                .map(|r| r.start)
+        });
+
+        function
+            .local_variables
+            .iter()
+            .filter_map(|(handle, _)| {
+                let var_range = function.local_variables.get_span(handle).to_range()?;
+                let var_end = var_range.end;
+
+                // Skip variables whose declaration we haven't stepped past.
+                if current_pos.is_some_and(|pos| pos < var_end) {
+                    return None;
+                }
+
+                let declaring_scope = declaring_scopes.get(&handle)?;
+
+                // Variable is visible iff the current scope is nested inside the declaring scope.
+                (declaring_scope.contains(&current_scope.start)
+                    && current_scope.end <= declaring_scope.end)
+                    .then_some(handle)
+            })
+            .collect()
+    }
+
+    /// Recursively collect spans of all inner blocks in the block tree.
+    fn collect_block_spans<'a>(
+        statements: impl Iterator<Item = (&'a Statement, &'a Span)>,
+    ) -> Vec<Span> {
+        let mut spans = Vec::new();
+        for (statement, statement_span) in statements {
+            match statement {
+                Statement::Block(inner) => {
+                    spans.push(Span::total_span(inner.span_iter().map(|(_, s)| *s)));
+                    spans.extend(Self::collect_block_spans(inner.span_iter()));
+                }
+                Statement::If { accept, reject, .. } => {
+                    spans.push(Span::total_span(accept.span_iter().map(|(_, s)| *s)));
+                    spans.extend(Self::collect_block_spans(accept.span_iter()));
+                    spans.push(Span::total_span(reject.span_iter().map(|(_, s)| *s)));
+                    spans.extend(Self::collect_block_spans(reject.span_iter()));
+                }
+                Statement::Loop {
+                    body, continuing, ..
+                } => {
+                    spans.push(*statement_span);
+                    spans.extend(Self::collect_block_spans(body.span_iter()));
+                    spans.extend(Self::collect_block_spans(continuing.span_iter()));
+                }
+                Statement::Switch { cases, .. } => {
+                    for case in cases {
+                        spans.push(Span::total_span(case.body.span_iter().map(|(_, s)| *s)));
+                        spans.extend(Self::collect_block_spans(case.body.span_iter()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        spans
+    }
+
+    /// Evaluate all named expressions (WGSL `let` bindings) in the current function frame
+    /// that are in scope at the current execution point.
     /// Returns `(name, value)` pairs in source order.
     pub fn named_expression_values(&self) -> Vec<(String, Value)> {
         let func_idx = match self.current_function_frame_index() {
@@ -181,9 +421,39 @@ impl Evaluator {
             return vec![];
         };
         let function = self.resolve_function(&frame.function_ref);
+        let declaring_scopes = match self.named_expr_declaring_scopes.get(&frame.function_ref) {
+            Some(s) => s,
+            None => return vec![],
+        };
+
+        let current_scope = self
+            .stack
+            .last()
+            .and_then(|frame| frame.source_span().to_range())
+            .unwrap_or(0..usize::MAX);
+
+        let mut emitted = HashSet::new();
+        for frame_idx in func_idx..self.stack.len() {
+            for (stmt, _) in self.stack[frame_idx].statements().span_iter() {
+                if let Statement::Emit(range) = stmt {
+                    emitted.extend(range.clone());
+                }
+            }
+        }
+
         function
             .named_expressions
             .iter()
+            .filter(|(handle, _)| {
+                if !emitted.contains(handle) {
+                    return false;
+                }
+                let Some(declaring_scope) = declaring_scopes.get(handle) else {
+                    return false;
+                };
+                declaring_scope.start <= current_scope.start
+                    && current_scope.end <= declaring_scope.end
+            })
             .map(|(handle, name)| (name.clone(), self.evaluate_expression(*handle)))
             .collect()
     }
@@ -265,10 +535,13 @@ impl Evaluator {
         {
             let current_function_index = self.current_function_frame_index()?;
             let current_statement_index = self.stack.last()?.current_statement_index();
-            let current_statement =
-                self.stack.last()?.statements()[current_statement_index].clone();
+            let block = self.stack.last()?.statements();
+            let (current_statement, statement_span) = block
+                .span_iter()
+                .nth(current_statement_index)
+                .map(|(s, sp)| (s.clone(), *sp))?;
 
-            self.handle_statement(current_statement, current_function_index);
+            self.handle_statement(current_statement, current_function_index, statement_span);
         }
 
         self.stack[caller_frame_index].increment_statement_index();
@@ -280,13 +553,24 @@ impl Evaluator {
         self.peek_next_statement()
     }
 
+    /// Step through consecutive Emit statements so that variables are tracked
+    /// before the debugger stops.
+    pub fn skip_emits(&mut self) {
+        while let Some(next) = self.peek_next_statement() {
+            if matches!(next.statement, Statement::Emit(_)) {
+                self.step();
+            } else {
+                break;
+            }
+        }
+    }
+
     fn peek_next_statement(&self) -> Option<NextStatement> {
         let frame = self.current_function_frame()?;
 
-        let current_statement_index = self.stack.last()?.current_statement_index();
-        let current_statement = self
-            .stack
-            .last()?
+        let current_block = self.stack.last()?;
+        let current_statement_index = current_block.current_statement_index();
+        let current_statement = current_block
             .statements()
             .get(current_statement_index)?
             .clone();
@@ -409,11 +693,14 @@ impl Evaluator {
 
 // Statement dispatch
 impl Evaluator {
-    fn handle_statement(&mut self, statement: Statement, function_index: usize) {
+    fn handle_statement(
+        &mut self,
+        statement: Statement,
+        function_index: usize,
+        statement_span: naga::Span,
+    ) {
         match statement {
-            Statement::Emit(_) => {
-                // Expressions are evaluated lazily on demand.
-            }
+            Statement::Emit(_) => {}
             Statement::Call {
                 function: function_handle,
                 arguments,
@@ -435,13 +722,14 @@ impl Evaluator {
                 accept,
                 reject,
             } => {
-                self.handle_if(condition, accept, reject);
+                self.handle_if(condition, accept, reject, statement_span);
             }
             Statement::Block(block) => {
                 self.stack.push(StackFrame::Block(BlockFrame {
                     statements: block,
                     current_statement_index: 0,
                     kind: BlockKind::Plain,
+                    source_span: statement_span,
                 }));
             }
             Statement::Loop {
@@ -457,10 +745,11 @@ impl Evaluator {
                         break_if,
                         in_continuing: false,
                     },
+                    source_span: statement_span,
                 }));
             }
             Statement::Switch { selector, cases } => {
-                self.handle_switch(selector, cases);
+                self.handle_switch(selector, cases, statement_span);
             }
             Statement::Break => {
                 if let StackFrame::Function(ref mut frame) = self.stack[function_index] {
@@ -515,19 +804,15 @@ impl Evaluator {
     }
 
     fn initialize_local_variables(&mut self) {
-        let func_idx = match self.current_function_frame_index() {
+        let function_index = match self.current_function_frame_index() {
             Some(i) => i,
             None => return,
         };
 
-        let mut insert_variables: Vec<(Handle<LocalVariable>, Value)> = Vec::new();
-
-        let StackFrame::Function(ref frame) = self.stack[func_idx] else {
-            return;
-        };
-        let function = self.resolve_function(&frame.function_ref);
+        let function = self.resolve_function_at(function_index);
         let local_vars: Vec<_> = function.local_variables.iter().collect();
 
+        let mut insert_variables: Vec<(Handle<LocalVariable>, Value)> = Vec::new();
         for (handle, local_var) in local_vars {
             let value = match &local_var.init {
                 Some(init_expr) => self.evaluate_expression(*init_expr),
@@ -539,12 +824,13 @@ impl Evaluator {
             insert_variables.push((handle, value));
         }
 
+        let StackFrame::Function(ref mut frame) = self.stack[function_index] else {
+            unreachable!();
+        };
         for (handle, value) in insert_variables {
-            if let StackFrame::Function(ref mut frame) = self.stack[func_idx] {
-                frame
-                    .local_variables
-                    .insert(handle, Value::Pointer(Rc::new(RefCell::new(value))));
-            }
+            frame
+                .local_variables
+                .insert(handle, Value::Pointer(Rc::new(RefCell::new(value))));
         }
     }
 
@@ -553,23 +839,32 @@ impl Evaluator {
         condition: Handle<Expression>,
         accept: naga::Block,
         reject: naga::Block,
+        statement_span: naga::Span,
     ) {
         let condition_result = self.evaluate_expression(condition);
+
         let branch = if condition_result.is_truthy() {
             accept
         } else {
             reject
         };
+
         if !branch.is_empty() {
             self.stack.push(StackFrame::Block(BlockFrame {
                 statements: branch,
                 current_statement_index: 0,
                 kind: BlockKind::Plain,
+                source_span: statement_span,
             }));
         }
     }
 
-    fn handle_switch(&mut self, selector: Handle<Expression>, cases: Vec<naga::SwitchCase>) {
+    fn handle_switch(
+        &mut self,
+        selector: Handle<Expression>,
+        cases: Vec<naga::SwitchCase>,
+        statement_span: naga::Span,
+    ) {
         let selector_val = self.evaluate_expression(selector);
 
         let selector_i32 = match selector_val {
@@ -601,6 +896,7 @@ impl Evaluator {
                 statements: body,
                 current_statement_index: 0,
                 kind: BlockKind::Switch,
+                source_span: statement_span,
             }));
         }
     }
