@@ -48,7 +48,9 @@ npm run compile
   "request": "launch",
   "name": "Debug shader",
   "program": "${workspaceFolder}/shader.wgsl",
-  "global_invocation_id": [0, 0, 0],
+  "shaderInputs": {
+    "global_invocation_id": [0, 0, 0]
+  },
   "bindings": {
     "0:0": {
       "type": "f32",
@@ -65,7 +67,7 @@ npm run compile
 | Field                  | Type                          | Description                                                                        |
 |------------------------|-------------------------------|------------------------------------------------------------------------------------|
 | `program`              | string                        | Absolute path to the WGSL shader file.                                             |
-| `global_invocation_id` | `[u, u, u]`                   | `@builtin(global_invocation_id)` passed to the entry point. Defaults to `[0,0,0]`. |
+| `shaderInputs`         | object                        | Entry-point builtin values (e.g. `global_invocation_id`, `workgroup_id`, …).       |
 | `bindings`             | object                        | Resource bindings keyed by `"group:binding"` (e.g. `"0:0"`).                       |
 | `bindings[].type`      | `"f32"` \| `"i32"` \| `"u32"` | Element type of the buffer.                                                        |
 | `bindings[].inline`    | array                         | Inline data values.                                                                |

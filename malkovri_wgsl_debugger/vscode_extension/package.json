@@ -26,11 +26,84 @@
                 "type": "string",
                 "description": "Absolute path to the WGSL shader file to debug."
               },
-              "global_invocation_id": {
-                "type": "array",
-                "items": { "type": "integer", "minimum": 0 },
-                "default": [0, 0, 0],
-                "description": "The @builtin(global_invocation_id) value passed to the entry point."
+              "shaderInputs": {
+                "type": "object",
+                "description": "Entry-point builtin values passed to the shader.",
+                "default": {},
+                "properties": {
+                  "global_invocation_id": {
+                    "type": "array",
+                    "items": { "type": "integer", "minimum": 0 },
+                    "default": [0, 0, 0],
+                    "description": "@builtin(global_invocation_id)"
+                  },
+                  "local_invocation_id": {
+                    "type": "array",
+                    "items": { "type": "integer", "minimum": 0 },
+                    "default": [0, 0, 0],
+                    "description": "@builtin(local_invocation_id)"
+                  },
+                  "local_invocation_index": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 0,
+                    "description": "@builtin(local_invocation_index)"
+                  },
+                  "workgroup_id": {
+                    "type": "array",
+                    "items": { "type": "integer", "minimum": 0 },
+                    "default": [0, 0, 0],
+                    "description": "@builtin(workgroup_id)"
+                  },
+                  "workgroup_size": {
+                    "type": "array",
+                    "items": { "type": "integer", "minimum": 0 },
+                    "default": [0, 0, 0],
+                    "description": "@builtin(workgroup_size)"
+                  },
+                  "num_workgroups": {
+                    "type": "array",
+                    "items": { "type": "integer", "minimum": 0 },
+                    "default": [0, 0, 0],
+                    "description": "@builtin(num_workgroups)"
+                  },
+                  "vertex_index": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 0,
+                    "description": "@builtin(vertex_index)"
+                  },
+                  "instance_index": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 0,
+                    "description": "@builtin(instance_index)"
+                  },
+                  "front_facing": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "@builtin(front_facing)"
+                  },
+                  "position": {
+                    "type": "array",
+                    "items": { "type": "number" },
+                    "default": [0, 0, 0, 0],
+                    "description": "@builtin(position)"
+                  },
+                  "sample_index": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 0,
+                    "description": "@builtin(sample_index)"
+                  },
+                  "sample_mask": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 0,
+                    "description": "@builtin(sample_mask)"
+                  }
+                },
+                "additionalProperties": true
               },
               "bindings": {
                 "type": "object",
