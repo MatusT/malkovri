@@ -33,7 +33,7 @@ impl ModuleScopes {
         self.functions.get(fref).map(|s| &s.locals)
     }
 
-    pub fn named_expr_scopes(
+    pub fn named_expression_scopes(
         &self,
         fref: &FunctionRef,
     ) -> Option<&HashMap<Handle<Expression>, std::ops::Range<usize>>> {

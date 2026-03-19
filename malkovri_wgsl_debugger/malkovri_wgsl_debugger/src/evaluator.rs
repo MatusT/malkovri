@@ -112,14 +112,26 @@ impl Evaluator {
         }
     }
 
+    /// Return a reference to the topmost stack frame (function or block).
+    fn current_frame(&self) -> Result<&StackFrame, EvaluatorError> {
+        self.stack
+            .last()
+            .ok_or_else(|| EvaluatorError::InternalError("stack is empty".into()))
+    }
+
+    /// Index of the topmost stack frame.
+    fn current_frame_index(&self) -> Result<usize, EvaluatorError> {
+        if self.stack.is_empty() {
+            return Err(EvaluatorError::InternalError("stack is empty".into()));
+        }
+        Ok(self.stack.len() - 1)
+    }
+
     /// Return the statements and current index of the top-of-stack frame.
     /// Unlike `current_function_frame`, this reflects the innermost active block,
     /// which may be a nested `if`/`loop`/`switch` block rather than the function body.
     pub fn current_active_block(&self) -> Result<(&naga::Block, usize), EvaluatorError> {
-        let top = self
-            .stack
-            .last()
-            .ok_or_else(|| EvaluatorError::InternalError("stack is empty".into()))?;
+        let top = self.current_frame()?;
         Ok((top.statements(), top.current_statement_index()))
     }
 
@@ -185,23 +197,20 @@ impl Evaluator {
                 EvaluatorError::InternalError("missing local declaring scopes".into())
             })?;
 
-        let current_block = self.stack.last();
-
+        let current_block = self.current_frame()?;
         // The span of the current (innermost) execution scope.
         let current_scope = current_block
-            .and_then(|frame| frame.source_span().to_range())
+            .source_span()
+            .to_range()
             .unwrap_or(0..usize::MAX);
 
         // Current execution position for the "declared before" check.
-        let current_pos = current_block.and_then(|frame| {
-            let idx = frame.current_statement_index();
-            frame
-                .statements()
-                .span_iter()
-                .nth(idx)
-                .and_then(|(_, sp)| sp.to_range())
-                .map(|r| r.start)
-        });
+        let current_pos = current_block
+            .statements()
+            .span_iter()
+            .nth(current_block.current_statement_index())
+            .and_then(|(_, sp)| sp.to_range())
+            .map(|r| r.start);
 
         Ok(function
             .local_variables
@@ -229,24 +238,20 @@ impl Evaluator {
     /// that are in scope at the current execution point.
     /// Returns `(name, value)` pairs in source order.
     pub fn named_expression_values(&self) -> Result<Vec<(String, Value)>, EvaluatorError> {
-        let func_idx = self.current_function_frame_index()?;
+        let function_index = self.current_function_frame_index()?;
         let frame = self.current_function_frame()?;
-        let function = self.resolve_function(&frame.function_ref);
+        let function = self.current_function()?;
         let declaring_scopes = self
             .declaring_scopes
-            .named_expr_scopes(&frame.function_ref)
+            .named_expression_scopes(&frame.function_ref)
             .ok_or_else(|| {
                 EvaluatorError::InternalError("missing named expression scopes".into())
             })?;
 
-        let current_scope = self
-            .stack
-            .last()
-            .and_then(|frame| frame.source_span().to_range())
-            .unwrap_or(0..usize::MAX);
+        let current_scope = frame.source_span().to_range().unwrap_or(0..usize::MAX);
 
         let mut emitted = HashSet::new();
-        for frame_idx in func_idx..self.stack.len() {
+        for frame_idx in function_index..self.stack.len() {
             let frame = &self.stack[frame_idx];
             let limit = frame.current_statement_index();
             for (i, (stmt, _)) in frame.statements().span_iter().enumerate() {
@@ -293,7 +298,7 @@ impl Evaluator {
             }
 
             // Phase 2: Pop exhausted frames.
-            if self.pop_if_exhausted() {
+            if self.pop_if_exhausted()? {
                 continue;
             }
 
@@ -329,13 +334,13 @@ impl Evaluator {
     }
 
     /// If the top frame is exhausted, handle it and return `true`.
-    fn pop_if_exhausted(&mut self) -> bool {
-        let top = self.stack.len() - 1;
-        if self.stack[top].is_exhausted() {
-            self.handle_exhausted_frame(top);
-            true
+    fn pop_if_exhausted(&mut self) -> Result<bool, EvaluatorError> {
+        let is_exhausted = self.current_frame()?.is_exhausted();
+        if is_exhausted {
+            self.handle_exhausted_frame();
+            Ok(true)
         } else {
-            false
+            Ok(false)
         }
     }
 
@@ -347,13 +352,10 @@ impl Evaluator {
             return Ok(None);
         }
 
-        let caller_frame_index = self.stack.len() - 1;
+        let caller_frame_index = self.current_frame_index()?;
 
         {
-            let top = self
-                .stack
-                .last()
-                .ok_or_else(|| EvaluatorError::InternalError("stack is empty".into()))?;
+            let top = self.current_frame()?;
             let current_statement_index = top.current_statement_index();
             let (current_statement, statement_span) = top
                 .statements()
@@ -390,7 +392,7 @@ impl Evaluator {
     fn peek_next_statement(&self) -> Option<NextStatement> {
         let frame = self.current_function_frame().ok()?;
 
-        let current_block = self.stack.last()?;
+        let current_block = self.current_frame().ok()?;
         let current_statement_index = current_block.current_statement_index();
         let current_statement = current_block
             .statements()
@@ -411,7 +413,7 @@ impl Evaluator {
     fn apply_break(&mut self, function_index: usize) {
         while self.stack.len() > function_index + 1 {
             let is_target = matches!(
-                self.stack.last(),
+                self.current_frame().ok(),
                 Some(StackFrame::Block(BlockFrame {
                     kind: BlockKind::Loop { .. } | BlockKind::Switch,
                     ..
@@ -429,7 +431,7 @@ impl Evaluator {
     fn apply_continue(&mut self, function_index: usize) {
         while self.stack.len() > function_index + 1 {
             if matches!(
-                self.stack.last(),
+                self.current_frame().ok(),
                 Some(StackFrame::Block(BlockFrame {
                     kind: BlockKind::Loop { .. },
                     ..
@@ -441,11 +443,11 @@ impl Evaluator {
         }
 
         // Switch the loop frame to its continuing block.
-        let top = self.stack.len() - 1;
-        if top > function_index {
-            if let StackFrame::Block(ref mut block_frame) = self.stack[top] {
-                block_frame.switch_to_continuing();
-            }
+        if let Ok(top) = self.current_frame_index()
+            && top > function_index
+            && let StackFrame::Block(ref mut block_frame) = self.stack[top]
+        {
+            block_frame.switch_to_continuing();
         }
     }
 
@@ -474,7 +476,10 @@ impl Evaluator {
 
 // Exhausted-frame handler
 impl Evaluator {
-    fn handle_exhausted_frame(&mut self, top: usize) {
+    fn handle_exhausted_frame(&mut self) {
+        let Ok(top) = self.current_frame_index() else {
+            return;
+        };
         match &self.stack[top] {
             StackFrame::Function(_) => {
                 self.stack.pop();

@@ -64,6 +64,12 @@ pub struct FunctionFrame {
     pub control_flow: ControlFlow,
 }
 
+impl FunctionFrame {
+    pub fn source_span(&self) -> naga::Span {
+        naga::Span::total_span(self.statements.span_iter().map(|(_, s)| *s))
+    }
+}
+
 /// A block frame (if-body, loop-body, switch-case, plain block) on the unified stack.
 #[derive(Clone, Debug)]
 pub struct BlockFrame {
@@ -144,9 +150,7 @@ impl StackFrame {
     /// The source span of this frame's block.
     pub fn source_span(&self) -> naga::Span {
         match self {
-            StackFrame::Function(f) => {
-                naga::Span::total_span(f.statements.span_iter().map(|(_, s)| *s))
-            }
+            StackFrame::Function(f) => f.source_span(),
             StackFrame::Block(b) => b.source_span,
         }
     }
