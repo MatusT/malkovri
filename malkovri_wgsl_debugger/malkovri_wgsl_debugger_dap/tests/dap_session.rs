@@ -177,9 +177,13 @@ fn expression_shader_variables_include_binding_backed_values() {
     }));
     s.send("setBreakpoints", json!({
         "source": { "name": "test_expressions.wgsl", "path": shader },
-        "breakpoints": [{ "line": 45 }],
+        "breakpoints": [{ "line": 457 }],
     }));
     s.send("configurationDone", json!({}));
+
+    // Run to the breakpoint so all variables are in scope.
+    let cont = s.send("continue", json!({ "threadId": 1 }));
+    assert_eq!(event_body(&cont, "stopped")["reason"], "breakpoint");
 
     let scopes = s.send("scopes", json!({ "frameId": 1 }));
     let scopes_body = response_body(&scopes, s.last_seq());

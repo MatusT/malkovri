@@ -64,7 +64,7 @@
 			"name": "Debug test_control_flow.wgsl",
 			"program": "${workspaceFolder}/test_control_flow.wgsl",
 			"shaderInputs": {
-				"global_invocation_id": [0, 0, 0]
+				"global_invocation_id": [3, 0, 0]
 			},
 			"bindings": {
 				"0:0": {

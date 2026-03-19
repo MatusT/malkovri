@@ -20,6 +20,7 @@ use malkovri_wgsl_debugger::{Evaluator, NextStatement, Value};
 
 const LOCALS_SCOPE_REF: u32 = 1;
 const ARGUMENTS_SCOPE_REF: u32 = 2;
+const GLOBALS_SCOPE_REF: u32 = 3;
 const MAIN_THREAD_ID: u64 = 1;
 
 #[derive(Clone, Debug)]
@@ -412,6 +413,23 @@ impl DebugAdapter {
             });
         }
 
+        let globals = evaluator.global_variable_values();
+        if !globals.is_empty() {
+            scopes.push(dapts::Scope {
+                name: "Globals".to_string(),
+                variables_reference: GLOBALS_SCOPE_REF,
+                named_variables: Some(globals.len() as u32),
+                indexed_variables: None,
+                expensive: false,
+                source: None,
+                line: None,
+                end_line: None,
+                column: None,
+                end_column: None,
+                presentation_hint: None,
+            });
+        }
+
         Ok(vec![self.make_response(seq, &dapts::ScopesResponse { scopes })?])
     }
 
@@ -655,6 +673,13 @@ impl DebugAdapter {
             }
             ARGUMENTS_SCOPE_REF => evaluator
                 .current_function_argument_values()
+                .into_iter()
+                .map(|(name, value)| {
+                    make_variable(name, &format!("{:?}", value.leaf_value()))
+                })
+                .collect(),
+            GLOBALS_SCOPE_REF => evaluator
+                .global_variable_values()
                 .into_iter()
                 .map(|(name, value)| {
                     make_variable(name, &format!("{:?}", value.leaf_value()))

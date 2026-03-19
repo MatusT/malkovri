@@ -286,6 +286,17 @@ impl Evaluator {
         Some(spans.get(idx)?.location(source).line_number)
     }
 
+    /// Return all global variables with their names and current values.
+    pub fn global_variable_values(&self) -> Vec<(Option<String>, Value)> {
+        self.global_values
+            .iter()
+            .map(|(handle, value)| {
+                let name = self.module.global_variables[*handle].name.clone();
+                (name, value.clone())
+            })
+            .collect()
+    }
+
     /// Evaluate the current function arguments in declaration order.
     pub fn current_function_argument_values(&self) -> Vec<(Option<String>, Value)> {
         let func_idx = match self.current_function_frame_index() {
@@ -433,8 +444,14 @@ impl Evaluator {
             .unwrap_or(0..usize::MAX);
 
         let mut emitted = HashSet::new();
+        let last_frame = self.stack.len() - 1;
         for frame_idx in func_idx..self.stack.len() {
-            for (stmt, _) in self.stack[frame_idx].statements().span_iter() {
+            let frame = &self.stack[frame_idx];
+            let limit = frame.current_statement_index();
+            for (i, (stmt, _)) in frame.statements().span_iter().enumerate() {
+                if i > limit {
+                    break;
+                }
                 if let Statement::Emit(range) = stmt {
                     emitted.extend(range.clone());
                 }
