@@ -28,4 +28,6 @@ pub enum EvaluatorError {
     UnknownExpression(String),
     #[error("Unsupported vector type: {0}")]
     UnsupportedVectorType(String),
+    #[error("Internal error: {0}")]
+    InternalError(String),
 }

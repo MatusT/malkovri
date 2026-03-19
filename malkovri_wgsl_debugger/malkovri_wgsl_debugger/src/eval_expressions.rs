@@ -10,9 +10,8 @@ use naga::{
 impl Evaluator {
     /// Evaluate an expression in the context of the current function frame.
     pub fn evaluate_expression(&self, expression_handle: Handle<Expression>) -> Value {
-        let func_idx = match self.current_function_frame_index() {
-            Some(i) => i,
-            None => return Value::Uninitialized,
+        let Ok(func_idx) = self.current_function_frame_index() else {
+            return Value::Uninitialized;
         };
         self.eval_expr(expression_handle, func_idx)
     }

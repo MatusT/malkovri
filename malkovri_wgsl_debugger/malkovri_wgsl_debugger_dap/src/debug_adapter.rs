@@ -173,6 +173,30 @@ impl DebugAdapter {
         &mut self,
         req: &dapts::Request,
     ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
+        match self.dispatch_request(req) {
+            Ok(messages) => Ok(messages),
+            Err(DebugAdapterError::Evaluator(e)) => {
+                self.evaluator = None;
+                Ok(vec![
+                    self.make_response(req.seq, &serde_json::json!({}))?,
+                    self.make_event(
+                        "output",
+                        &serde_json::json!({
+                            "category": "console",
+                            "output": format!("Internal evaluator error: {}\n", e),
+                        }),
+                    )?,
+                    self.make_event("terminated", &serde_json::json!({}))?,
+                ])
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn dispatch_request(
+        &mut self,
+        req: &dapts::Request,
+    ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         match req.command.as_str() {
             "initialize" => self.handle_initialize(req.seq),
             "launch" => self.handle_launch(req),
@@ -286,7 +310,7 @@ impl DebugAdapter {
             0,
             entry_point_inputs,
             bindings,
-        ));
+        )?);
 
         let mut messages = Vec::new();
         if !self.configuration_done {
@@ -305,13 +329,9 @@ impl DebugAdapter {
     ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         let evaluator = self.evaluator()?;
 
-        let current_fn = evaluator
-            .current_function()
-            .ok_or_else(|| DebugAdapterError::InvalidProgram("no current function".into()))?;
+        let current_fn = evaluator.current_function()?;
 
-        let (active_block, active_index) = evaluator
-            .current_active_block()
-            .ok_or_else(|| DebugAdapterError::InvalidProgram("stack is empty".into()))?;
+        let (active_block, active_index) = evaluator.current_active_block()?;
 
         let current_statement = active_block.get(active_index).ok_or_else(|| {
             DebugAdapterError::InvalidProgram("invalid statement index".into())
@@ -377,10 +397,10 @@ impl DebugAdapter {
     ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         let evaluator = self.evaluator()?;
 
-        let current_fn = evaluator.current_function().unwrap();
-        let in_scope_locals = evaluator.local_variables_in_current_scope();
+        let current_fn = evaluator.current_function()?;
+        let in_scope_locals = evaluator.local_variables_in_current_scope()?;
         let named_variables_len =
-            in_scope_locals.len() + evaluator.named_expression_values().len();
+            in_scope_locals.len() + evaluator.named_expression_values()?.len();
         let function_arguments_len = current_fn.arguments.len();
 
         let mut scopes = vec![dapts::Scope {
@@ -552,7 +572,7 @@ impl DebugAdapter {
         let evaluator = self.evaluator_mut()?;
 
         let mut has_more = false;
-        while let Some(statement) = evaluator.step() {
+        while let Some(statement) = evaluator.step()? {
             if !matches!(
                 statement,
                 NextStatement {
@@ -585,7 +605,7 @@ impl DebugAdapter {
         let breakpoints = &self.breakpoints;
 
         let mut has_more = false;
-        while let Some(statement) = evaluator.step() {
+        while let Some(statement) = evaluator.step()? {
             if matches!(
                 statement,
                 NextStatement {
@@ -596,7 +616,7 @@ impl DebugAdapter {
                 continue;
             }
 
-            if let Some(line) = evaluator.current_line(source) {
+            if let Some(line) = evaluator.current_line(source)? {
                 if breakpoints.iter().any(|bp| bp.verified && bp.line == Some(line)) {
                     has_more = true;
                     break;
@@ -639,10 +659,10 @@ impl DebugAdapter {
         let argument = serde_json::from_value::<dapts::VariablesArguments>(req.arguments.clone())?;
         let evaluator = self.evaluator()?;
 
-        let current_fn = evaluator.current_function().unwrap();
-        let current_state = evaluator.current_function_frame().unwrap();
+        let current_fn = evaluator.current_function()?;
+        let current_state = evaluator.current_function_frame()?;
 
-        let local_variables_in_scope = evaluator.local_variables_in_current_scope();
+        let local_variables_in_scope = evaluator.local_variables_in_current_scope()?;
 
         let variables = match argument.variables_reference {
             LOCALS_SCOPE_REF => {
@@ -662,7 +682,7 @@ impl DebugAdapter {
                     })
                     .collect();
 
-                for (name, value) in evaluator.named_expression_values() {
+                for (name, value) in evaluator.named_expression_values()? {
                     vars.push(make_variable(
                         Some(name),
                         &format!("{:?}", value.leaf_value()),
@@ -672,7 +692,7 @@ impl DebugAdapter {
                 vars
             }
             ARGUMENTS_SCOPE_REF => evaluator
-                .current_function_argument_values()
+                .current_function_argument_values()?
                 .into_iter()
                 .map(|(name, value)| {
                     make_variable(name, &format!("{:?}", value.leaf_value()))

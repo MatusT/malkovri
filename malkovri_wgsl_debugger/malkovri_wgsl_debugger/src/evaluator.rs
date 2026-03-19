@@ -1,6 +1,7 @@
 use crate::{
     declaring_scopes,
     entry_point_inputs::EntryPointInputs,
+    error::EvaluatorError,
     function_state::{
         BlockFrame, BlockKind, ControlFlow, FunctionFrame, FunctionRef, NextStatement, StackFrame,
     },
@@ -26,7 +27,7 @@ impl Evaluator {
         entry_point_index: usize,
         entry_point_inputs: EntryPointInputs,
         global_values: HashMap<naga::ResourceBinding, Value>,
-    ) -> Self {
+    ) -> Result<Self, EvaluatorError> {
         let statements = module.entry_points[entry_point_index].function.body.clone();
 
         let declaring_scopes = declaring_scopes::ModuleScopes::new(&module);
@@ -35,15 +36,18 @@ impl Evaluator {
             global_values: global_values
                 .iter()
                 .map(|(k, v)| {
-                    (
-                        module
-                            .global_variables
-                            .fetch_if(|h| h.binding.unwrap() == *k)
-                            .unwrap(),
-                        v.clone(),
-                    )
+                    let handle = module
+                        .global_variables
+                        .fetch_if(|h| h.binding.as_ref() == Some(k))
+                        .ok_or_else(|| {
+                            EvaluatorError::InternalError(format!(
+                                "no global variable with binding {:?}",
+                                k
+                            ))
+                        })?;
+                    Ok((handle, v.clone()))
                 })
-                .collect(),
+                .collect::<Result<_, EvaluatorError>>()?,
             module,
             entry_point_inputs,
             stack: vec![StackFrame::Function(Box::new(FunctionFrame {
@@ -58,8 +62,8 @@ impl Evaluator {
             }))],
             declaring_scopes,
         };
-        evaluator.initialize_local_variables();
-        evaluator
+        evaluator.initialize_local_variables()?;
+        Ok(evaluator)
     }
 
     /// Resolve a [`FunctionRef`] to the actual `naga::Function` in the module.
@@ -70,59 +74,62 @@ impl Evaluator {
         }
     }
 
-    /// Resolve the `naga::Function` for the function frame at `function_index`.
-    fn resolve_function_at(&self, function_index: usize) -> &naga::Function {
-        match &self.stack[function_index] {
-            StackFrame::Function(f) => self.resolve_function(&f.function_ref),
-            _ => unreachable!(),
-        }
-    }
-
     /// Return a reference to the `naga::Function` for the current call frame.
-    pub fn current_function(&self) -> Option<&naga::Function> {
+    pub fn current_function(&self) -> Result<&naga::Function, EvaluatorError> {
         let frame = self.current_function_frame()?;
-        Some(self.resolve_function(&frame.function_ref))
+        Ok(self.resolve_function(&frame.function_ref))
     }
 
     /// Index of the topmost `Function` frame, used to look up expressions and variables.
-    pub(crate) fn current_function_frame_index(&self) -> Option<usize> {
+    pub(crate) fn current_function_frame_index(&self) -> Result<usize, EvaluatorError> {
         self.stack
             .iter()
             .rposition(|sf| matches!(sf, StackFrame::Function(_)))
+            .ok_or_else(|| EvaluatorError::InternalError("no function frame on stack".into()))
     }
 
     /// Return a reference to the current function frame (the nearest `Function` variant on the
-    /// stack), or `None` if the stack is empty.
-    pub fn current_function_frame(&self) -> Option<&FunctionFrame> {
+    /// stack).
+    pub fn current_function_frame(&self) -> Result<&FunctionFrame, EvaluatorError> {
         let function_index = self.current_function_frame_index()?;
         match &self.stack[function_index] {
-            StackFrame::Function(f) => Some(f),
-            StackFrame::Block(_) => None,
+            StackFrame::Function(f) => Ok(f),
+            _ => Err(EvaluatorError::InternalError(
+                "expected function frame".into(),
+            )),
         }
     }
 
     /// Return a mutable reference to the current function frame (the nearest `Function` variant on the
-    /// stack), or `None` if the stack is empty.
-    pub fn current_function_frame_mut(&mut self) -> Option<&mut FunctionFrame> {
+    /// stack).
+    pub fn current_function_frame_mut(&mut self) -> Result<&mut FunctionFrame, EvaluatorError> {
         let function_index = self.current_function_frame_index()?;
         match &mut self.stack[function_index] {
-            StackFrame::Function(f) => Some(f),
-            StackFrame::Block(_) => None,
+            StackFrame::Function(f) => Ok(f),
+            _ => Err(EvaluatorError::InternalError(
+                "expected function frame".into(),
+            )),
         }
     }
 
     /// Return the statements and current index of the top-of-stack frame.
     /// Unlike `current_function_frame`, this reflects the innermost active block,
     /// which may be a nested `if`/`loop`/`switch` block rather than the function body.
-    pub fn current_active_block(&self) -> Option<(&naga::Block, usize)> {
-        let top = self.stack.last()?;
-        Some((top.statements(), top.current_statement_index()))
+    pub fn current_active_block(&self) -> Result<(&naga::Block, usize), EvaluatorError> {
+        let top = self
+            .stack
+            .last()
+            .ok_or_else(|| EvaluatorError::InternalError("stack is empty".into()))?;
+        Ok((top.statements(), top.current_statement_index()))
     }
 
-    pub fn current_line(&self, source: &str) -> Option<u32> {
+    pub fn current_line(&self, source: &str) -> Result<Option<u32>, EvaluatorError> {
         let (block, idx) = self.current_active_block()?;
-        let spans: Vec<_> = block.span_iter().map(|(_, span)| span).collect();
-        Some(spans.get(idx)?.location(source).line_number)
+        let span = match block.span_iter().map(|(_, span)| span).nth(idx) {
+            Some(span) => span,
+            None => return Ok(None),
+        };
+        Ok(Some(span.location(source).line_number))
     }
 
     /// Return all global variables with their names and current values.
@@ -137,17 +144,13 @@ impl Evaluator {
     }
 
     /// Evaluate the current function arguments in declaration order.
-    pub fn current_function_argument_values(&self) -> Vec<(Option<String>, Value)> {
-        let func_idx = match self.current_function_frame_index() {
-            Some(i) => i,
-            None => return vec![],
-        };
-        let StackFrame::Function(ref frame) = self.stack[func_idx] else {
-            return vec![];
-        };
-
+    pub fn current_function_argument_values(
+        &self,
+    ) -> Result<Vec<(Option<String>, Value)>, EvaluatorError> {
+        let func_idx = self.current_function_frame_index()?;
+        let frame = self.current_function_frame()?;
         let function = self.resolve_function(&frame.function_ref);
-        function
+        Ok(function
             .arguments
             .iter()
             .enumerate()
@@ -157,7 +160,7 @@ impl Evaluator {
                     self.evaluate_function_argument(index, func_idx),
                 )
             })
-            .collect()
+            .collect())
     }
 
     /// Index of the `Function` frame below `function_index` — the caller's frame, used for `CallResult`.
@@ -170,18 +173,17 @@ impl Evaluator {
     /// Returns local variable handles that are lexically in scope at the
     /// current execution point: declared before the current position and
     /// owned by a block that contains the current scope.
-    pub fn local_variables_in_current_scope(&self) -> HashSet<Handle<LocalVariable>> {
-        let func_idx = match self.current_function_frame_index() {
-            Some(i) => i,
-            None => return HashSet::new(),
-        };
-
-        let function = self.resolve_function_at(func_idx);
-        let frame = self.current_function_frame().unwrap();
+    pub fn local_variables_in_current_scope(
+        &self,
+    ) -> Result<HashSet<Handle<LocalVariable>>, EvaluatorError> {
+        let frame = self.current_function_frame()?;
+        let function = self.resolve_function(&frame.function_ref);
         let declaring_scopes = self
             .declaring_scopes
             .local_scopes(&frame.function_ref)
-            .unwrap();
+            .ok_or_else(|| {
+                EvaluatorError::InternalError("missing local declaring scopes".into())
+            })?;
 
         let current_block = self.stack.last();
 
@@ -201,7 +203,7 @@ impl Evaluator {
                 .map(|r| r.start)
         });
 
-        function
+        Ok(function
             .local_variables
             .iter()
             .filter_map(|(handle, _)| {
@@ -220,25 +222,22 @@ impl Evaluator {
                     && current_scope.end <= declaring_scope.end)
                     .then_some(handle)
             })
-            .collect()
+            .collect())
     }
 
     /// Evaluate all named expressions (WGSL `let` bindings) in the current function frame
     /// that are in scope at the current execution point.
     /// Returns `(name, value)` pairs in source order.
-    pub fn named_expression_values(&self) -> Vec<(String, Value)> {
-        let func_idx = match self.current_function_frame_index() {
-            Some(i) => i,
-            None => return vec![],
-        };
-        let StackFrame::Function(ref frame) = self.stack[func_idx] else {
-            return vec![];
-        };
+    pub fn named_expression_values(&self) -> Result<Vec<(String, Value)>, EvaluatorError> {
+        let func_idx = self.current_function_frame_index()?;
+        let frame = self.current_function_frame()?;
         let function = self.resolve_function(&frame.function_ref);
-        let declaring_scopes = match self.declaring_scopes.named_expr_scopes(&frame.function_ref) {
-            Some(s) => s,
-            None => return vec![],
-        };
+        let declaring_scopes = self
+            .declaring_scopes
+            .named_expr_scopes(&frame.function_ref)
+            .ok_or_else(|| {
+                EvaluatorError::InternalError("missing named expression scopes".into())
+            })?;
 
         let current_scope = self
             .stack
@@ -260,7 +259,7 @@ impl Evaluator {
             }
         }
 
-        function
+        Ok(function
             .named_expressions
             .iter()
             .filter(|(handle, _)| {
@@ -274,7 +273,7 @@ impl Evaluator {
                     && current_scope.end <= declaring_scope.end
             })
             .map(|(handle, name)| (name.clone(), self.evaluate_expression(*handle)))
-            .collect()
+            .collect())
     }
 }
 
@@ -282,14 +281,14 @@ impl Evaluator {
 impl Evaluator {
     /// Advance past any pending control-flow signals and exhausted frames until
     /// a live statement is ready to execute (or the stack is empty).
-    fn advance_to_live_statement(&mut self) -> bool {
+    fn advance_to_live_statement(&mut self) -> Result<bool, EvaluatorError> {
         loop {
             if self.stack.is_empty() {
-                return false;
+                return Ok(false);
             }
 
             // Phase 1: Resolve pending control-flow signals.
-            if self.resolve_control_flow_signal() {
+            if self.resolve_control_flow_signal()? {
                 continue;
             }
 
@@ -298,34 +297,33 @@ impl Evaluator {
                 continue;
             }
 
-            return true;
+            return Ok(true);
         }
     }
 
     /// If the current function frame has a pending control-flow signal, apply it
     /// and return `true`. Otherwise return `false`.
-    fn resolve_control_flow_signal(&mut self) -> bool {
-        let function_index = match self.current_function_frame_index() {
-            Some(i) => i,
-            None => return false,
-        };
+    fn resolve_control_flow_signal(&mut self) -> Result<bool, EvaluatorError> {
+        let function_index = self.current_function_frame_index()?;
         let StackFrame::Function(ref mut frame) = self.stack[function_index] else {
-            unreachable!("current_function_frame_index always returns a Function frame");
+            return Err(EvaluatorError::InternalError(
+                "expected function frame at function_index".into(),
+            ));
         };
         let signal = std::mem::take(&mut frame.control_flow);
         match signal {
-            ControlFlow::None => false,
+            ControlFlow::None => Ok(false),
             ControlFlow::Break => {
                 self.apply_break(function_index);
-                true
+                Ok(true)
             }
             ControlFlow::Continue => {
                 self.apply_continue(function_index);
-                true
+                Ok(true)
             }
             ControlFlow::Return(return_val) => {
                 self.apply_return(function_index, return_val);
-                true
+                Ok(true)
             }
         }
     }
@@ -344,48 +342,53 @@ impl Evaluator {
     /// Execute the current statement and advance the program counter.
     /// Returns the *upcoming* statement that will execute on the next call,
     /// or `None` if execution has finished.
-    pub fn step(&mut self) -> Option<NextStatement> {
-        if !self.advance_to_live_statement() {
-            return None;
+    pub fn step(&mut self) -> Result<Option<NextStatement>, EvaluatorError> {
+        if !self.advance_to_live_statement()? {
+            return Ok(None);
         }
 
         let caller_frame_index = self.stack.len() - 1;
 
         {
-            let current_function_index = self.current_function_frame_index()?;
-            let current_statement_index = self.stack.last()?.current_statement_index();
-            let block = self.stack.last()?.statements();
-            let (current_statement, statement_span) = block
+            let top = self
+                .stack
+                .last()
+                .ok_or_else(|| EvaluatorError::InternalError("stack is empty".into()))?;
+            let current_statement_index = top.current_statement_index();
+            let (current_statement, statement_span) = top
+                .statements()
                 .span_iter()
                 .nth(current_statement_index)
-                .map(|(s, sp)| (s.clone(), *sp))?;
+                .map(|(s, sp)| (s.clone(), *sp))
+                .ok_or_else(|| EvaluatorError::InternalError("invalid statement index".into()))?;
 
-            self.handle_statement(current_statement, current_function_index, statement_span);
+            self.handle_statement(current_statement, statement_span)?;
         }
 
         self.stack[caller_frame_index].increment_statement_index();
 
         // Resolve any signals/exhaustion produced by the statement we just ran,
         // then return whatever is live next (or None if execution finished).
-        self.advance_to_live_statement();
+        self.advance_to_live_statement()?;
 
-        self.peek_next_statement()
+        Ok(self.peek_next_statement())
     }
 
     /// Step through consecutive Emit statements so that variables are tracked
     /// before the debugger stops.
-    pub fn skip_emits(&mut self) {
+    pub fn skip_emits(&mut self) -> Result<(), EvaluatorError> {
         while let Some(next) = self.peek_next_statement() {
             if matches!(next.statement, Statement::Emit(_)) {
-                self.step();
+                self.step()?;
             } else {
                 break;
             }
         }
+        Ok(())
     }
 
     fn peek_next_statement(&self) -> Option<NextStatement> {
-        let frame = self.current_function_frame()?;
+        let frame = self.current_function_frame().ok()?;
 
         let current_block = self.stack.last()?;
         let current_statement_index = current_block.current_statement_index();
@@ -515,9 +518,8 @@ impl Evaluator {
     fn handle_statement(
         &mut self,
         statement: Statement,
-        function_index: usize,
         statement_span: naga::Span,
-    ) {
+    ) -> Result<(), EvaluatorError> {
         match statement {
             Statement::Emit(_) => {}
             Statement::Call {
@@ -525,16 +527,14 @@ impl Evaluator {
                 arguments,
                 result,
             } => {
-                self.handle_call(function_handle, arguments, result);
+                self.handle_call(function_handle, arguments, result)?;
             }
             Statement::Store { pointer, value } => {
-                self.handle_store(pointer, value);
+                self.handle_store(pointer, value)?;
             }
             Statement::Return { value } => {
                 let return_value = value.map(|v| self.evaluate_expression(v));
-                if let StackFrame::Function(ref mut frame) = self.stack[function_index] {
-                    frame.control_flow = ControlFlow::Return(return_value);
-                }
+                self.current_function_frame_mut()?.control_flow = ControlFlow::Return(return_value);
             }
             Statement::If {
                 condition,
@@ -568,17 +568,13 @@ impl Evaluator {
                 }));
             }
             Statement::Switch { selector, cases } => {
-                self.handle_switch(selector, cases, statement_span);
+                self.handle_switch(selector, cases, statement_span)?;
             }
             Statement::Break => {
-                if let StackFrame::Function(ref mut frame) = self.stack[function_index] {
-                    frame.control_flow = ControlFlow::Break;
-                }
+                self.current_function_frame_mut()?.control_flow = ControlFlow::Break;
             }
             Statement::Continue => {
-                if let StackFrame::Function(ref mut frame) = self.stack[function_index] {
-                    frame.control_flow = ControlFlow::Continue;
-                }
+                self.current_function_frame_mut()?.control_flow = ControlFlow::Continue;
             }
             Statement::Kill
             | Statement::ControlBarrier(_)
@@ -592,6 +588,7 @@ impl Evaluator {
             | Statement::SubgroupGather { .. }
             | Statement::SubgroupCollectiveOperation { .. } => {}
         }
+        Ok(())
     }
 
     fn handle_call(
@@ -599,7 +596,7 @@ impl Evaluator {
         function_handle: naga::Handle<naga::Function>,
         arguments: Vec<Handle<Expression>>,
         call_result_handle: Option<Handle<Expression>>,
-    ) {
+    ) -> Result<(), EvaluatorError> {
         let evaluated_function_arguments = arguments
             .iter()
             .map(|&arg| self.evaluate_expression(arg))
@@ -619,38 +616,33 @@ impl Evaluator {
                 control_flow: ControlFlow::None,
             })));
 
-        self.initialize_local_variables();
+        self.initialize_local_variables()
     }
 
-    fn initialize_local_variables(&mut self) {
-        let function_index = match self.current_function_frame_index() {
-            Some(i) => i,
-            None => return,
-        };
-
-        let function = self.resolve_function_at(function_index);
-        let local_vars: Vec<_> = function.local_variables.iter().collect();
-
+    fn initialize_local_variables(&mut self) -> Result<(), EvaluatorError> {
         let mut insert_variables: Vec<(Handle<LocalVariable>, Value)> = Vec::new();
-        for (handle, local_var) in local_vars {
-            let value = match &local_var.init {
-                Some(init_expr) => self.evaluate_expression(*init_expr),
-                None => {
-                    let ty = &self.module.types[local_var.ty];
-                    Value::from(&ty.inner)
-                }
-            };
-            insert_variables.push((handle, value));
+        {
+            let function = self.current_function()?;
+            let local_vars: Vec<_> = function.local_variables.iter().collect();
+            for (handle, local_var) in local_vars {
+                let value = match &local_var.init {
+                    Some(init_expr) => self.evaluate_expression(*init_expr),
+                    None => {
+                        let ty = &self.module.types[local_var.ty];
+                        Value::from(&ty.inner)
+                    }
+                };
+                insert_variables.push((handle, value));
+            }
         }
 
-        let StackFrame::Function(ref mut frame) = self.stack[function_index] else {
-            unreachable!();
-        };
+        let frame = self.current_function_frame_mut()?;
         for (handle, value) in insert_variables {
             frame
                 .local_variables
                 .insert(handle, Value::Pointer(Rc::new(RefCell::new(value))));
         }
+        Ok(())
     }
 
     fn handle_if(
@@ -683,13 +675,18 @@ impl Evaluator {
         selector: Handle<Expression>,
         cases: Vec<naga::SwitchCase>,
         statement_span: naga::Span,
-    ) {
+    ) -> Result<(), EvaluatorError> {
         let selector_val = self.evaluate_expression(selector);
 
         let selector_i32 = match selector_val {
             Value::Primitive(Primitive::I32(v)) => v,
             Value::Primitive(Primitive::U32(v)) => v as i32,
-            _ => return,
+            _ => {
+                return Err(EvaluatorError::InternalError(format!(
+                    "switch selector is not an integer: {:?}",
+                    selector_val
+                )));
+            }
         };
 
         // Find the matching case, fall back to Default.
@@ -718,19 +715,23 @@ impl Evaluator {
                 source_span: statement_span,
             }));
         }
+        Ok(())
     }
 
-    fn handle_store(&mut self, pointer: Handle<Expression>, value: Handle<Expression>) {
+    fn handle_store(
+        &mut self,
+        pointer: Handle<Expression>,
+        value: Handle<Expression>,
+    ) -> Result<(), EvaluatorError> {
         let evaluated_value = self.evaluate_expression(value);
         let evaluated_pointer = self.evaluate_expression(pointer);
 
         match evaluated_pointer {
             Value::Pointer(inner) => {
                 *inner.borrow_mut() = evaluated_value;
+                Ok(())
             }
-            _ => {
-                eprintln!("Store to non-pointer value: {:?}", evaluated_pointer);
-            }
+            _ => Err(EvaluatorError::StoreToNonPointer),
         }
     }
 }
