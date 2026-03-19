@@ -1,4 +1,6 @@
 use crate::{
+    declaring_scopes,
+    entry_point_inputs::EntryPointInputs,
     function_state::{
         BlockFrame, BlockKind, ControlFlow, FunctionFrame, FunctionRef, NextStatement, StackFrame,
     },
@@ -8,58 +10,14 @@ use crate::{
 
 use std::{cell::RefCell, collections::HashMap, collections::HashSet, rc::Rc, sync::Arc};
 
-use naga::{Expression, GlobalVariable, Handle, LocalVariable, Module, Span, Statement};
-
-#[derive(Copy, Clone, Debug, Default, serde::Deserialize)]
-#[serde(default)]
-pub struct EntryPointInputs {
-    // vertex
-    pub base_instance: u32,
-    pub base_vertex: i32,
-    pub clip_distance: [f32; 8],
-    pub cull_distance: [f32; 8],
-    pub instance_index: u32,
-    pub point_size: f32,
-    pub vertex_index: u32,
-    pub draw_id: u32,
-
-    // fragment
-    pub position: [f32; 4],
-    pub view_index: i32,
-    pub frag_depth: f32,
-    pub point_coord: [f32; 2],
-    pub front_facing: bool,
-    pub primitive_index: u32,
-    pub sample_index: u32,
-    pub sample_mask: u32,
-
-    // compute
-    pub global_invocation_id: [u32; 3],
-    pub local_invocation_id: [u32; 3],
-    pub local_invocation_index: u32,
-    pub workgroup_id: [u32; 3],
-    pub workgroup_size: [u32; 3],
-    pub num_workgroups: [u32; 3],
-
-    // subgroup
-    pub num_subgroups: u32,
-    pub subgroup_id: u32,
-    pub subgroup_size: u32,
-    pub subgroup_invocation_id: u32,
-}
+use naga::{Expression, GlobalVariable, Handle, LocalVariable, Module, Statement};
 
 pub struct Evaluator {
     pub(crate) module: Arc<Module>,
     pub(crate) entry_point_inputs: EntryPointInputs,
     pub(crate) global_values: HashMap<naga::Handle<GlobalVariable>, Value>,
     pub(crate) stack: Vec<StackFrame>,
-    /// Pre-computed: maps each local variable to the span of the block that declares it.
-    function_declaring_scopes:
-        HashMap<FunctionRef, HashMap<Handle<LocalVariable>, std::ops::Range<usize>>>,
-    /// Pre-computed: maps each named expression to the span of the block that declares it
-    /// (determined by the `Emit` statement that covers the expression handle).
-    named_expr_declaring_scopes:
-        HashMap<FunctionRef, HashMap<Handle<Expression>, std::ops::Range<usize>>>,
+    declaring_scopes: declaring_scopes::ModuleScopes,
 }
 
 impl Evaluator {
@@ -71,32 +29,7 @@ impl Evaluator {
     ) -> Self {
         let statements = module.entry_points[entry_point_index].function.body.clone();
 
-        let mut function_declaring_scopes = HashMap::new();
-        let mut named_expr_declaring_scopes = HashMap::new();
-        for (handle, function) in module.functions.iter() {
-            let fref = FunctionRef::Called(handle);
-            let block_scopes = Self::collect_all_block_scopes(function);
-            function_declaring_scopes.insert(
-                fref.clone(),
-                Self::local_declaring_scopes(function, &block_scopes),
-            );
-            named_expr_declaring_scopes.insert(
-                fref,
-                Self::named_expression_declaring_scopes(function, &block_scopes),
-            );
-        }
-        for (i, entry_point) in module.entry_points.iter().enumerate() {
-            let fref = FunctionRef::EntryPoint(i);
-            let block_scopes = Self::collect_all_block_scopes(&entry_point.function);
-            function_declaring_scopes.insert(
-                fref.clone(),
-                Self::local_declaring_scopes(&entry_point.function, &block_scopes),
-            );
-            named_expr_declaring_scopes.insert(
-                fref,
-                Self::named_expression_declaring_scopes(&entry_point.function, &block_scopes),
-            );
-        }
+        let declaring_scopes = declaring_scopes::ModuleScopes::new(&module);
 
         let mut evaluator = Evaluator {
             global_values: global_values
@@ -123,104 +56,10 @@ impl Evaluator {
                 call_result_handle: None,
                 control_flow: ControlFlow::None,
             }))],
-            function_declaring_scopes,
-            named_expr_declaring_scopes,
+            declaring_scopes,
         };
         evaluator.initialize_local_variables();
         evaluator
-    }
-
-    /// Collect all block scopes (the function body + nested blocks) for scope analysis.
-    fn collect_all_block_scopes(function: &naga::Function) -> Vec<Span> {
-        let mut block_scopes = vec![Span::total_span(function.body.span_iter().map(|(_, s)| *s))];
-        block_scopes.extend(Self::collect_block_spans(function.body.span_iter()));
-        block_scopes
-    }
-
-    /// Find the smallest block scope that fully contains `item_range`.
-    fn smallest_enclosing_scope(
-        block_scopes: &[Span],
-        item_range: &std::ops::Range<usize>,
-    ) -> std::ops::Range<usize> {
-        block_scopes
-            .iter()
-            .filter_map(|scope| {
-                scope
-                    .to_range()
-                    .filter(|s| s.start <= item_range.start && item_range.end <= s.end)
-            })
-            .min_by_key(|s| s.end - s.start)
-            .unwrap_or(0..usize::MAX)
-    }
-
-    fn local_declaring_scopes(
-        function: &naga::Function,
-        block_scopes: &[Span],
-    ) -> HashMap<Handle<LocalVariable>, std::ops::Range<usize>> {
-        function
-            .local_variables
-            .iter()
-            .filter_map(|(handle, _)| {
-                let variable_range = function.local_variables.get_span(handle).to_range()?;
-                Some((
-                    handle,
-                    Self::smallest_enclosing_scope(block_scopes, &variable_range),
-                ))
-            })
-            .collect()
-    }
-
-    fn named_expression_declaring_scopes(
-        function: &naga::Function,
-        block_scopes: &[Span],
-    ) -> HashMap<Handle<Expression>, std::ops::Range<usize>> {
-        // Build a map from expression handle → span of the Emit statement that covers it.
-        let mut emit_spans: HashMap<Handle<Expression>, Span> = HashMap::new();
-        Self::collect_emit_spans(&function.body, &mut emit_spans);
-
-        function
-            .named_expressions
-            .iter()
-            .map(|(handle, _)| {
-                let scope = emit_spans
-                    .get(handle)
-                    .and_then(|sp| sp.to_range())
-                    .map(|r| Self::smallest_enclosing_scope(block_scopes, &r))
-                    .unwrap_or(0..usize::MAX);
-                (*handle, scope)
-            })
-            .collect()
-    }
-
-    /// Walk all blocks recursively and record the span of each `Emit` statement
-    /// for every expression handle it covers.
-    fn collect_emit_spans(block: &naga::Block, out: &mut HashMap<Handle<Expression>, Span>) {
-        for (statement, span) in block.span_iter() {
-            match statement {
-                Statement::Emit(range) => {
-                    for handle in range.clone() {
-                        out.insert(handle, *span);
-                    }
-                }
-                Statement::Block(inner) => Self::collect_emit_spans(inner, out),
-                Statement::If { accept, reject, .. } => {
-                    Self::collect_emit_spans(accept, out);
-                    Self::collect_emit_spans(reject, out);
-                }
-                Statement::Loop {
-                    body, continuing, ..
-                } => {
-                    Self::collect_emit_spans(body, out);
-                    Self::collect_emit_spans(continuing, out);
-                }
-                Statement::Switch { cases, .. } => {
-                    for case in cases {
-                        Self::collect_emit_spans(&case.body, out);
-                    }
-                }
-                _ => {}
-            }
-        }
     }
 
     /// Resolve a [`FunctionRef`] to the actual `naga::Function` in the module.
@@ -340,8 +179,8 @@ impl Evaluator {
         let function = self.resolve_function_at(func_idx);
         let frame = self.current_function_frame().unwrap();
         let declaring_scopes = self
-            .function_declaring_scopes
-            .get(&frame.function_ref)
+            .declaring_scopes
+            .local_scopes(&frame.function_ref)
             .unwrap();
 
         let current_block = self.stack.last();
@@ -384,42 +223,6 @@ impl Evaluator {
             .collect()
     }
 
-    /// Recursively collect spans of all inner blocks in the block tree.
-    fn collect_block_spans<'a>(
-        statements: impl Iterator<Item = (&'a Statement, &'a Span)>,
-    ) -> Vec<Span> {
-        let mut spans = Vec::new();
-        for (statement, statement_span) in statements {
-            match statement {
-                Statement::Block(inner) => {
-                    spans.push(Span::total_span(inner.span_iter().map(|(_, s)| *s)));
-                    spans.extend(Self::collect_block_spans(inner.span_iter()));
-                }
-                Statement::If { accept, reject, .. } => {
-                    spans.push(Span::total_span(accept.span_iter().map(|(_, s)| *s)));
-                    spans.extend(Self::collect_block_spans(accept.span_iter()));
-                    spans.push(Span::total_span(reject.span_iter().map(|(_, s)| *s)));
-                    spans.extend(Self::collect_block_spans(reject.span_iter()));
-                }
-                Statement::Loop {
-                    body, continuing, ..
-                } => {
-                    spans.push(*statement_span);
-                    spans.extend(Self::collect_block_spans(body.span_iter()));
-                    spans.extend(Self::collect_block_spans(continuing.span_iter()));
-                }
-                Statement::Switch { cases, .. } => {
-                    for case in cases {
-                        spans.push(Span::total_span(case.body.span_iter().map(|(_, s)| *s)));
-                        spans.extend(Self::collect_block_spans(case.body.span_iter()));
-                    }
-                }
-                _ => {}
-            }
-        }
-        spans
-    }
-
     /// Evaluate all named expressions (WGSL `let` bindings) in the current function frame
     /// that are in scope at the current execution point.
     /// Returns `(name, value)` pairs in source order.
@@ -432,7 +235,7 @@ impl Evaluator {
             return vec![];
         };
         let function = self.resolve_function(&frame.function_ref);
-        let declaring_scopes = match self.named_expr_declaring_scopes.get(&frame.function_ref) {
+        let declaring_scopes = match self.declaring_scopes.named_expr_scopes(&frame.function_ref) {
             Some(s) => s,
             None => return vec![],
         };
@@ -444,7 +247,6 @@ impl Evaluator {
             .unwrap_or(0..usize::MAX);
 
         let mut emitted = HashSet::new();
-        let last_frame = self.stack.len() - 1;
         for frame_idx in func_idx..self.stack.len() {
             let frame = &self.stack[frame_idx];
             let limit = frame.current_statement_index();

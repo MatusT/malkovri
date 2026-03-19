@@ -1,3 +1,5 @@
+mod declaring_scopes;
+mod entry_point_inputs;
 mod error;
 mod eval_binary;
 mod eval_cast;
@@ -9,6 +11,7 @@ mod primitive;
 mod value;
 mod wgsl;
 
+pub use entry_point_inputs::*;
 pub use error::*;
 pub use evaluator::*;
 pub use function_state::*;
