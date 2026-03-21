@@ -93,6 +93,18 @@ fn variables_map(variables_body: &Value) -> HashMap<String, String> {
         .collect()
 }
 
+fn launch_and_configure(session: &mut Session, shader: &str, breakpoints: &[u32]) {
+    session.send("initialize", json!({}));
+    session.send("launch", json!({
+        "program": shader,
+    }));
+    session.send("setBreakpoints", json!({
+        "source": { "name": PathBuf::from(shader).file_name().unwrap().to_string_lossy(), "path": shader },
+        "breakpoints": breakpoints.iter().map(|line| json!({ "line": line })).collect::<Vec<_>>(),
+    }));
+    session.send("configurationDone", json!({}));
+}
+
 #[test]
 fn control_flow_session_matches_vscode_request_flow() {
     let mut s = Session::new();
@@ -205,4 +217,83 @@ fn expression_shader_variables_include_binding_backed_values() {
     assert_eq!(locals["acc_g"], "Primitive(F32(3.0))");
     assert_eq!(locals["dyn_i"], "Primitive(U32(2))");
     assert_eq!(locals["acc_vf"], "Primitive(F32(2.5))");
+}
+
+#[test]
+fn local_variables_initialize_at_declaration_time() {
+    let mut s = Session::new();
+    let shader = shader_path("test_local_initialization_timing.wgsl");
+
+    launch_and_configure(&mut s, &shader, &[10]);
+
+    let cont = s.send("continue", json!({ "threadId": 1 }));
+    assert_eq!(event_body(&cont, "stopped")["reason"], "breakpoint");
+
+    let scopes = s.send("scopes", json!({ "frameId": 1 }));
+    let locals_ref = scope_reference(response_body(&scopes, s.last_seq()), "Locals");
+
+    let locals = s.send("variables", json!({ "variablesReference": locals_ref }));
+    let locals = variables_map(response_body(&locals, s.last_seq()));
+
+    assert_eq!(locals["x"], "Primitive(U32(5))");
+    assert_eq!(locals["y"], "Primitive(U32(5))");
+    assert_eq!(locals["stop_here"], "Primitive(U32(5))");
+}
+
+#[test]
+fn loop_local_variables_reinitialize_when_the_loop_body_reenters() {
+    let mut s = Session::new();
+    let shader = shader_path("test_loop_local_initialization_timing.wgsl");
+
+    launch_and_configure(&mut s, &shader, &[12]);
+
+    let cont = s.send("continue", json!({ "threadId": 1 }));
+    assert_eq!(event_body(&cont, "stopped")["reason"], "breakpoint");
+
+    let scopes = s.send("scopes", json!({ "frameId": 1 }));
+    let locals_ref = scope_reference(response_body(&scopes, s.last_seq()), "Locals");
+
+    let locals = s.send("variables", json!({ "variablesReference": locals_ref }));
+    let locals = variables_map(response_body(&locals, s.last_seq()));
+
+    assert_eq!(locals["i"], "Primitive(U32(1))");
+    assert_eq!(locals["snapshot"], "Primitive(U32(1))");
+    assert_eq!(locals["acc"], "Primitive(U32(2))");
+}
+
+#[test]
+fn nested_named_expressions_stay_visible_inside_their_block() {
+    let mut s = Session::new();
+    let shader = shader_path("test_nested_named_expression_scope.wgsl");
+
+    s.send("initialize", json!({}));
+    s.send("launch", json!({
+        "program": shader,
+        "shaderInputs": { "global_invocation_id": [5, 0, 0] },
+    }));
+    s.send("setBreakpoints", json!({
+        "source": { "name": PathBuf::from(&shader).file_name().unwrap().to_string_lossy(), "path": shader },
+        "breakpoints": [{ "line": 9 }],
+    }));
+    s.send("configurationDone", json!({}));
+
+    let cont = s.send("continue", json!({ "threadId": 1 }));
+    assert_eq!(event_body(&cont, "stopped")["reason"], "breakpoint");
+
+    let scopes = s.send("scopes", json!({ "frameId": 1 }));
+    let locals_ref = scope_reference(response_body(&scopes, s.last_seq()), "Locals");
+
+    let locals = s.send("variables", json!({ "variablesReference": locals_ref }));
+    let locals = variables_map(response_body(&locals, s.last_seq()));
+
+    assert!(
+        locals.contains_key("outer"),
+        "expected outer let binding `outer` to stay visible inside nested block, got {locals:?}"
+    );
+    assert_eq!(locals["outer"], "Primitive(U32(5))");
+    assert!(
+        locals.contains_key("stop_here"),
+        "expected nested let binding `stop_here` to stay visible inside its block, got {locals:?}"
+    );
+    assert_eq!(locals["stop_here"], "Primitive(U32(6))");
 }

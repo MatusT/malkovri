@@ -127,6 +127,13 @@ impl Evaluator {
         Ok(self.stack.len() - 1)
     }
 
+    fn current_scope_range(&self) -> Result<std::ops::Range<usize>, EvaluatorError> {
+        let current_frame = self.current_frame()?;
+        Ok(naga::Span::total_span(current_frame.statements().span_iter().map(|(_, span)| *span))
+            .to_range()
+            .unwrap_or(0..usize::MAX))
+    }
+
     /// Return the statements and current index of the top-of-stack frame.
     /// Unlike `current_function_frame`, this reflects the innermost active block,
     /// which may be a nested `if`/`loop`/`switch` block rather than the function body.
@@ -199,10 +206,7 @@ impl Evaluator {
 
         let current_block = self.current_frame()?;
         // The span of the current (innermost) execution scope.
-        let current_scope = current_block
-            .source_span()
-            .to_range()
-            .unwrap_or(0..usize::MAX);
+        let current_scope = self.current_scope_range()?;
 
         // Current execution position for the "declared before" check.
         let current_pos = current_block
@@ -248,7 +252,7 @@ impl Evaluator {
                 EvaluatorError::InternalError("missing named expression scopes".into())
             })?;
 
-        let current_scope = frame.source_span().to_range().unwrap_or(0..usize::MAX);
+        let current_scope = self.current_scope_range()?;
 
         let mut emitted = HashSet::new();
         for frame_idx in function_index..self.stack.len() {
