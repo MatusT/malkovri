@@ -19,7 +19,7 @@ impl From<naga::WithSpan<ValidationError>> for WgslToModuleError {
     }
 }
 
-pub fn wgsl_to_module(source: &str) -> Result<Module, WgslToModuleError> {
+pub(crate) fn wgsl_to_module(source: &str) -> Result<Module, WgslToModuleError> {
     let mut frontend = wgsl::Frontend::new();
     let module = frontend.parse(source)?;
 

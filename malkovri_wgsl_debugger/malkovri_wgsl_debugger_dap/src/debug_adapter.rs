@@ -10,13 +10,11 @@ use std::{
 };
 
 use dapts::Breakpoint;
-use naga::Statement;
 use serde::Serialize;
-use std::sync::Arc;
 
 use crate::error::DebugAdapterError;
 use crate::parse_input;
-use malkovri_wgsl_debugger::{Evaluator, NextStatement, Value};
+use malkovri_wgsl_debugger::{Debugger, StepResult};
 
 const LOCALS_SCOPE_REF: u32 = 1;
 const ARGUMENTS_SCOPE_REF: u32 = 2;
@@ -103,8 +101,7 @@ pub struct DebugAdapter {
     breakpoints: Vec<Breakpoint>,
     program_name: Option<String>,
     program_path: Option<PathBuf>,
-    program_source: String,
-    evaluator: Option<Evaluator>,
+    debugger: Option<Debugger>,
     delayed_init_seq: Option<i64>,
     configuration_done: bool,
 }
@@ -120,8 +117,7 @@ impl DebugAdapter {
         DebugAdapter {
             sequence_number: 1,
             breakpoints: Vec::new(),
-            evaluator: None,
-            program_source: String::new(),
+            debugger: None,
             program_name: None,
             program_path: None,
             delayed_init_seq: None,
@@ -176,7 +172,7 @@ impl DebugAdapter {
         match self.dispatch_request(req) {
             Ok(messages) => Ok(messages),
             Err(DebugAdapterError::Evaluator(e)) => {
-                self.evaluator = None;
+                self.debugger = None;
                 Ok(vec![
                     self.make_response(req.seq, &serde_json::json!({}))?,
                     self.make_event(
@@ -215,16 +211,16 @@ impl DebugAdapter {
         }
     }
 
-    fn evaluator(&self) -> Result<&Evaluator, DebugAdapterError> {
-        self.evaluator
+    fn debugger(&self) -> Result<&Debugger, DebugAdapterError> {
+        self.debugger
             .as_ref()
-            .ok_or_else(|| DebugAdapterError::InvalidProgram("evaluator not initialized".into()))
+            .ok_or_else(|| DebugAdapterError::InvalidProgram("debugger not initialized".into()))
     }
 
-    fn evaluator_mut(&mut self) -> Result<&mut Evaluator, DebugAdapterError> {
-        self.evaluator
+    fn debugger_mut(&mut self) -> Result<&mut Debugger, DebugAdapterError> {
+        self.debugger
             .as_mut()
-            .ok_or_else(|| DebugAdapterError::InvalidProgram("evaluator not initialized".into()))
+            .ok_or_else(|| DebugAdapterError::InvalidProgram("debugger not initialized".into()))
     }
 
     fn handle_initialize(
@@ -274,8 +270,8 @@ impl DebugAdapter {
 
         self.program_path = Some(program_path.clone());
         self.program_name = Some(program_name);
-        self.program_source = if let Some(source) = arguments.get("source").and_then(|v| v.as_str())
-        {
+
+        let source = if let Some(source) = arguments.get("source").and_then(|v| v.as_str()) {
             source.to_string()
         } else {
             #[cfg(not(target_arch = "wasm32"))]
@@ -290,9 +286,6 @@ impl DebugAdapter {
             }
         };
 
-        let module = Arc::new(malkovri_wgsl_debugger::wgsl_to_module(
-            &self.program_source,
-        )?);
         let entry_point_inputs = parse_input::parse_shader_inputs(arguments)?;
         #[cfg(not(target_arch = "wasm32"))]
         let bindings = {
@@ -305,12 +298,7 @@ impl DebugAdapter {
         #[cfg(target_arch = "wasm32")]
         let bindings = parse_input::parse_bindings(arguments)?;
 
-        self.evaluator = Some(Evaluator::new(
-            module,
-            0,
-            entry_point_inputs,
-            bindings,
-        )?);
+        self.debugger = Some(Debugger::new(&source, 0, entry_point_inputs, bindings)?);
 
         let mut messages = Vec::new();
         if !self.configuration_done {
@@ -327,32 +315,13 @@ impl DebugAdapter {
         &mut self,
         seq: i64,
     ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
-        let evaluator = self.evaluator()?;
+        let debugger = self.debugger()?;
 
-        let current_fn = evaluator.current_function()?;
-
-        let (active_block, active_index) = evaluator.current_active_block()?;
-
-        let current_statement = active_block.get(active_index).ok_or_else(|| {
-            DebugAdapterError::InvalidProgram("invalid statement index".into())
-        })?;
-
-        let spans = active_block
-            .span_iter()
-            .map(|(_, span)| span)
-            .collect::<Vec<_>>();
-
-        let relevant_span = spans[active_index].location(&self.program_source);
-        let total_span = naga::Span::total_span(current_fn.body.span_iter().map(|(_, span)| *span));
-
-        let (line, column) = if let Statement::Return { .. } = current_statement {
-            let total_span_range = total_span.to_range().unwrap();
-            let prefix = &self.program_source[..total_span_range.end];
-            let line_number = prefix.matches('\n').count() as u32 + 2;
-            (line_number, 0)
-        } else {
-            (relevant_span.line_number, relevant_span.line_position)
-        };
+        let frames = debugger.call_stack();
+        let location = frames
+            .first()
+            .and_then(|f| f.location.as_ref())
+            .ok_or_else(|| DebugAdapterError::InvalidProgram("no current location".into()))?;
 
         let path = self
             .program_path
@@ -366,7 +335,11 @@ impl DebugAdapter {
             &dapts::StackTraceResponse {
                 stack_frames: vec![dapts::StackFrame {
                     id: 1,
-                    name: "main".to_string(),
+                    name: frames
+                        .first()
+                        .and_then(|f| f.name.as_deref())
+                        .unwrap_or("main")
+                        .to_string(),
                     source: Some(dapts::Source {
                         name: self.program_name.clone(),
                         path: Some(path),
@@ -381,8 +354,8 @@ impl DebugAdapter {
                     instruction_pointer_reference: None,
                     module_id: None,
                     presentation_hint: Some(dapts::StackFramePresentationHint::Normal),
-                    line,
-                    column,
+                    line: location.line,
+                    column: location.column,
                     end_line: None,
                     end_column: None,
                 }],
@@ -395,18 +368,16 @@ impl DebugAdapter {
         &mut self,
         seq: i64,
     ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
-        let evaluator = self.evaluator()?;
+        let debugger = self.debugger()?;
 
-        let current_fn = evaluator.current_function()?;
-        let in_scope_locals = evaluator.local_variables_in_current_scope()?;
-        let named_variables_len =
-            in_scope_locals.len() + evaluator.named_expression_values()?.len();
-        let function_arguments_len = current_fn.arguments.len();
+        let local_count = debugger.local_variables().len();
+        let argument_count = debugger.argument_variables().len();
+        let globals = debugger.global_variables();
 
         let mut scopes = vec![dapts::Scope {
             name: "Locals".to_string(),
             variables_reference: LOCALS_SCOPE_REF,
-            named_variables: Some(named_variables_len as u32),
+            named_variables: Some(local_count as u32),
             indexed_variables: None,
             expensive: false,
             source: None,
@@ -417,11 +388,11 @@ impl DebugAdapter {
             presentation_hint: Some(dapts::ScopePresentationHint::Locals),
         }];
 
-        if function_arguments_len > 0 {
+        if argument_count > 0 {
             scopes.push(dapts::Scope {
                 name: "Function Arguments".to_string(),
                 variables_reference: ARGUMENTS_SCOPE_REF,
-                named_variables: Some(function_arguments_len as u32),
+                named_variables: Some(argument_count as u32),
                 indexed_variables: None,
                 expensive: false,
                 source: None,
@@ -433,7 +404,6 @@ impl DebugAdapter {
             });
         }
 
-        let globals = evaluator.global_variable_values();
         if !globals.is_empty() {
             scopes.push(dapts::Scope {
                 name: "Globals".to_string(),
@@ -464,21 +434,20 @@ impl DebugAdapter {
             .path
             .ok_or_else(|| DebugAdapterError::Parse("missing path".to_string()))?;
 
-        let content =
-            if self.program_path.as_deref() == Some(Path::new(&requested_path)) {
-                self.program_source.clone()
-            } else {
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    fs::read_to_string(&requested_path)?
-                }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    return Err(DebugAdapterError::Parse(format!(
-                        "cannot read file '{requested_path}' in WASM"
-                    )));
-                }
-            };
+        let content = if self.program_path.as_deref() == Some(Path::new(&requested_path)) {
+            self.debugger()?.source().to_string()
+        } else {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                fs::read_to_string(&requested_path)?
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                return Err(DebugAdapterError::Parse(format!(
+                    "cannot read file '{requested_path}' in WASM"
+                )));
+            }
+        };
 
         Ok(vec![self.make_response(
             req.seq,
@@ -569,21 +538,8 @@ impl DebugAdapter {
         &mut self,
         seq: i64,
     ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
-        let evaluator = self.evaluator_mut()?;
-
-        let mut has_more = false;
-        while let Some(statement) = evaluator.step()? {
-            if !matches!(
-                statement,
-                NextStatement {
-                    statement: Statement::Emit(_),
-                    ..
-                }
-            ) {
-                has_more = true;
-                break;
-            }
-        }
+        let debugger = self.debugger_mut()?;
+        let has_more = matches!(debugger.step()?, StepResult::Continue);
 
         let mut messages = vec![self.make_response(seq, &serde_json::json!({}))?];
         if has_more {
@@ -598,28 +554,25 @@ impl DebugAdapter {
         &mut self,
         seq: i64,
     ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
-        let evaluator = self.evaluator.as_mut().ok_or_else(|| {
-            DebugAdapterError::InvalidProgram("evaluator not initialized".into())
+        let debugger = self.debugger.as_mut().ok_or_else(|| {
+            DebugAdapterError::InvalidProgram("debugger not initialized".into())
         })?;
-        let source = &self.program_source;
         let breakpoints = &self.breakpoints;
 
         let mut has_more = false;
-        while let Some(statement) = evaluator.step()? {
-            if matches!(
-                statement,
-                NextStatement {
-                    statement: Statement::Emit(_),
-                    ..
-                }
-            ) {
-                continue;
-            }
-
-            if let Some(line) = evaluator.current_line(source)? {
-                if breakpoints.iter().any(|bp| bp.verified && bp.line == Some(line)) {
-                    has_more = true;
-                    break;
+        loop {
+            match debugger.step()? {
+                StepResult::Finished => break,
+                StepResult::Continue => {
+                    if let Some(loc) = debugger.current_location() {
+                        if breakpoints
+                            .iter()
+                            .any(|bp| bp.verified && bp.line == Some(loc.line))
+                        {
+                            has_more = true;
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -637,7 +590,7 @@ impl DebugAdapter {
         &mut self,
         seq: i64,
     ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
-        self.evaluator = None;
+        self.debugger = None;
         Ok(vec![self.make_response(seq, &serde_json::json!({}))?])
     }
 
@@ -645,7 +598,7 @@ impl DebugAdapter {
         &mut self,
         seq: i64,
     ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
-        self.evaluator = None;
+        self.debugger = None;
         Ok(vec![
             self.make_response(seq, &serde_json::json!({}))?,
             self.make_event("terminated", &serde_json::json!({}))?,
@@ -657,53 +610,23 @@ impl DebugAdapter {
         req: &dapts::Request,
     ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         let argument = serde_json::from_value::<dapts::VariablesArguments>(req.arguments.clone())?;
-        let evaluator = self.evaluator()?;
-
-        let current_fn = evaluator.current_function()?;
-        let current_state = evaluator.current_function_frame()?;
-
-        let local_variables_in_scope = evaluator.local_variables_in_current_scope()?;
+        let debugger = self.debugger()?;
 
         let variables = match argument.variables_reference {
-            LOCALS_SCOPE_REF => {
-                let mut vars: Vec<dapts::Variable> = current_fn
-                    .local_variables
-                    .iter()
-                    .filter(|(handle, _)| local_variables_in_scope.contains(handle))
-                    .map(|(handle, local)| {
-                        let val = current_state
-                            .local_variables
-                            .get(&handle)
-                            .unwrap_or(&Value::Uninitialized);
-                        make_variable(
-                            local.name.clone(),
-                            &format!("{:?}", val.leaf_value()),
-                        )
-                    })
-                    .collect();
-
-                for (name, value) in evaluator.named_expression_values()? {
-                    vars.push(make_variable(
-                        Some(name),
-                        &format!("{:?}", value.leaf_value()),
-                    ));
-                }
-
-                vars
-            }
-            ARGUMENTS_SCOPE_REF => evaluator
-                .current_function_argument_values()?
+            LOCALS_SCOPE_REF => debugger
+                .local_variables()
                 .into_iter()
-                .map(|(name, value)| {
-                    make_variable(name, &format!("{:?}", value.leaf_value()))
-                })
+                .map(|var| make_variable(var.name, &format!("{:?}", var.value)))
                 .collect(),
-            GLOBALS_SCOPE_REF => evaluator
-                .global_variable_values()
+            ARGUMENTS_SCOPE_REF => debugger
+                .argument_variables()
                 .into_iter()
-                .map(|(name, value)| {
-                    make_variable(name, &format!("{:?}", value.leaf_value()))
-                })
+                .map(|var| make_variable(var.name, &format!("{:?}", var.value)))
+                .collect(),
+            GLOBALS_SCOPE_REF => debugger
+                .global_variables()
+                .into_iter()
+                .map(|var| make_variable(var.name, &format!("{:?}", var.value)))
                 .collect(),
             _ => vec![],
         };

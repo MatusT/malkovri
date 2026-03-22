@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use malkovri_wgsl_debugger::{EvaluatorError, WgslToModuleError};
+use malkovri_wgsl_debugger::{DebuggerError, EvaluatorError};
 
 #[derive(Debug, Error)]
 pub enum DebugAdapterError {
@@ -12,14 +12,8 @@ pub enum DebugAdapterError {
     Parse(String),
     #[error("Invalid program: {0}")]
     InvalidProgram(String),
-    #[error("WGSL to Module error: {0}")]
-    WgslToModuleError(Box<WgslToModuleError>),
+    #[error("Debugger error: {0}")]
+    Debugger(#[from] DebuggerError),
     #[error("Evaluator error: {0}")]
     Evaluator(#[from] EvaluatorError),
-}
-
-impl From<WgslToModuleError> for DebugAdapterError {
-    fn from(e: WgslToModuleError) -> Self {
-        DebugAdapterError::WgslToModuleError(Box::new(e))
-    }
 }

@@ -13,6 +13,13 @@
   "activationEvents": ["onDebug"],
   "main": "./out/extension.js",
   "contributes": {
+    "languages": [
+      {
+        "id": "wgsl",
+        "aliases": ["WGSL", "wgsl"],
+        "extensions": [".wgsl"]
+      }
+    ],
     "debuggers": [
       {
         "type": "wgsl",

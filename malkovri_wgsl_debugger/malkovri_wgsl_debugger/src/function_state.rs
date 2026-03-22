@@ -8,7 +8,7 @@ use crate::value::Value;
 /// [`Evaluator::step`] reads these signals and performs the appropriate stack
 /// manipulation before continuing execution.
 #[derive(Clone, Debug, Default)]
-pub enum ControlFlow {
+pub(crate) enum ControlFlow {
     #[default]
     None,
     Break,
@@ -18,7 +18,7 @@ pub enum ControlFlow {
 
 /// Identifies a function in the module without owning/cloning it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum FunctionRef {
+pub(crate) enum FunctionRef {
     /// An entry-point function, looked up via `module.entry_points[index].function`.
     EntryPoint(usize),
     /// A regular function, looked up via `module.functions[handle]`.
@@ -28,7 +28,7 @@ pub enum FunctionRef {
 /// The kind of block a [`BlockFrame`] represents, carrying the information needed to
 /// implement its control-flow semantics.
 #[derive(Clone, Debug)]
-pub enum BlockKind {
+pub(crate) enum BlockKind {
     /// Plain block: the body of an `if`/`else`, or a bare `Statement::Block`.
     Plain,
     /// A loop with body and continuing phases.
@@ -46,46 +46,36 @@ pub enum BlockKind {
 
 /// A function call frame on the unified execution stack.
 #[derive(Clone, Debug)]
-pub struct FunctionFrame {
+pub(crate) struct FunctionFrame {
     /// Reference to the function in the module.
-    pub function_ref: FunctionRef,
-    pub local_variables: HashMap<Handle<LocalVariable>, Value>,
-    pub evaluated_expressions: HashMap<Handle<Expression>, Value>,
-    pub evaluated_function_arguments: Vec<Value>,
+    pub(crate) function_ref: FunctionRef,
+    pub(crate) local_variables: HashMap<Handle<LocalVariable>, Value>,
+    pub(crate) evaluated_expressions: HashMap<Handle<Expression>, Value>,
+    pub(crate) evaluated_function_arguments: Vec<Value>,
     /// The top-level statements of the function body.
-    pub statements: naga::Block,
-    pub current_statement_index: usize,
+    pub(crate) statements: naga::Block,
+    pub(crate) current_statement_index: usize,
     /// The `Expression::CallResult` handle in the *parent* frame that should receive
     /// this function's return value.  `None` for the entry-point frame and for
     /// calls whose result is discarded.
-    pub call_result_handle: Option<Handle<Expression>>,
+    pub(crate) call_result_handle: Option<Handle<Expression>>,
     /// Control-flow signal written by `break`/`continue`/`return` handlers and consumed
     /// by [`Evaluator::next_statement`].
-    pub control_flow: ControlFlow,
-}
-
-impl FunctionFrame {
-    pub fn source_span(&self) -> naga::Span {
-        naga::Span::total_span(self.statements.span_iter().map(|(_, s)| *s))
-    }
+    pub(crate) control_flow: ControlFlow,
 }
 
 /// A block frame (if-body, loop-body, switch-case, plain block) on the unified stack.
 #[derive(Clone, Debug)]
-pub struct BlockFrame {
+pub(crate) struct BlockFrame {
     /// The currently active statements (either the loop body or the continuing block).
-    pub statements: naga::Block,
-    pub current_statement_index: usize,
-    pub kind: BlockKind,
-    /// The source span of the statement that created this block frame (e.g. the
-    /// `for`/`loop`/`if`/`switch` statement span from the parent block).
-    /// Used to reconstruct lexical scoping for local variables.
-    pub source_span: naga::Span,
+    pub(crate) statements: naga::Block,
+    pub(crate) current_statement_index: usize,
+    pub(crate) kind: BlockKind,
 }
 
 impl BlockFrame {
     /// Switch this loop frame to its continuing block. No-op if not a Loop.
-    pub fn switch_to_continuing(&mut self) {
+    pub(crate) fn switch_to_continuing(&mut self) {
         if let BlockKind::Loop {
             ref mut other_block,
             ref mut in_continuing,
@@ -99,7 +89,7 @@ impl BlockFrame {
     }
 
     /// Restart the loop body from the beginning. No-op if not a Loop.
-    pub fn restart_body(&mut self) {
+    pub(crate) fn restart_body(&mut self) {
         if let BlockKind::Loop {
             ref mut other_block,
             ref mut in_continuing,
@@ -117,14 +107,14 @@ impl BlockFrame {
 /// Function calls push a [`StackFrame::Function`]; entering any nested block
 /// (`if`, `loop`, `switch`, bare block) pushes a [`StackFrame::Block`].
 #[derive(Clone, Debug)]
-pub enum StackFrame {
+pub(crate) enum StackFrame {
     Function(Box<FunctionFrame>),
     Block(BlockFrame),
 }
 
 impl StackFrame {
     /// The currently active statements for this frame.
-    pub fn statements(&self) -> &naga::Block {
+    pub(crate) fn statements(&self) -> &naga::Block {
         match self {
             StackFrame::Function(f) => &f.statements,
             StackFrame::Block(b) => &b.statements,
@@ -132,7 +122,7 @@ impl StackFrame {
     }
 
     /// The current statement index for this frame.
-    pub fn current_statement_index(&self) -> usize {
+    pub(crate) fn current_statement_index(&self) -> usize {
         match self {
             StackFrame::Function(f) => f.current_statement_index,
             StackFrame::Block(b) => b.current_statement_index,
@@ -140,31 +130,21 @@ impl StackFrame {
     }
 
     /// Increment the current statement index.
-    pub fn increment_statement_index(&mut self) {
+    pub(crate) fn increment_statement_index(&mut self) {
         match self {
             StackFrame::Function(f) => f.current_statement_index += 1,
             StackFrame::Block(b) => b.current_statement_index += 1,
         }
     }
 
-    /// The source span of this frame's block.
-    pub fn source_span(&self) -> naga::Span {
-        match self {
-            StackFrame::Function(f) => f.source_span(),
-            StackFrame::Block(b) => b.source_span,
-        }
-    }
-
     /// Whether this frame has executed all its statements.
-    pub fn is_exhausted(&self) -> bool {
+    pub(crate) fn is_exhausted(&self) -> bool {
         self.current_statement_index() >= self.statements().len()
     }
 }
 
-/// The statement that will be executed next, along with its context.
+/// The statement that will be executed next.
 #[derive(Clone, Debug)]
-pub struct NextStatement {
-    pub function_ref: FunctionRef,
-    pub statement: naga::Statement,
-    pub statement_index: usize,
+pub(crate) struct NextStatement {
+    pub(crate) statement: naga::Statement,
 }

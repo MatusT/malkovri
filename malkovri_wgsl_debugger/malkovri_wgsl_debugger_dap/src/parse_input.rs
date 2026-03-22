@@ -3,10 +3,8 @@ use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::{fs, path::Path};
 
-use naga::ResourceBinding;
-
 use crate::error::DebugAdapterError;
-use malkovri_wgsl_debugger::{EntryPointInputs, Primitive, Value};
+use malkovri_wgsl_debugger::{EntryPointInputs, Primitive, ResourceBinding, Value};
 
 pub fn parse_shader_inputs(
     arguments: &serde_json::Map<String, serde_json::Value>,

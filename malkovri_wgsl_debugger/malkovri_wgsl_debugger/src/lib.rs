@@ -1,4 +1,5 @@
 mod declaring_scopes;
+mod debugger;
 mod entry_point_inputs;
 mod error;
 mod eval_binary;
@@ -11,10 +12,11 @@ mod primitive;
 mod value;
 mod wgsl;
 
-pub use entry_point_inputs::*;
-pub use error::*;
-pub use evaluator::*;
-pub use function_state::*;
-pub use primitive::*;
-pub use value::*;
-pub use wgsl::*;
+pub use debugger::{
+    Debugger, DebuggerError, ResourceBinding, SourceLocation, StackFrameInfo, StepResult, Variable,
+};
+pub use entry_point_inputs::EntryPointInputs;
+pub use error::EvaluatorError;
+pub use primitive::Primitive;
+pub use value::Value;
+pub use wgsl::WgslToModuleError;
