@@ -13,6 +13,7 @@ Supported:
 - [x] All expressions
 
 TODO:
+- [ ] Multiple threads
 - [ ] Image and sampler inputs
 - [ ] Support for graphics pipeline with vertex + fragment shaders
 - [ ] ... and like a million things :-)
@@ -20,7 +21,8 @@ TODO:
 ## Requirements
 
 - [Rust](https://rustup.rs/) (edition 2024, stable toolchain)
-- [Node.js](https://nodejs.org/) and npm (for the VS Code extension)
+- [wasm-pack](https://rustwasm.github.io/wasm-pack/) (for the WASM component)
+- [Deno](https://deno.com/) (for the VS Code extension)
 - VS Code
 
 ## Build
@@ -29,17 +31,19 @@ TODO:
 # Build the DAP server
 cargo build --release -p malkovri_wgsl_debugger_dap
 
+# Build the WASM component
+wasm-pack build malkovri_wgsl_debugger_wasm --target bundler
+
 # Build the VS Code extension
 cd vscode_extension
-npm install
-npm run compile
+deno task build
 ```
 
 ## Run / Install
 
 1. Build both components above.
-2. Open the `vscode_extension/` folder in VS Code.
-3. Press **F5** to launch the Extension Development Host.
+2. Open the **root** `malkovri_wgsl_debugger/` folder in VS Code.
+3. Press **F5** to build and launch the Extension Development Host.
 4. Open a `.wgsl` file and create a launch configuration in `.vscode/launch.json`:
 
 ```json
@@ -64,10 +68,12 @@ npm run compile
 
 ## Launch config options
 
-| Field                  | Type                          | Description                                                                        |
-|------------------------|-------------------------------|------------------------------------------------------------------------------------|
-| `program`              | string                        | Absolute path to the WGSL shader file.                                             |
-| `shaderInputs`         | object                        | Entry-point builtin values (e.g. `global_invocation_id`, `workgroup_id`, …).       |
-| `bindings`             | object                        | Resource bindings keyed by `"group:binding"` (e.g. `"0:0"`).                       |
+| Field                  | Type                           | Description                                                                        |
+|------------------------|--------------------------------|------------------------------------------------------------------------------------|
+| `program`              | string                         | Absolute path to the WGSL shader file.                                             |
+| `shaderInputs`         | object                         | Entry-point builtin values (e.g. `global_invocation_id`, `workgroup_id`, …).       |
+| `bindings`             | object                         | Resource bindings keyed by `"group:binding"` (e.g. `"0:0"`).                       |
 | `bindings[].type`      | `"f32"` \| `"i32"` \| `"u32"` | Element type of the buffer.                                                        |
-| `bindings[].inline`    | array                         | Inline data values.                                                                |
+| `bindings[].inline`    | array                          | Inline array of values. Cannot be combined with `file`.                            |
+| `bindings[].file`      | string                         | Path to a data file relative to the shader. Cannot be combined with `inline`.      |
+| `bindings[].format`    | `"ron"` \| `"binary"`          | File format: `"ron"` (RON array, default) or `"binary"` (little-endian 4-byte values). |
