@@ -305,9 +305,9 @@ impl DebugAdapter {
             self.delayed_init_seq = Some(req.seq);
         } else {
             messages.push(self.make_response(req.seq, &serde_json::json!({}))?);
+            messages.push(self.run_to_breakpoint()?);
         }
 
-        messages.push(self.make_stopped_event(dapts::StoppedEventReason::Entry)?);
         Ok(messages)
     }
 
@@ -515,7 +515,7 @@ impl DebugAdapter {
             messages.push(self.make_response(delayed_init_seq, &serde_json::json!({}))?);
         }
 
-        messages.push(self.make_stopped_event(dapts::StoppedEventReason::Entry)?);
+        messages.push(self.run_to_breakpoint()?);
         Ok(messages)
     }
 
@@ -554,36 +554,9 @@ impl DebugAdapter {
         &mut self,
         seq: i64,
     ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
-        let debugger = self.debugger.as_mut().ok_or_else(|| {
-            DebugAdapterError::InvalidProgram("debugger not initialized".into())
-        })?;
-        let breakpoints = &self.breakpoints;
-
-        let mut has_more = false;
-        loop {
-            match debugger.step()? {
-                StepResult::Finished => break,
-                StepResult::Continue => {
-                    if let Some(loc) = debugger.current_location() {
-                        if breakpoints
-                            .iter()
-                            .any(|bp| bp.verified && bp.line == Some(loc.line))
-                        {
-                            has_more = true;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut messages = vec![self.make_response(seq, &serde_json::json!({}))?];
-        if has_more {
-            messages.push(self.make_stopped_event(dapts::StoppedEventReason::Breakpoint)?);
-        } else {
-            messages.push(self.make_event("terminated", &serde_json::json!({}))?);
-        }
-        Ok(messages)
+        let response = self.make_response(seq, &serde_json::json!({}))?;
+        let event = self.run_to_breakpoint()?;
+        Ok(vec![response, event])
     }
 
     fn handle_disconnect(
@@ -706,6 +679,37 @@ impl DebugAdapter {
             event: event.to_string(),
             body: serde_json::to_value(body)?,
         })
+    }
+
+    fn run_to_breakpoint(&mut self) -> Result<OutgoingMessage, DebugAdapterError> {
+        let debugger = self.debugger.as_mut().ok_or_else(|| {
+            DebugAdapterError::InvalidProgram("debugger not initialized".into())
+        })?;
+        let breakpoints = &self.breakpoints;
+
+        let mut has_more = false;
+        loop {
+            match debugger.step()? {
+                StepResult::Finished => break,
+                StepResult::Continue => {
+                    if let Some(loc) = debugger.current_location() {
+                        if breakpoints
+                            .iter()
+                            .any(|bp| bp.verified && bp.line == Some(loc.line))
+                        {
+                            has_more = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if has_more {
+            self.make_stopped_event(dapts::StoppedEventReason::Breakpoint)
+        } else {
+            self.make_event("terminated", &serde_json::json!({}))
+        }
     }
 
     fn make_stopped_event(
