@@ -8,6 +8,7 @@ mod eval_expressions;
 mod eval_math;
 mod evaluator;
 mod function_state;
+mod thread;
 mod primitive;
 mod value;
 mod wgsl;
