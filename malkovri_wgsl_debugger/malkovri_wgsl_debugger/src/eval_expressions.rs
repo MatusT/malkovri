@@ -308,27 +308,7 @@ impl Evaluator {
 
     /// Evaluate an expression from the module's global_expressions arena (used for constants/overrides).
     fn evaluate_global_expression(&self, expr_handle: Handle<Expression>) -> Value {
-        let expression = &self.module.global_expressions[expr_handle];
-        match expression {
-            Expression::Literal(literal) => self.evaluate_literal(literal),
-            Expression::ZeroValue(ty) => Value::from(&self.module.types[*ty].inner),
-            Expression::Constant(handle) => {
-                self.evaluate_global_expression(self.module.constants[*handle].init)
-            }
-            Expression::Compose { ty, components } => {
-                let ty_inner = &self.module.types[*ty].inner;
-                let vals: Vec<Value> = components
-                    .iter()
-                    .map(|c| self.evaluate_global_expression(*c))
-                    .collect();
-                self.assemble_compose(ty_inner, &vals)
-            }
-            Expression::Splat { size, value } => {
-                let val = self.evaluate_global_expression(*value).leaf_value();
-                self.splat_value(*size, val)
-            }
-            _ => Value::Uninitialized,
-        }
+        evaluate_global_expression(&self.module, expr_handle)
     }
 
     /// Assemble a composite value from evaluated components, guided by the target type.
@@ -502,5 +482,85 @@ impl Evaluator {
         } else {
             self.eval_expr(reject, func_idx)
         }
+    }
+}
+
+/// Evaluate a global expression given only a module reference (no `Evaluator` instance needed).
+pub(crate) fn evaluate_global_expression(module: &naga::Module, expr_handle: Handle<Expression>) -> Value {
+    let expression = &module.global_expressions[expr_handle];
+    match expression {
+        Expression::Literal(literal) => match literal {
+            Literal::F32(v) => Primitive::F32(*v).into(),
+            Literal::F64(v) => Primitive::F64(*v).into(),
+            Literal::I32(v) => Primitive::I32(*v).into(),
+            Literal::I64(v) => Primitive::I64(*v).into(),
+            Literal::U32(v) => Primitive::U32(*v).into(),
+            Literal::U64(v) => Primitive::U64(*v).into(),
+            Literal::Bool(v) => Primitive::U32(if *v { 1 } else { 0 }).into(),
+            _ => Value::Uninitialized,
+        },
+        Expression::ZeroValue(ty) => Value::from(&module.types[*ty].inner),
+        Expression::Constant(handle) => {
+            evaluate_global_expression(module, module.constants[*handle].init)
+        }
+        Expression::Compose { ty, components } => {
+            let ty_inner = &module.types[*ty].inner;
+            let vals: Vec<Value> = components
+                .iter()
+                .map(|c| evaluate_global_expression(module, *c))
+                .collect();
+            use naga::ScalarKind;
+            match ty_inner {
+                TypeInner::Array { .. } => Value::Array(vals.to_vec()),
+                TypeInner::Struct { members, .. } => {
+                    let fields = members
+                        .iter()
+                        .zip(vals.iter())
+                        .map(|(m, v)| (m.name.clone().unwrap_or_default(), v.clone()))
+                        .collect();
+                    Value::Struct(fields)
+                }
+                TypeInner::Vector { size, scalar } => {
+                    let expected_len = match size {
+                        VectorSize::Bi => 2,
+                        VectorSize::Tri => 3,
+                        VectorSize::Quad => 4,
+                    };
+                    macro_rules! compose_vec {
+                        ($collect:expr) => {{
+                            let comps = $collect(&vals);
+                            if comps.len() >= expected_len {
+                                Value::from(Primitive::from(&comps[..expected_len]))
+                            } else {
+                                Value::Uninitialized
+                            }
+                        }};
+                    }
+                    match (scalar.kind, scalar.width) {
+                        (ScalarKind::Float, 4) => compose_vec!(Value::collect_f32_components),
+                        (ScalarKind::Sint, 4) => compose_vec!(Value::collect_i32_components),
+                        (ScalarKind::Uint, 4) => compose_vec!(Value::collect_u32_components),
+                        _ => Value::Uninitialized,
+                    }
+                }
+                _ => Value::Uninitialized,
+            }
+        }
+        Expression::Splat { size, value } => {
+            let val = evaluate_global_expression(module, *value).leaf_value();
+            match (size, val) {
+                (VectorSize::Bi, Value::Primitive(Primitive::F32(v))) => Primitive::F32x2([v; 2]).into(),
+                (VectorSize::Tri, Value::Primitive(Primitive::F32(v))) => Primitive::F32x3([v; 3]).into(),
+                (VectorSize::Quad, Value::Primitive(Primitive::F32(v))) => Primitive::F32x4([v; 4]).into(),
+                (VectorSize::Bi, Value::Primitive(Primitive::I32(v))) => Primitive::I32x2([v; 2]).into(),
+                (VectorSize::Tri, Value::Primitive(Primitive::I32(v))) => Primitive::I32x3([v; 3]).into(),
+                (VectorSize::Quad, Value::Primitive(Primitive::I32(v))) => Primitive::I32x4([v; 4]).into(),
+                (VectorSize::Bi, Value::Primitive(Primitive::U32(v))) => Primitive::U32x2([v; 2]).into(),
+                (VectorSize::Tri, Value::Primitive(Primitive::U32(v))) => Primitive::U32x3([v; 3]).into(),
+                (VectorSize::Quad, Value::Primitive(Primitive::U32(v))) => Primitive::U32x4([v; 4]).into(),
+                _ => Value::Uninitialized,
+            }
+        }
+        _ => Value::Uninitialized,
     }
 }

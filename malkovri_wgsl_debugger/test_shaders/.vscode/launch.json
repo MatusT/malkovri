@@ -10,9 +10,6 @@
 			"request": "launch",
 			"name": "Debug test_expressions.wgsl",
 			"program": "${workspaceFolder}/test_expressions.wgsl",
-			"shaderInputs": {
-				"global_invocation_id": [2, 0, 0]
-			},
 			"bindings": {
 				"0:0": {
 					"type": "f32",
@@ -63,8 +60,10 @@
 			"request": "launch",
 			"name": "Debug test_control_flow.wgsl",
 			"program": "${workspaceFolder}/test_control_flow.wgsl",
-			"shaderInputs": {
-				"global_invocation_id": [3, 0, 0]
+			"workgroupConfig": {
+				"workgroupSize": [64, 1, 1],
+				"workgroupId": [0, 0, 0],
+				"numWorkgroups": [1, 1, 1],
 			},
 			"bindings": {
 				"0:0": {

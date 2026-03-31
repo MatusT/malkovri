@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::{fs, path::Path};
 
 use crate::error::DebugAdapterError;
-use malkovri_wgsl_debugger::{EntryPointInputs, Primitive, ResourceBinding, Value};
+use malkovri_wgsl_debugger::{EntryPointInputs, Primitive, ResourceBinding, Value, WorkgroupConfig};
 
 pub fn parse_shader_inputs(
     arguments: &serde_json::Map<String, serde_json::Value>,
@@ -13,6 +13,15 @@ pub fn parse_shader_inputs(
         Some(value) => Ok(serde_json::from_value(value.clone())?),
         None => Ok(EntryPointInputs::default()),
     }
+}
+
+pub fn parse_workgroup_config(
+    arguments: &serde_json::Map<String, serde_json::Value>,
+) -> WorkgroupConfig {
+    arguments
+        .get("workgroupConfig")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default()
 }
 
 pub fn parse_bindings(

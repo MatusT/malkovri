@@ -89,7 +89,7 @@ pub(crate) enum ThreadStatus {
 
 /// All per-invocation state for a single shader thread.
 #[derive(Clone, Debug)]
-pub(crate) struct Thread {
+pub(crate) struct EvaluatorThread {
     pub(crate) id: ThreadIdentification,
     pub(crate) stack: Vec<StackFrame>,
     /// `var<private>` globals — one copy per thread, not shared.

@@ -1,23 +1,27 @@
 use crate::{
+    debugger::WorkgroupConfig,
     declaring_scopes,
     entry_point_inputs::EntryPointInputs,
     error::EvaluatorError,
+    eval_expressions::evaluate_global_expression,
     function_state::{
         BlockFrame, BlockKind, ControlFlow, FunctionFrame, FunctionRef, NextStatement, StackFrame,
     },
     primitive::Primitive,
+    thread::{EvaluatorThread, ThreadIdentification},
     value::Value,
 };
 
 use std::{cell::RefCell, collections::HashMap, collections::HashSet, rc::Rc, sync::Arc};
 
-use naga::{Expression, GlobalVariable, Handle, LocalVariable, Module, Statement};
+use naga::{AddressSpace, Expression, GlobalVariable, Handle, LocalVariable, Module, Statement};
 
 pub(crate) struct Evaluator {
     pub(crate) module: Arc<Module>,
     pub(crate) entry_point_inputs: EntryPointInputs,
     pub(crate) global_values: HashMap<naga::Handle<GlobalVariable>, Value>,
     pub(crate) stack: Vec<StackFrame>,
+    threads: HashMap<[u32; 3], EvaluatorThread>,
     declaring_scopes: declaring_scopes::ModuleScopes,
 }
 
@@ -27,10 +31,47 @@ impl Evaluator {
         entry_point_index: usize,
         entry_point_inputs: EntryPointInputs,
         global_values: HashMap<naga::ResourceBinding, Value>,
+        workgroup_config: WorkgroupConfig,
     ) -> Result<Self, EvaluatorError> {
         let statements = module.entry_points[entry_point_index].function.body.clone();
 
         let declaring_scopes = declaring_scopes::ModuleScopes::new(&module);
+
+        let mut threads = HashMap::new();
+        for x in 0..workgroup_config.size[0] {
+            for y in 0..workgroup_config.size[1] {
+                for z in 0..workgroup_config.size[2] {
+                    let thread_id = ThreadIdentification::new(
+                        [x, y, z],
+                        workgroup_config.size,
+                        workgroup_config.id,
+                        workgroup_config.subgroup_size,
+                    );
+
+                    let gid = thread_id.global_invocation_id();
+                    let thread = EvaluatorThread {
+                        id: thread_id,
+                        stack: vec![],
+                        private_globals: module
+                            .global_variables
+                            .iter()
+                            .filter(|(_, v)| v.space == AddressSpace::Private)
+                            .map(|(h, v)| {
+                                let value: Value = match v.init {
+                                    Some(init_expr) => {
+                                        evaluate_global_expression(&module, init_expr)
+                                    }
+                                    None => Value::from(&module.types[v.ty].inner),
+                                };
+                                (h, value)
+                            })
+                            .collect(),
+                        status: crate::thread::ThreadStatus::Running,
+                    };
+                    threads.insert(gid, thread);
+                }
+            }
+        }
 
         let mut evaluator = Evaluator {
             global_values: global_values
@@ -61,6 +102,7 @@ impl Evaluator {
                 control_flow: ControlFlow::None,
             }))],
             declaring_scopes,
+            threads,
         };
         evaluator.initialize_local_variables()?;
         Ok(evaluator)
@@ -102,7 +144,9 @@ impl Evaluator {
 
     /// Return a mutable reference to the current function frame (the nearest `Function` variant on the
     /// stack).
-    pub(crate) fn current_function_frame_mut(&mut self) -> Result<&mut FunctionFrame, EvaluatorError> {
+    pub(crate) fn current_function_frame_mut(
+        &mut self,
+    ) -> Result<&mut FunctionFrame, EvaluatorError> {
         let function_index = self.current_function_frame_index()?;
         match &mut self.stack[function_index] {
             StackFrame::Function(f) => Ok(f),
@@ -129,9 +173,14 @@ impl Evaluator {
 
     fn current_scope_range(&self) -> Result<std::ops::Range<usize>, EvaluatorError> {
         let current_frame = self.current_frame()?;
-        Ok(naga::Span::total_span(current_frame.statements().span_iter().map(|(_, span)| *span))
-            .to_range()
-            .unwrap_or(0..usize::MAX))
+        Ok(naga::Span::total_span(
+            current_frame
+                .statements()
+                .span_iter()
+                .map(|(_, span)| *span),
+        )
+        .to_range()
+        .unwrap_or(0..usize::MAX))
     }
 
     /// Return the statements and current index of the top-of-stack frame.
@@ -495,10 +544,7 @@ impl Evaluator {
 
 // Statement dispatch
 impl Evaluator {
-    fn handle_statement(
-        &mut self,
-        statement: Statement,
-    ) -> Result<(), EvaluatorError> {
+    fn handle_statement(&mut self, statement: Statement) -> Result<(), EvaluatorError> {
         match statement {
             Statement::Emit(_) => {}
             Statement::Call {

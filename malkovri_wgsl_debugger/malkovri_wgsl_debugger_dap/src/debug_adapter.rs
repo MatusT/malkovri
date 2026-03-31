@@ -286,7 +286,7 @@ impl DebugAdapter {
             }
         };
 
-        let entry_point_inputs = parse_input::parse_shader_inputs(arguments)?;
+        let workgroup_config = parse_input::parse_workgroup_config(arguments);
         #[cfg(not(target_arch = "wasm32"))]
         let bindings = {
             let program_dir = program_path
@@ -298,7 +298,7 @@ impl DebugAdapter {
         #[cfg(target_arch = "wasm32")]
         let bindings = parse_input::parse_bindings(arguments)?;
 
-        self.debugger = Some(Debugger::new(&source, 0, entry_point_inputs, bindings)?);
+        self.debugger = Some(Debugger::new(&source, 0, workgroup_config, bindings)?);
 
         let mut messages = Vec::new();
         if !self.configuration_done {

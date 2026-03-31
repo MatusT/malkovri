@@ -14,7 +14,8 @@ mod value;
 mod wgsl;
 
 pub use debugger::{
-    Debugger, DebuggerError, ResourceBinding, SourceLocation, StackFrameInfo, StepResult, Variable,
+    Debugger, DebuggerError, ResourceBinding, SourceLocation, StackFrameInfo, StepResult,
+    Variable, WorkgroupConfig,
 };
 pub use entry_point_inputs::EntryPointInputs;
 pub use error::EvaluatorError;
