@@ -4,14 +4,14 @@ use std::collections::HashMap;
 use std::{fs, path::Path};
 
 use crate::error::DebugAdapterError;
-use malkovri_wgsl_debugger::{EntryPointInputs, Primitive, ResourceBinding, Value, WorkgroupConfig};
+use malkovri_wgsl_debugger::{GlobalConstants, Primitive, ResourceBinding, Value, WorkgroupConfig};
 
-pub fn parse_shader_inputs(
+pub fn parse_global_constants(
     arguments: &serde_json::Map<String, serde_json::Value>,
-) -> Result<EntryPointInputs, DebugAdapterError> {
-    match arguments.get("shaderInputs") {
+) -> Result<GlobalConstants, DebugAdapterError> {
+    match arguments.get("globalConstants") {
         Some(value) => Ok(serde_json::from_value(value.clone())?),
-        None => Ok(EntryPointInputs::default()),
+        None => Ok(GlobalConstants::default()),
     }
 }
 

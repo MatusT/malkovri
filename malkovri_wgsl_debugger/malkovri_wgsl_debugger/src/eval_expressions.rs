@@ -159,97 +159,101 @@ impl Evaluator {
         let function_argument = &function.arguments[index];
 
         if let Some(binding) = &function_argument.binding {
+            let thread = self.active_thread();
+            let gc = &self.global_constants;
             match binding {
                 naga::ir::Binding::BuiltIn(built_in) => match built_in {
-                    // vertex
+                    // vertex — per-thread
+                    naga::ir::BuiltIn::VertexIndex => {
+                        Primitive::U32(thread.vertex_inputs.vertex_index).into()
+                    }
+                    naga::ir::BuiltIn::InstanceIndex => {
+                        Primitive::U32(thread.vertex_inputs.instance_index).into()
+                    }
+                    // vertex — global constants
                     naga::ir::BuiltIn::BaseInstance => {
-                        Primitive::U32(self.entry_point_inputs.base_instance).into()
+                        Primitive::U32(gc.base_instance).into()
                     }
                     naga::ir::BuiltIn::BaseVertex => {
-                        Primitive::I32(self.entry_point_inputs.base_vertex).into()
+                        Primitive::I32(gc.base_vertex).into()
                     }
                     naga::ir::BuiltIn::ClipDistance => Value::Array(
-                        self.entry_point_inputs
-                            .clip_distance
+                        gc.clip_distance
                             .iter()
                             .map(|&v| Primitive::F32(v).into())
                             .collect(),
                     ),
                     naga::ir::BuiltIn::CullDistance => Value::Array(
-                        self.entry_point_inputs
-                            .cull_distance
+                        gc.cull_distance
                             .iter()
                             .map(|&v| Primitive::F32(v).into())
                             .collect(),
                     ),
-                    naga::ir::BuiltIn::InstanceIndex => {
-                        Primitive::U32(self.entry_point_inputs.instance_index).into()
-                    }
                     naga::ir::BuiltIn::PointSize => {
-                        Primitive::F32(self.entry_point_inputs.point_size).into()
-                    }
-                    naga::ir::BuiltIn::VertexIndex => {
-                        Primitive::U32(self.entry_point_inputs.vertex_index).into()
+                        Primitive::F32(gc.point_size).into()
                     }
                     naga::ir::BuiltIn::DrawID => {
-                        Primitive::U32(self.entry_point_inputs.draw_id).into()
+                        Primitive::U32(gc.draw_id).into()
                     }
-                    // fragment
+                    // fragment — per-thread
                     naga::ir::BuiltIn::Position { .. } => {
-                        Primitive::F32x4(self.entry_point_inputs.position).into()
-                    }
-                    naga::ir::BuiltIn::ViewIndex => {
-                        Primitive::I32(self.entry_point_inputs.view_index).into()
-                    }
-                    naga::ir::BuiltIn::FragDepth => {
-                        Primitive::F32(self.entry_point_inputs.frag_depth).into()
-                    }
-                    naga::ir::BuiltIn::PointCoord => {
-                        Primitive::F32x2(self.entry_point_inputs.point_coord).into()
+                        Primitive::F32x4(thread.fragment_inputs.position).into()
                     }
                     naga::ir::BuiltIn::FrontFacing => {
-                        Primitive::U32(self.entry_point_inputs.front_facing as u32).into()
-                    }
-                    naga::ir::BuiltIn::PrimitiveIndex => {
-                        Primitive::U32(self.entry_point_inputs.primitive_index).into()
+                        Primitive::U32(thread.fragment_inputs.front_facing as u32).into()
                     }
                     naga::ir::BuiltIn::SampleIndex => {
-                        Primitive::U32(self.entry_point_inputs.sample_index).into()
+                        Primitive::U32(thread.fragment_inputs.sample_index).into()
                     }
                     naga::ir::BuiltIn::SampleMask => {
-                        Primitive::U32(self.entry_point_inputs.sample_mask).into()
+                        Primitive::U32(thread.fragment_inputs.sample_mask).into()
                     }
-                    // compute
+                    naga::ir::BuiltIn::PrimitiveIndex => {
+                        Primitive::U32(thread.fragment_inputs.primitive_index).into()
+                    }
+                    // fragment — global constants
+                    naga::ir::BuiltIn::ViewIndex => {
+                        Primitive::I32(gc.view_index).into()
+                    }
+                    naga::ir::BuiltIn::FragDepth => {
+                        Primitive::F32(gc.frag_depth).into()
+                    }
+                    naga::ir::BuiltIn::PointCoord => {
+                        Primitive::F32x2(gc.point_coord).into()
+                    }
+                    // compute — per-thread
                     naga::ir::BuiltIn::GlobalInvocationId => {
-                        Primitive::U32x3(self.entry_point_inputs.global_invocation_id).into()
+                        Primitive::U32x3(thread.compute_inputs.global_invocation_id).into()
                     }
                     naga::ir::BuiltIn::LocalInvocationId => {
-                        Primitive::U32x3(self.entry_point_inputs.local_invocation_id).into()
+                        Primitive::U32x3(thread.compute_inputs.local_invocation_id).into()
                     }
                     naga::ir::BuiltIn::LocalInvocationIndex => {
-                        Primitive::U32(self.entry_point_inputs.local_invocation_index).into()
+                        Primitive::U32(thread.compute_inputs.local_invocation_index).into()
                     }
                     naga::ir::BuiltIn::WorkGroupId => {
-                        Primitive::U32x3(self.entry_point_inputs.workgroup_id).into()
+                        Primitive::U32x3(thread.compute_inputs.workgroup_id).into()
                     }
+                    // compute — global constants
                     naga::ir::BuiltIn::WorkGroupSize => {
-                        Primitive::U32x3(self.entry_point_inputs.workgroup_size).into()
+                        Primitive::U32x3(gc.workgroup_size).into()
                     }
                     naga::ir::BuiltIn::NumWorkGroups => {
-                        Primitive::U32x3(self.entry_point_inputs.num_workgroups).into()
+                        Primitive::U32x3(gc.num_workgroups).into()
                     }
-                    // subgroup
-                    naga::ir::BuiltIn::NumSubgroups => {
-                        Primitive::U32(self.entry_point_inputs.num_subgroups).into()
-                    }
+                    // subgroup — per-thread
                     naga::ir::BuiltIn::SubgroupId => {
-                        Primitive::U32(self.entry_point_inputs.subgroup_id).into()
-                    }
-                    naga::ir::BuiltIn::SubgroupSize => {
-                        Primitive::U32(self.entry_point_inputs.subgroup_size).into()
+                        Primitive::U32(thread.compute_inputs.subgroup_id).into()
                     }
                     naga::ir::BuiltIn::SubgroupInvocationId => {
-                        Primitive::U32(self.entry_point_inputs.subgroup_invocation_id).into()
+                        Primitive::U32(thread.compute_inputs.subgroup_invocation_id).into()
+                    }
+                    // subgroup — global constants
+                    naga::ir::BuiltIn::NumSubgroups => {
+                        Primitive::U32(gc.num_subgroups).into()
+                    }
+                    naga::ir::BuiltIn::SubgroupSize => {
+                        Primitive::U32(gc.subgroup_size).into()
                     }
                 },
                 naga::ir::Binding::Location { .. } => Value::Uninitialized,

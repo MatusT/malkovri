@@ -1,14 +1,14 @@
 use crate::{
     debugger::WorkgroupConfig,
     declaring_scopes,
-    entry_point_inputs::EntryPointInputs,
+    entry_point_inputs::{ComputeThreadInputs, FragmentThreadInputs, GlobalConstants, VertexThreadInputs},
     error::EvaluatorError,
     eval_expressions::evaluate_global_expression,
     function_state::{
         BlockFrame, BlockKind, ControlFlow, FunctionFrame, FunctionRef, NextStatement, StackFrame,
     },
     primitive::Primitive,
-    thread::{EvaluatorThread, ThreadIdentification},
+    thread::EvaluatorThread,
     value::Value,
 };
 
@@ -18,10 +18,12 @@ use naga::{AddressSpace, Expression, GlobalVariable, Handle, LocalVariable, Modu
 
 pub(crate) struct Evaluator {
     pub(crate) module: Arc<Module>,
-    pub(crate) entry_point_inputs: EntryPointInputs,
+    pub(crate) global_constants: GlobalConstants,
     pub(crate) global_values: HashMap<naga::Handle<GlobalVariable>, Value>,
     pub(crate) stack: Vec<StackFrame>,
-    threads: HashMap<[u32; 3], EvaluatorThread>,
+    pub(crate) threads: HashMap<[u32; 3], EvaluatorThread>,
+    /// Global invocation ID of the currently active thread.
+    active_thread_gid: [u32; 3],
     declaring_scopes: declaring_scopes::ModuleScopes,
 }
 
@@ -29,7 +31,7 @@ impl Evaluator {
     pub(crate) fn new(
         module: Arc<Module>,
         entry_point_index: usize,
-        entry_point_inputs: EntryPointInputs,
+        global_constants: GlobalConstants,
         global_values: HashMap<naga::ResourceBinding, Value>,
         workgroup_config: WorkgroupConfig,
     ) -> Result<Self, EvaluatorError> {
@@ -38,19 +40,25 @@ impl Evaluator {
         let declaring_scopes = declaring_scopes::ModuleScopes::new(&module);
 
         let mut threads = HashMap::new();
+        let mut first_gid = [0u32; 3];
         for x in 0..workgroup_config.size[0] {
             for y in 0..workgroup_config.size[1] {
                 for z in 0..workgroup_config.size[2] {
-                    let thread_id = ThreadIdentification::new(
+                    let compute_inputs = ComputeThreadInputs::new(
                         [x, y, z],
                         workgroup_config.size,
                         workgroup_config.id,
                         workgroup_config.subgroup_size,
                     );
 
-                    let gid = thread_id.global_invocation_id();
+                    let gid = compute_inputs.global_invocation_id;
+                    if x == 0 && y == 0 && z == 0 {
+                        first_gid = gid;
+                    }
                     let thread = EvaluatorThread {
-                        id: thread_id,
+                        compute_inputs,
+                        vertex_inputs: VertexThreadInputs::default(),
+                        fragment_inputs: FragmentThreadInputs::default(),
                         stack: vec![],
                         private_globals: module
                             .global_variables
@@ -90,7 +98,7 @@ impl Evaluator {
                 })
                 .collect::<Result<_, EvaluatorError>>()?,
             module,
-            entry_point_inputs,
+            global_constants,
             stack: vec![StackFrame::Function(Box::new(FunctionFrame {
                 function_ref: FunctionRef::EntryPoint(entry_point_index),
                 local_variables: HashMap::new(),
@@ -103,9 +111,17 @@ impl Evaluator {
             }))],
             declaring_scopes,
             threads,
+            active_thread_gid: first_gid,
         };
+        
         evaluator.initialize_local_variables()?;
+
         Ok(evaluator)
+    }
+
+    /// Return a reference to the currently active thread.
+    pub(crate) fn active_thread(&self) -> &EvaluatorThread {
+        &self.threads[&self.active_thread_gid]
     }
 
     /// Resolve a [`FunctionRef`] to the actual `naga::Function` in the module.

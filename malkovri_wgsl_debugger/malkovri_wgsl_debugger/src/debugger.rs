@@ -4,11 +4,10 @@ use std::sync::Arc;
 use naga::Statement;
 
 use crate::{
-    entry_point_inputs::EntryPointInputs,
+    entry_point_inputs::GlobalConstants,
     error::EvaluatorError,
     evaluator::Evaluator,
     function_state::StackFrame,
-    thread::ThreadIdentification,
     value::Value,
     wgsl::{WgslToModuleError, wgsl_to_module},
 };
@@ -146,10 +145,15 @@ pub struct Debugger {
 impl Debugger {
     /// Create a new debugger session by parsing `source` and initializing the
     /// entry-point function at `entry_point_index`.
+    ///
+    /// `global_constants` provides user-set shader constants (vertex, fragment,
+    /// etc.).  The compute-related fields (`workgroup_size`, `num_workgroups`,
+    /// `subgroup_size`, `num_subgroups`) are overwritten from `config`.
     pub fn new(
         source: &str,
         entry_point_index: usize,
         config: WorkgroupConfig,
+        mut global_constants: GlobalConstants,
         bindings: HashMap<ResourceBinding, Value>,
     ) -> Result<Self, DebuggerError> {
         config.validate().map_err(DebuggerError::InvalidConfig)?;
@@ -168,31 +172,16 @@ impl Debugger {
             })
             .collect();
 
-        // Derive all thread IDs for the first thread [0,0,0] from the config.
-        // This will be replaced in Stage 2 when Evaluator manages all threads.
-        let thread0 = ThreadIdentification::new(
-            [0, 0, 0],
-            config.size,
-            config.id,
-            config.subgroup_size,
-        );
+        // Compute-related constants are derived from the workgroup config.
         let [wx, wy, wz] = config.size;
         let total_threads = wx * wy * wz;
-        let inputs = EntryPointInputs {
-            global_invocation_id: thread0.global_invocation_id(),
-            local_invocation_id: thread0.local_invocation_id(),
-            local_invocation_index: thread0.local_invocation_index(),
-            workgroup_id: thread0.workgroup_id(),
-            workgroup_size: config.size,
-            num_workgroups: config.count,
-            subgroup_id: thread0.subgroup_id(),
-            subgroup_size: config.subgroup_size,
-            subgroup_invocation_id: thread0.subgroup_invocation_id(),
-            num_subgroups: total_threads / config.subgroup_size,
-            ..EntryPointInputs::default()
-        };
+        global_constants.workgroup_size = config.size;
+        global_constants.num_workgroups = config.count;
+        global_constants.subgroup_size = config.subgroup_size;
+        global_constants.num_subgroups = total_threads / config.subgroup_size;
 
-        let evaluator = Evaluator::new(module, entry_point_index, inputs, naga_bindings, config)?;
+        let evaluator =
+            Evaluator::new(module, entry_point_index, global_constants, naga_bindings, config)?;
 
         Ok(Self {
             evaluator,

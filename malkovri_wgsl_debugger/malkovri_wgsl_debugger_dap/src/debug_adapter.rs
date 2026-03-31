@@ -287,6 +287,7 @@ impl DebugAdapter {
         };
 
         let workgroup_config = parse_input::parse_workgroup_config(arguments);
+        let global_constants = parse_input::parse_global_constants(arguments)?;
         #[cfg(not(target_arch = "wasm32"))]
         let bindings = {
             let program_dir = program_path
@@ -298,7 +299,7 @@ impl DebugAdapter {
         #[cfg(target_arch = "wasm32")]
         let bindings = parse_input::parse_bindings(arguments)?;
 
-        self.debugger = Some(Debugger::new(&source, 0, workgroup_config, bindings)?);
+        self.debugger = Some(Debugger::new(&source, 0, workgroup_config, global_constants, bindings)?);
 
         let mut messages = Vec::new();
         if !self.configuration_done {

@@ -17,7 +17,7 @@ pub use debugger::{
     Debugger, DebuggerError, ResourceBinding, SourceLocation, StackFrameInfo, StepResult,
     Variable, WorkgroupConfig,
 };
-pub use entry_point_inputs::EntryPointInputs;
+pub use entry_point_inputs::GlobalConstants;
 pub use error::EvaluatorError;
 pub use primitive::Primitive;
 pub use value::Value;
