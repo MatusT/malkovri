@@ -116,6 +116,65 @@ impl Primitive {
             ),
         }
     }
+
+    pub fn assign_component(&mut self, index: usize, value: Primitive) -> Result<(), &'static str> {
+        match (self, value) {
+            (Primitive::F32(v), Primitive::F32(new)) if index == 0 => *v = new,
+            (Primitive::F64(v), Primitive::F64(new)) if index == 0 => *v = new,
+            (Primitive::I32(v), Primitive::I32(new)) if index == 0 => *v = new,
+            (Primitive::I64(v), Primitive::I64(new)) if index == 0 => *v = new,
+            (Primitive::U32(v), Primitive::U32(new)) if index == 0 => *v = new,
+            (Primitive::U64(v), Primitive::U64(new)) if index == 0 => *v = new,
+            (Primitive::F32x2(values), Primitive::F32(new)) => {
+                *values
+                    .get_mut(index)
+                    .ok_or("component index out of bounds")? = new
+            }
+            (Primitive::F32x3(values), Primitive::F32(new)) => {
+                *values
+                    .get_mut(index)
+                    .ok_or("component index out of bounds")? = new
+            }
+            (Primitive::F32x4(values), Primitive::F32(new)) => {
+                *values
+                    .get_mut(index)
+                    .ok_or("component index out of bounds")? = new
+            }
+            (Primitive::I32x2(values), Primitive::I32(new)) => {
+                *values
+                    .get_mut(index)
+                    .ok_or("component index out of bounds")? = new
+            }
+            (Primitive::I32x3(values), Primitive::I32(new)) => {
+                *values
+                    .get_mut(index)
+                    .ok_or("component index out of bounds")? = new
+            }
+            (Primitive::I32x4(values), Primitive::I32(new)) => {
+                *values
+                    .get_mut(index)
+                    .ok_or("component index out of bounds")? = new
+            }
+            (Primitive::U32x2(values), Primitive::U32(new)) => {
+                *values
+                    .get_mut(index)
+                    .ok_or("component index out of bounds")? = new
+            }
+            (Primitive::U32x3(values), Primitive::U32(new)) => {
+                *values
+                    .get_mut(index)
+                    .ok_or("component index out of bounds")? = new
+            }
+            (Primitive::U32x4(values), Primitive::U32(new)) => {
+                *values
+                    .get_mut(index)
+                    .ok_or("component index out of bounds")? = new
+            }
+            _ => return Err("component type mismatch"),
+        }
+        Ok(())
+    }
+
     /// Convert f32 components to i32 using the given function, preserving vector width.
     pub fn map_f32_to_i32(&self, f: impl Fn(f32) -> i32) -> Option<Self> {
         match self {

@@ -21,6 +21,18 @@ const ARGUMENTS_SCOPE_REF: u32 = 2;
 const GLOBALS_SCOPE_REF: u32 = 3;
 const MAIN_THREAD_ID: u64 = 1;
 
+fn make_scope_ref(thread_id: u64, scope: u32) -> u32 {
+    (thread_id as u32) * 10 + scope
+}
+
+fn parse_scope_ref(reference: u32) -> (u64, u32) {
+    if reference <= GLOBALS_SCOPE_REF {
+        (MAIN_THREAD_ID, reference)
+    } else {
+        ((reference / 10) as u64, reference % 10)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum OutgoingMessage {
     Response {
@@ -104,6 +116,7 @@ pub struct DebugAdapter {
     debugger: Option<Debugger>,
     delayed_init_seq: Option<i64>,
     configuration_done: bool,
+    stop_on_entry: bool,
 }
 
 impl Default for DebugAdapter {
@@ -122,6 +135,7 @@ impl DebugAdapter {
             program_path: None,
             delayed_init_seq: None,
             configuration_done: false,
+            stop_on_entry: false,
         }
     }
 
@@ -140,14 +154,9 @@ impl DebugAdapter {
         reader: &mut R,
         writer: &mut W,
     ) -> Result<(), DebugAdapterError> {
-        loop {
-            match Self::poll_request(reader)? {
-                Some(req) => {
-                    for message in self.handle_request(&req)? {
-                        Self::write_message(writer, &message)?;
-                    }
-                }
-                None => break,
+        while let Some(req) = Self::poll_request(reader)? {
+            for message in self.handle_request(&req)? {
+                Self::write_message(writer, &message)?;
             }
         }
 
@@ -196,14 +205,14 @@ impl DebugAdapter {
         match req.command.as_str() {
             "initialize" => self.handle_initialize(req.seq),
             "launch" => self.handle_launch(req),
-            "stackTrace" => self.handle_stack_trace(req.seq),
-            "scopes" => self.handle_scopes(req.seq),
+            "stackTrace" => self.handle_stack_trace(req),
+            "scopes" => self.handle_scopes(req),
             "source" => self.handle_source(req),
             "setBreakpoints" => self.handle_set_breakpoints(req),
             "configurationDone" => self.handle_configuration_done(req.seq),
             "threads" => self.handle_threads(req.seq),
-            "next" => self.handle_next(req.seq),
-            "continue" => self.handle_continue(req.seq),
+            "next" => self.handle_next(req),
+            "continue" => self.handle_continue(req),
             "variables" => self.handle_variables(req),
             "disconnect" => self.handle_disconnect(req.seq),
             "terminate" => self.handle_terminate(req.seq),
@@ -223,10 +232,7 @@ impl DebugAdapter {
             .ok_or_else(|| DebugAdapterError::InvalidProgram("debugger not initialized".into()))
     }
 
-    fn handle_initialize(
-        &mut self,
-        seq: i64,
-    ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
+    fn handle_initialize(&mut self, seq: i64) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         Ok(vec![
             self.make_response(
                 seq,
@@ -236,6 +242,7 @@ impl DebugAdapter {
                     supports_terminate_request: Some(true),
                     supports_restart_request: Some(true),
                     supports_set_variable: Some(true),
+                    supports_single_thread_execution_requests: Some(true),
                     supports_configuration_done_request: Some(true),
                     supports_conditional_breakpoints: Some(true),
                     supports_hit_conditional_breakpoints: Some(true),
@@ -270,6 +277,10 @@ impl DebugAdapter {
 
         self.program_path = Some(program_path.clone());
         self.program_name = Some(program_name);
+        self.stop_on_entry = arguments
+            .get("stopOnEntry")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
 
         let source = if let Some(source) = arguments.get("source").and_then(|v| v.as_str()) {
             source.to_string()
@@ -286,7 +297,7 @@ impl DebugAdapter {
             }
         };
 
-        let workgroup_config = parse_input::parse_workgroup_config(arguments);
+        let workgroup_config = parse_input::parse_workgroup_config(arguments)?;
         let global_constants = parse_input::parse_global_constants(arguments)?;
         #[cfg(not(target_arch = "wasm32"))]
         let bindings = {
@@ -299,14 +310,20 @@ impl DebugAdapter {
         #[cfg(target_arch = "wasm32")]
         let bindings = parse_input::parse_bindings(arguments)?;
 
-        self.debugger = Some(Debugger::new(&source, 0, workgroup_config, global_constants, bindings)?);
+        self.debugger = Some(Debugger::new(
+            &source,
+            0,
+            workgroup_config,
+            global_constants,
+            bindings,
+        )?);
 
         let mut messages = Vec::new();
         if !self.configuration_done {
             self.delayed_init_seq = Some(req.seq);
         } else {
             messages.push(self.make_response(req.seq, &serde_json::json!({}))?);
-            messages.push(self.run_to_breakpoint()?);
+            messages.push(self.initial_stop_event()?);
         }
 
         Ok(messages)
@@ -314,9 +331,13 @@ impl DebugAdapter {
 
     fn handle_stack_trace(
         &mut self,
-        seq: i64,
+        req: &dapts::Request,
     ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
-        let debugger = self.debugger()?;
+        let arguments =
+            serde_json::from_value::<dapts::StackTraceArguments>(req.arguments.clone())?;
+        let thread_id = arguments.thread_id;
+        let debugger = self.debugger_mut()?;
+        debugger.focus_thread(thread_id)?;
 
         let frames = debugger.call_stack();
         let location = frames
@@ -332,10 +353,10 @@ impl DebugAdapter {
             .to_string();
 
         Ok(vec![self.make_response(
-            seq,
+            req.seq,
             &dapts::StackTraceResponse {
                 stack_frames: vec![dapts::StackFrame {
-                    id: 1,
+                    id: thread_id,
                     name: frames
                         .first()
                         .and_then(|f| f.name.as_deref())
@@ -367,9 +388,12 @@ impl DebugAdapter {
 
     fn handle_scopes(
         &mut self,
-        seq: i64,
+        req: &dapts::Request,
     ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
-        let debugger = self.debugger()?;
+        let arguments = serde_json::from_value::<dapts::ScopesArguments>(req.arguments.clone())?;
+        let frame_id = arguments.frame_id;
+        let debugger = self.debugger_mut()?;
+        debugger.focus_thread(frame_id)?;
 
         let local_count = debugger.local_variables().len();
         let argument_count = debugger.argument_variables().len();
@@ -377,7 +401,7 @@ impl DebugAdapter {
 
         let mut scopes = vec![dapts::Scope {
             name: "Locals".to_string(),
-            variables_reference: LOCALS_SCOPE_REF,
+            variables_reference: make_scope_ref(frame_id, LOCALS_SCOPE_REF),
             named_variables: Some(local_count as u32),
             indexed_variables: None,
             expensive: false,
@@ -392,7 +416,7 @@ impl DebugAdapter {
         if argument_count > 0 {
             scopes.push(dapts::Scope {
                 name: "Function Arguments".to_string(),
-                variables_reference: ARGUMENTS_SCOPE_REF,
+                variables_reference: make_scope_ref(frame_id, ARGUMENTS_SCOPE_REF),
                 named_variables: Some(argument_count as u32),
                 indexed_variables: None,
                 expensive: false,
@@ -408,7 +432,7 @@ impl DebugAdapter {
         if !globals.is_empty() {
             scopes.push(dapts::Scope {
                 name: "Globals".to_string(),
-                variables_reference: GLOBALS_SCOPE_REF,
+                variables_reference: make_scope_ref(frame_id, GLOBALS_SCOPE_REF),
                 named_variables: Some(globals.len() as u32),
                 indexed_variables: None,
                 expensive: false,
@@ -421,7 +445,10 @@ impl DebugAdapter {
             });
         }
 
-        Ok(vec![self.make_response(seq, &dapts::ScopesResponse { scopes })?])
+        Ok(vec![self.make_response(
+            req.seq,
+            &dapts::ScopesResponse { scopes },
+        )?])
     }
 
     fn handle_source(
@@ -502,7 +529,9 @@ impl DebugAdapter {
             })
             .collect();
 
-        Ok(vec![self.make_response(req.seq, &self.breakpoints.clone())?])
+        Ok(vec![
+            self.make_response(req.seq, &self.breakpoints.clone())?,
+        ])
     }
 
     fn handle_configuration_done(
@@ -516,33 +545,42 @@ impl DebugAdapter {
             messages.push(self.make_response(delayed_init_seq, &serde_json::json!({}))?);
         }
 
-        messages.push(self.run_to_breakpoint()?);
+        messages.push(self.initial_stop_event()?);
         Ok(messages)
     }
 
-    fn handle_threads(
-        &mut self,
-        seq: i64,
-    ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
-        Ok(vec![self.make_response(
-            seq,
-            &dapts::ThreadsResponse {
-                threads: vec![dapts::Thread {
-                    id: MAIN_THREAD_ID,
-                    name: "Main Thread".to_string(),
-                }],
-            },
-        )?])
+    fn handle_threads(&mut self, seq: i64) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
+        let threads = self
+            .debugger()?
+            .threads()
+            .into_iter()
+            .map(|thread| dapts::Thread {
+                id: thread.id,
+                name: thread.name,
+            })
+            .collect();
+        Ok(vec![
+            self.make_response(seq, &dapts::ThreadsResponse { threads })?,
+        ])
     }
 
     fn handle_next(
         &mut self,
-        seq: i64,
+        req: &dapts::Request,
     ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
+        let arguments = serde_json::from_value::<dapts::NextArguments>(req.arguments.clone())?;
         let debugger = self.debugger_mut()?;
-        let has_more = matches!(debugger.step()?, StepResult::Continue);
+        debugger.focus_thread(arguments.thread_id)?;
+        let has_more = if arguments.single_thread.unwrap_or(false) {
+            matches!(
+                debugger.step_thread(arguments.thread_id)?,
+                StepResult::Continue
+            )
+        } else {
+            matches!(debugger.step_all()?, StepResult::Continue)
+        };
 
-        let mut messages = vec![self.make_response(seq, &serde_json::json!({}))?];
+        let mut messages = vec![self.make_response(req.seq, &serde_json::json!({}))?];
         if has_more {
             messages.push(self.make_stopped_event(dapts::StoppedEventReason::Step)?);
         } else {
@@ -553,25 +591,23 @@ impl DebugAdapter {
 
     fn handle_continue(
         &mut self,
-        seq: i64,
+        req: &dapts::Request,
     ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
-        let response = self.make_response(seq, &serde_json::json!({}))?;
-        let event = self.run_to_breakpoint()?;
+        let arguments = serde_json::from_value::<dapts::ContinueArguments>(req.arguments.clone())?;
+        let response = self.make_response(req.seq, &serde_json::json!({}))?;
+        let event = self.run_to_breakpoint(
+            arguments.thread_id,
+            arguments.single_thread.unwrap_or(false),
+        )?;
         Ok(vec![response, event])
     }
 
-    fn handle_disconnect(
-        &mut self,
-        seq: i64,
-    ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
+    fn handle_disconnect(&mut self, seq: i64) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         self.debugger = None;
         Ok(vec![self.make_response(seq, &serde_json::json!({}))?])
     }
 
-    fn handle_terminate(
-        &mut self,
-        seq: i64,
-    ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
+    fn handle_terminate(&mut self, seq: i64) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         self.debugger = None;
         Ok(vec![
             self.make_response(seq, &serde_json::json!({}))?,
@@ -584,9 +620,11 @@ impl DebugAdapter {
         req: &dapts::Request,
     ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         let argument = serde_json::from_value::<dapts::VariablesArguments>(req.arguments.clone())?;
-        let debugger = self.debugger()?;
+        let (thread_id, scope_ref) = parse_scope_ref(argument.variables_reference);
+        let debugger = self.debugger_mut()?;
+        debugger.focus_thread(thread_id)?;
 
-        let variables = match argument.variables_reference {
+        let variables = match scope_ref {
             LOCALS_SCOPE_REF => debugger
                 .local_variables()
                 .into_iter()
@@ -605,7 +643,10 @@ impl DebugAdapter {
             _ => vec![],
         };
 
-        Ok(vec![self.make_response(req.seq, &dapts::VariablesResponse { variables })?])
+        Ok(vec![self.make_response(
+            req.seq,
+            &dapts::VariablesResponse { variables },
+        )?])
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -618,17 +659,16 @@ impl DebugAdapter {
         if reader.read_line(&mut buffer)? == 0 {
             return Ok(None);
         }
-        let (name, value) = buffer.trim_end().split_once(':').ok_or_else(|| {
-            DebugAdapterError::Parse("Header is incorrect".to_string())
-        })?;
+        let (name, value) = buffer
+            .trim_end()
+            .split_once(':')
+            .ok_or_else(|| DebugAdapterError::Parse("Header is incorrect".to_string()))?;
         let content_length: usize = match name {
             "Content-Length" => value.trim().parse().map_err(|_| {
                 DebugAdapterError::Parse("Content-Length is not a valid number".to_string())
             })?,
             other => {
-                return Err(DebugAdapterError::Parse(format!(
-                    "Unknown header: {other}"
-                )));
+                return Err(DebugAdapterError::Parse(format!("Unknown header: {other}")));
             }
         };
 
@@ -682,25 +722,35 @@ impl DebugAdapter {
         })
     }
 
-    fn run_to_breakpoint(&mut self) -> Result<OutgoingMessage, DebugAdapterError> {
-        let debugger = self.debugger.as_mut().ok_or_else(|| {
-            DebugAdapterError::InvalidProgram("debugger not initialized".into())
-        })?;
+    fn run_to_breakpoint(
+        &mut self,
+        thread_id: u64,
+        single_thread: bool,
+    ) -> Result<OutgoingMessage, DebugAdapterError> {
+        let debugger = self
+            .debugger
+            .as_mut()
+            .ok_or_else(|| DebugAdapterError::InvalidProgram("debugger not initialized".into()))?;
+        debugger.focus_thread(thread_id)?;
         let breakpoints = &self.breakpoints;
 
         let mut has_more = false;
         loop {
-            match debugger.step()? {
+            let result = if single_thread {
+                debugger.step_thread(thread_id)?
+            } else {
+                debugger.step_all()?
+            };
+            match result {
                 StepResult::Finished => break,
                 StepResult::Continue => {
-                    if let Some(loc) = debugger.current_location() {
-                        if breakpoints
+                    if let Some(loc) = debugger.current_location()
+                        && breakpoints
                             .iter()
                             .any(|bp| bp.verified && bp.line == Some(loc.line))
-                        {
-                            has_more = true;
-                            break;
-                        }
+                    {
+                        has_more = true;
+                        break;
                     }
                 }
             }
@@ -713,6 +763,14 @@ impl DebugAdapter {
         }
     }
 
+    fn initial_stop_event(&mut self) -> Result<OutgoingMessage, DebugAdapterError> {
+        if self.stop_on_entry {
+            self.make_stopped_event(dapts::StoppedEventReason::Entry)
+        } else {
+            self.run_to_breakpoint(MAIN_THREAD_ID, false)
+        }
+    }
+
     fn make_stopped_event(
         &mut self,
         reason: dapts::StoppedEventReason,
@@ -722,7 +780,7 @@ impl DebugAdapter {
             &dapts::StoppedEvent {
                 reason,
                 description: None,
-                thread_id: Some(MAIN_THREAD_ID),
+                thread_id: self.debugger.as_ref().map(Debugger::focused_thread_id),
                 preserve_focus_hint: None,
                 text: None,
                 all_threads_stopped: Some(true),

@@ -33,6 +33,11 @@
                 "type": "string",
                 "description": "Absolute path to the WGSL shader file to debug."
               },
+              "stopOnEntry": {
+                "type": "boolean",
+                "default": false,
+                "description": "Stop at the entry point before running to breakpoints."
+              },
               "workgroupConfig": {
                 "type": "object",
                 "description": "Workgroup and subgroup configuration for the debug session. Compute builtins (global_invocation_id, local_invocation_id, etc.) are derived from these values.",
@@ -71,45 +76,32 @@
                   }
                 }
               },
-              "shaderInputs": {
+              "globalConstants": {
                 "type": "object",
-                "description": "Entry-point builtin values for vertex/fragment shaders.",
+                "description": "Shared builtin constants for future vertex/fragment support.",
                 "default": {},
                 "properties": {
-                  "vertex_index": {
+                  "baseInstance": {
                     "type": "integer",
                     "minimum": 0,
                     "default": 0,
-                    "description": "@builtin(vertex_index)"
+                    "description": "@builtin(base_instance)"
                   },
-                  "instance_index": {
+                  "baseVertex": {
+                    "type": "integer",
+                    "default": 0,
+                    "description": "@builtin(base_vertex)"
+                  },
+                  "drawId": {
                     "type": "integer",
                     "minimum": 0,
                     "default": 0,
-                    "description": "@builtin(instance_index)"
+                    "description": "@builtin(draw_id)"
                   },
-                  "front_facing": {
-                    "type": "boolean",
-                    "default": false,
-                    "description": "@builtin(front_facing)"
-                  },
-                  "position": {
-                    "type": "array",
-                    "items": { "type": "number" },
-                    "default": [0, 0, 0, 0],
-                    "description": "@builtin(position)"
-                  },
-                  "sample_index": {
+                  "viewIndex": {
                     "type": "integer",
-                    "minimum": 0,
                     "default": 0,
-                    "description": "@builtin(sample_index)"
-                  },
-                  "sample_mask": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "default": 0,
-                    "description": "@builtin(sample_mask)"
+                    "description": "@builtin(view_index)"
                   }
                 },
                 "additionalProperties": true

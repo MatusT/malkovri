@@ -43,10 +43,10 @@ fn math_binary_float_or_int(
 
 fn math_unary_int(val: Value, fi32: impl Fn(i32) -> i32, fu32: impl Fn(u32) -> u32) -> Value {
     // Guard: integer-only functions should not silently corrupt float inputs.
-    if let Some(p) = val.as_primitive() {
-        if p.as_f32_slice().is_some() || matches!(p, Primitive::F64(_)) {
-            return Value::Uninitialized;
-        }
+    if let Some(p) = val.as_primitive()
+        && (p.as_f32_slice().is_some() || matches!(p, Primitive::F64(_)))
+    {
+        return Value::Uninitialized;
     }
     val.map_numeric(|_| 0.0, fi32, fu32)
 }

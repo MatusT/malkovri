@@ -15,13 +15,63 @@ pub fn parse_global_constants(
     }
 }
 
+#[derive(Default, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct PartialWorkgroupConfig {
+    #[serde(alias = "size")]
+    workgroup_size: Option<[u32; 3]>,
+    #[serde(alias = "id")]
+    workgroup_id: Option<[u32; 3]>,
+    subgroup_size: Option<u32>,
+    #[serde(alias = "count")]
+    num_workgroups: Option<[u32; 3]>,
+}
+
+impl PartialWorkgroupConfig {
+    fn apply_to(self, config: &mut WorkgroupConfig) {
+        if let Some(value) = self.workgroup_size {
+            config.workgroup_size = value;
+        }
+        if let Some(value) = self.workgroup_id {
+            config.workgroup_id = value;
+        }
+        if let Some(value) = self.subgroup_size {
+            config.subgroup_size = value;
+        }
+        if let Some(value) = self.num_workgroups {
+            config.num_workgroups = value;
+        }
+    }
+}
+
 pub fn parse_workgroup_config(
     arguments: &serde_json::Map<String, serde_json::Value>,
-) -> WorkgroupConfig {
-    arguments
-        .get("workgroupConfig")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default()
+) -> Result<WorkgroupConfig, DebugAdapterError> {
+    let mut config = WorkgroupConfig::default();
+
+    serde_json::from_value::<PartialWorkgroupConfig>(serde_json::Value::Object(arguments.clone()))?
+        .apply_to(&mut config);
+
+    if let Some(value) = arguments.get("workgroupConfig") {
+        serde_json::from_value::<PartialWorkgroupConfig>(value.clone())?.apply_to(&mut config);
+    }
+
+    // Backward compatibility with the old single-invocation input form.
+    if let Some(global_id) = arguments
+        .get("shaderInputs")
+        .and_then(|v| v.get("global_invocation_id"))
+        .or_else(|| {
+            arguments
+                .get("shaderInputs")
+                .and_then(|v| v.get("globalInvocationId"))
+        })
+        && config.workgroup_size == [1, 1, 1]
+        && config.workgroup_id == [0, 0, 0]
+    {
+        config.workgroup_id = serde_json::from_value(global_id.clone())?;
+    }
+
+    Ok(config)
 }
 
 pub fn parse_bindings(
@@ -76,12 +126,12 @@ fn parse_binding_key(key: &str) -> Result<(u32, u32), DebugAdapterError> {
             "Invalid binding key '{key}': expected 'group:binding'"
         ))
     })?;
-    let group = group_str.parse::<u32>().map_err(|_| {
-        DebugAdapterError::Parse(format!("Invalid group in binding key '{key}'"))
-    })?;
-    let binding = binding_str.parse::<u32>().map_err(|_| {
-        DebugAdapterError::Parse(format!("Invalid binding in binding key '{key}'"))
-    })?;
+    let group = group_str
+        .parse::<u32>()
+        .map_err(|_| DebugAdapterError::Parse(format!("Invalid group in binding key '{key}'")))?;
+    let binding = binding_str
+        .parse::<u32>()
+        .map_err(|_| DebugAdapterError::Parse(format!("Invalid binding in binding key '{key}'")))?;
     Ok((group, binding))
 }
 

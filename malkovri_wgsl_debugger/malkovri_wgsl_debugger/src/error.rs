@@ -16,6 +16,8 @@ pub enum EvaluatorError {
     AccessIndexUnsupportedType(String),
     #[error("Unsupported built-in variable: {0:?}")]
     UnsupportedBuiltIn(naga::ir::BuiltIn),
+    #[error("Unsupported statement: {0}")]
+    UnsupportedStatement(String),
     #[error("Unsupported binary operation: {0} with values: {1}, {2}")]
     UnsupportedBinaryOperation(String, String, String),
     #[error("Global variable {0:?} not found")]

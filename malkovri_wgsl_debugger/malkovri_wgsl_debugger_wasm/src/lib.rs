@@ -5,6 +5,12 @@ pub struct WgslDebugAdapter {
     inner: malkovri_wgsl_debugger_dap::DebugAdapter,
 }
 
+impl Default for WgslDebugAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[wasm_bindgen]
 impl WgslDebugAdapter {
     #[wasm_bindgen(constructor)]

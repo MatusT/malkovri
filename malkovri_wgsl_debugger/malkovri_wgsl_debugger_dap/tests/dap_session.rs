@@ -93,16 +93,19 @@ fn variables_map(variables_body: &Value) -> HashMap<String, String> {
         .collect()
 }
 
-fn launch_and_configure(session: &mut Session, shader: &str, breakpoints: &[u32]) {
+fn launch_and_configure(session: &mut Session, shader: &str, breakpoints: &[u32]) -> Vec<Value> {
     session.send("initialize", json!({}));
-    session.send("launch", json!({
-        "program": shader,
-    }));
+    session.send(
+        "launch",
+        json!({
+            "program": shader,
+        }),
+    );
     session.send("setBreakpoints", json!({
         "source": { "name": PathBuf::from(shader).file_name().unwrap().to_string_lossy(), "path": shader },
         "breakpoints": breakpoints.iter().map(|line| json!({ "line": line })).collect::<Vec<_>>(),
     }));
-    session.send("configurationDone", json!({}));
+    session.send("configurationDone", json!({}))
 }
 
 #[test]
@@ -111,20 +114,29 @@ fn control_flow_session_matches_vscode_request_flow() {
     let shader = shader_path("test_control_flow.wgsl");
 
     let init = s.send("initialize", json!({}));
-    assert_eq!(response_body(&init, 1)["supportsConfigurationDoneRequest"], true);
+    assert_eq!(
+        response_body(&init, 1)["supportsConfigurationDoneRequest"],
+        true
+    );
     assert_eq!(event_body(&init, "initialized"), &json!({}));
 
-    let launch = s.send("launch", json!({
-        "program": shader,
-        "shaderInputs": { "global_invocation_id": [5, 0, 0] },
-    }));
+    let launch = s.send(
+        "launch",
+        json!({
+            "program": shader,
+            "stopOnEntry": true,
+            "workgroupConfig": { "workgroupId": [5, 0, 0] },
+        }),
+    );
     assert!(find_response(&launch, s.last_seq()).is_none());
-    assert_eq!(event_body(&launch, "stopped")["reason"], "entry");
 
-    let bp = s.send("setBreakpoints", json!({
-        "source": { "name": "test_control_flow.wgsl", "path": shader },
-        "breakpoints": [{ "line": 24 }],
-    }));
+    let bp = s.send(
+        "setBreakpoints",
+        json!({
+            "source": { "name": "test_control_flow.wgsl", "path": shader },
+            "breakpoints": [{ "line": 24 }],
+        }),
+    );
     assert_eq!(response_body(&bp, s.last_seq())[0]["verified"], true);
 
     let cfg = s.send("configurationDone", json!({}));
@@ -134,7 +146,10 @@ fn control_flow_session_matches_vscode_request_flow() {
     assert_eq!(event_body(&cfg, "stopped")["reason"], "entry");
 
     let threads = s.send("threads", json!({}));
-    assert_eq!(response_body(&threads, s.last_seq())["threads"][0]["name"], "Main Thread");
+    assert_eq!(
+        response_body(&threads, s.last_seq())["threads"][0]["name"],
+        "[5, 0, 0]"
+    );
 
     // After skip_emits at entry, the first visible line is the for loop (line 9),
     // past the let/var declarations which are Emit/init-only.
@@ -142,14 +157,19 @@ fn control_flow_session_matches_vscode_request_flow() {
     let frames = &response_body(&stack, s.last_seq())["stackFrames"];
     assert_eq!(frames[0]["source"]["path"], json!(shader));
 
-    let source = s.send("source", json!({
-        "source": { "path": shader },
-        "sourceReference": 0,
-    }));
-    assert!(response_body(&source, s.last_seq())["content"]
-        .as_str()
-        .unwrap()
-        .contains("var count = idx % 16u;"));
+    let source = s.send(
+        "source",
+        json!({
+            "source": { "path": shader },
+            "sourceReference": 0,
+        }),
+    );
+    assert!(
+        response_body(&source, s.last_seq())["content"]
+            .as_str()
+            .unwrap()
+            .contains("var count = idx % 16u;")
+    );
 
     let scopes = s.send("scopes", json!({ "frameId": 1 }));
     let scopes_body = response_body(&scopes, s.last_seq());
@@ -179,23 +199,28 @@ fn expression_shader_variables_include_binding_backed_values() {
     let shader = shader_path("test_expressions.wgsl");
 
     s.send("initialize", json!({}));
-    s.send("launch", json!({
-        "program": shader,
-        "shaderInputs": { "global_invocation_id": [2, 0, 0] },
-        "bindings": {
-            "0:0": { "type": "f32", "inline": [1.0, 2.0, 3.0, 4.0] },
-            "0:1": { "type": "u32", "inline": [0, 0, 0, 0] },
-        },
-    }));
-    s.send("setBreakpoints", json!({
-        "source": { "name": "test_expressions.wgsl", "path": shader },
-        "breakpoints": [{ "line": 457 }],
-    }));
-    s.send("configurationDone", json!({}));
+    s.send(
+        "launch",
+        json!({
+            "program": shader,
+            "workgroupConfig": { "workgroupId": [2, 0, 0] },
+            "bindings": {
+                "0:0": { "type": "f32", "inline": [1.0, 2.0, 3.0, 4.0] },
+                "0:1": { "type": "u32", "inline": [0, 0, 0, 0] },
+            },
+        }),
+    );
+    s.send(
+        "setBreakpoints",
+        json!({
+            "source": { "name": "test_expressions.wgsl", "path": shader },
+            "breakpoints": [{ "line": 457 }],
+        }),
+    );
+    let cfg = s.send("configurationDone", json!({}));
 
     // Run to the breakpoint so all variables are in scope.
-    let cont = s.send("continue", json!({ "threadId": 1 }));
-    assert_eq!(event_body(&cont, "stopped")["reason"], "breakpoint");
+    assert_eq!(event_body(&cfg, "stopped")["reason"], "breakpoint");
 
     let scopes = s.send("scopes", json!({ "frameId": 1 }));
     let scopes_body = response_body(&scopes, s.last_seq());
@@ -217,6 +242,13 @@ fn expression_shader_variables_include_binding_backed_values() {
     assert_eq!(locals["acc_g"], "Primitive(F32(3.0))");
     assert_eq!(locals["dyn_i"], "Primitive(U32(2))");
     assert_eq!(locals["acc_vf"], "Primitive(F32(2.5))");
+
+    let cont = s.send("continue", json!({ "threadId": 1 }));
+    assert_eq!(event_body(&cont, "terminated"), &json!({}));
+    assert!(
+        cont.iter().all(|message| message["event"] != "output"),
+        "continuing through storage-buffer stores should not report evaluator errors: {cont:?}"
+    );
 }
 
 #[test]
@@ -224,10 +256,8 @@ fn local_variables_initialize_at_declaration_time() {
     let mut s = Session::new();
     let shader = shader_path("test_local_initialization_timing.wgsl");
 
-    launch_and_configure(&mut s, &shader, &[10]);
-
-    let cont = s.send("continue", json!({ "threadId": 1 }));
-    assert_eq!(event_body(&cont, "stopped")["reason"], "breakpoint");
+    let cfg = launch_and_configure(&mut s, &shader, &[10]);
+    assert_eq!(event_body(&cfg, "stopped")["reason"], "breakpoint");
 
     let scopes = s.send("scopes", json!({ "frameId": 1 }));
     let locals_ref = scope_reference(response_body(&scopes, s.last_seq()), "Locals");
@@ -245,10 +275,8 @@ fn loop_local_variables_reinitialize_when_the_loop_body_reenters() {
     let mut s = Session::new();
     let shader = shader_path("test_loop_local_initialization_timing.wgsl");
 
-    launch_and_configure(&mut s, &shader, &[12]);
-
-    let cont = s.send("continue", json!({ "threadId": 1 }));
-    assert_eq!(event_body(&cont, "stopped")["reason"], "breakpoint");
+    let cfg = launch_and_configure(&mut s, &shader, &[12]);
+    assert_eq!(event_body(&cfg, "stopped")["reason"], "breakpoint");
 
     let scopes = s.send("scopes", json!({ "frameId": 1 }));
     let locals_ref = scope_reference(response_body(&scopes, s.last_seq()), "Locals");
@@ -267,18 +295,19 @@ fn nested_named_expressions_stay_visible_inside_their_block() {
     let shader = shader_path("test_nested_named_expression_scope.wgsl");
 
     s.send("initialize", json!({}));
-    s.send("launch", json!({
-        "program": shader,
-        "shaderInputs": { "global_invocation_id": [5, 0, 0] },
-    }));
+    s.send(
+        "launch",
+        json!({
+            "program": shader,
+            "workgroupConfig": { "workgroupId": [5, 0, 0] },
+        }),
+    );
     s.send("setBreakpoints", json!({
         "source": { "name": PathBuf::from(&shader).file_name().unwrap().to_string_lossy(), "path": shader },
         "breakpoints": [{ "line": 9 }],
     }));
-    s.send("configurationDone", json!({}));
-
-    let cont = s.send("continue", json!({ "threadId": 1 }));
-    assert_eq!(event_body(&cont, "stopped")["reason"], "breakpoint");
+    let cfg = s.send("configurationDone", json!({}));
+    assert_eq!(event_body(&cfg, "stopped")["reason"], "breakpoint");
 
     let scopes = s.send("scopes", json!({ "frameId": 1 }));
     let locals_ref = scope_reference(response_body(&scopes, s.last_seq()), "Locals");
@@ -296,4 +325,60 @@ fn nested_named_expressions_stay_visible_inside_their_block() {
         "expected nested let binding `stop_here` to stay visible inside its block, got {locals:?}"
     );
     assert_eq!(locals["stop_here"], "Primitive(U32(6))");
+}
+
+#[test]
+fn workgroup_threads_route_stack_and_variables_by_thread_id() {
+    let mut s = Session::new();
+    let shader = shader_path("test_nested_named_expression_scope.wgsl");
+
+    s.send("initialize", json!({}));
+    s.send(
+        "launch",
+        json!({
+            "program": shader,
+            "stopOnEntry": true,
+            "workgroupConfig": { "workgroupSize": [2, 1, 1] },
+        }),
+    );
+    s.send("configurationDone", json!({}));
+
+    let threads = s.send("threads", json!({}));
+    let threads_body = response_body(&threads, s.last_seq());
+    assert_eq!(threads_body["threads"][0]["name"], "[0, 0, 0]");
+    assert_eq!(threads_body["threads"][1]["name"], "[1, 0, 0]");
+
+    let stack = s.send("stackTrace", json!({ "threadId": 2 }));
+    let frame_id = response_body(&stack, s.last_seq())["stackFrames"][0]["id"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(frame_id, 2);
+
+    let scopes = s.send("scopes", json!({ "frameId": frame_id }));
+    let arguments_ref = scope_reference(response_body(&scopes, s.last_seq()), "Function Arguments");
+    let args = s.send("variables", json!({ "variablesReference": arguments_ref }));
+    let args = variables_map(response_body(&args, s.last_seq()));
+    assert_eq!(args["global_id"], "Primitive(U32x3([1, 0, 0]))");
+}
+
+#[test]
+fn private_globals_are_initialized_and_mutable() {
+    let mut s = Session::new();
+    let shader = shader_path("test_private_global.wgsl");
+
+    let cfg = launch_and_configure(&mut s, &shader, &[8]);
+    assert_eq!(event_body(&cfg, "stopped")["reason"], "breakpoint");
+
+    let scopes = s.send("scopes", json!({ "frameId": 1 }));
+    let scopes_body = response_body(&scopes, s.last_seq());
+    let locals_ref = scope_reference(scopes_body, "Locals");
+    let globals_ref = scope_reference(scopes_body, "Globals");
+
+    let locals = s.send("variables", json!({ "variablesReference": locals_ref }));
+    let locals = variables_map(response_body(&locals, s.last_seq()));
+    assert_eq!(locals["stop_here"], "Primitive(U32(8))");
+
+    let globals = s.send("variables", json!({ "variablesReference": globals_ref }));
+    let globals = variables_map(response_body(&globals, s.last_seq()));
+    assert_eq!(globals["counter"], "Primitive(U32(8))");
 }

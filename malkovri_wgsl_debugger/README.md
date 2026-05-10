@@ -10,10 +10,11 @@ Simulates shader execution on the CPU using [naga](https://github.com/gfx-rs/nag
 Supported:
 - [x] Basic compute shaders
 - [x] Basic buffer global inputs
+- [x] Multiple compute invocations in one workgroup
 - [x] All expressions
 
 TODO:
-- [ ] Multiple threads
+- [ ] Workgroup memory and subgroup collectives
 - [ ] Image and sampler inputs
 - [ ] Support for graphics pipeline with vertex + fragment shaders
 - [ ] ... and like a million things :-)
@@ -32,7 +33,7 @@ TODO:
 cargo build --release -p malkovri_wgsl_debugger_dap
 
 # Build the WASM component
-wasm-pack build malkovri_wgsl_debugger_wasm --target bundler
+wasm-pack build malkovri_wgsl_debugger_wasm --target web
 
 # Build the VS Code extension
 cd vscode_extension
@@ -52,8 +53,11 @@ deno task build
   "request": "launch",
   "name": "Debug shader",
   "program": "${workspaceFolder}/shader.wgsl",
-  "shaderInputs": {
-    "global_invocation_id": [0, 0, 0]
+  "workgroupConfig": {
+    "workgroupSize": [64, 1, 1],
+    "workgroupId": [0, 0, 0],
+    "subgroupSize": 32,
+    "numWorkgroups": [1, 1, 1]
   },
   "bindings": {
     "0:0": {
@@ -68,12 +72,16 @@ deno task build
 
 ## Launch config options
 
-| Field                  | Type                           | Description                                                                        |
-|------------------------|--------------------------------|------------------------------------------------------------------------------------|
-| `program`              | string                         | Absolute path to the WGSL shader file.                                             |
-| `shaderInputs`         | object                         | Entry-point builtin values (e.g. `global_invocation_id`, `workgroup_id`, …).       |
-| `bindings`             | object                         | Resource bindings keyed by `"group:binding"` (e.g. `"0:0"`).                       |
-| `bindings[].type`      | `"f32"` \| `"i32"` \| `"u32"` | Element type of the buffer.                                                        |
-| `bindings[].inline`    | array                          | Inline array of values. Cannot be combined with `file`.                            |
-| `bindings[].file`      | string                         | Path to a data file relative to the shader. Cannot be combined with `inline`.      |
-| `bindings[].format`    | `"ron"` \| `"binary"`          | File format: `"ron"` (RON array, default) or `"binary"` (little-endian 4-byte values). |
+| Field                  | Type                           | Default       | Description                                                                        |
+|------------------------|--------------------------------|---------------|------------------------------------------------------------------------------------|
+| `program`              | string                         | —             | Absolute path to the WGSL shader file.                                             |
+| `stopOnEntry`          | boolean                        | `false`       | Stop at the entry point before running to breakpoints.                             |
+| `workgroupConfig.workgroupSize` | `[u32, u32, u32]`     | `[1, 1, 1]`   | Number of threads along each dimension of the workgroup being debugged.            |
+| `workgroupConfig.workgroupId`   | `[u32, u32, u32]`     | `[0, 0, 0]`   | Which workgroup in the dispatch to debug.                                           |
+| `workgroupConfig.subgroupSize`  | number                | `4`           | Subgroup (warp) size. Must be a power of 2 in `[4, 128]` (WGSL spec). All thread IDs are derived from this and `workgroupSize`. |
+| `workgroupConfig.numWorkgroups` | `[u32, u32, u32]`     | `[1, 1, 1]`   | Total number of workgroups in the dispatch (used for `@builtin(num_workgroups)`).  |
+| `bindings`             | object                         | `{}`          | Resource bindings keyed by `"group:binding"` (e.g. `"0:0"`).                       |
+| `bindings[].type`      | `"f32"` \| `"i32"` \| `"u32"` | `"f32"`       | Element type of the buffer.                                                        |
+| `bindings[].inline`    | array                          | —             | Inline array of values. Cannot be combined with `file`.                            |
+| `bindings[].file`      | string                         | —             | Path to a data file relative to the shader. Cannot be combined with `inline`.      |
+| `bindings[].format`    | `"ron"` \| `"binary"`          | `"ron"`       | File format: `"ron"` (RON array) or `"binary"` (little-endian 4-byte values).     |

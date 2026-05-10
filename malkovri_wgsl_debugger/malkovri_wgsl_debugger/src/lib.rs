@@ -1,5 +1,5 @@
-mod declaring_scopes;
 mod debugger;
+mod declaring_scopes;
 mod entry_point_inputs;
 mod error;
 mod eval_binary;
@@ -8,14 +8,14 @@ mod eval_expressions;
 mod eval_math;
 mod evaluator;
 mod function_state;
-mod thread;
 mod primitive;
+mod thread;
 mod value;
 mod wgsl;
 
 pub use debugger::{
-    Debugger, DebuggerError, ResourceBinding, SourceLocation, StackFrameInfo, StepResult,
-    Variable, WorkgroupConfig,
+    DebugThread, Debugger, DebuggerError, ResourceBinding, SourceLocation, StackFrameInfo,
+    StepResult, Variable, WorkgroupConfig,
 };
 pub use entry_point_inputs::GlobalConstants;
 pub use error::EvaluatorError;

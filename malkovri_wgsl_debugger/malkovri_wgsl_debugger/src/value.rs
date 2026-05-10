@@ -55,6 +55,38 @@ impl Value {
             _ => Value::Uninitialized,
         }
     }
+
+    pub fn assign_path(&mut self, path: &[usize], value: Value) -> Result<(), String> {
+        let Some((index, rest)) = path.split_first() else {
+            *self = value;
+            return Ok(());
+        };
+
+        match self {
+            Value::Array(elements) => {
+                let element = elements
+                    .get_mut(*index)
+                    .ok_or_else(|| format!("array index {index} out of bounds"))?;
+                element.assign_path(rest, value)
+            }
+            Value::Struct(fields) => {
+                let (_, field) = fields
+                    .get_mut(*index)
+                    .ok_or_else(|| format!("struct field index {index} out of bounds"))?;
+                field.assign_path(rest, value)
+            }
+            Value::Primitive(primitive) if rest.is_empty() => {
+                let Value::Primitive(value) = value else {
+                    return Err("cannot assign non-primitive value to vector component".into());
+                };
+                primitive
+                    .assign_component(*index, value)
+                    .map_err(str::to_string)
+            }
+            Value::Pointer(inner) => inner.borrow_mut().assign_path(path, value),
+            other => Err(format!("cannot assign through {:?}", other)),
+        }
+    }
 }
 
 // ── Delegation to Primitive — keeps the evaluator's helper call-sites unchanged ─

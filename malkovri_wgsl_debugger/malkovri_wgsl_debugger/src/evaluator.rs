@@ -1,7 +1,9 @@
 use crate::{
     debugger::WorkgroupConfig,
     declaring_scopes,
-    entry_point_inputs::{ComputeThreadInputs, FragmentThreadInputs, GlobalConstants, VertexThreadInputs},
+    entry_point_inputs::{
+        ComputeThreadInputs, FragmentThreadInputs, GlobalConstants, VertexThreadInputs,
+    },
     error::EvaluatorError,
     eval_expressions::evaluate_global_expression,
     function_state::{
@@ -14,12 +16,13 @@ use crate::{
 
 use std::{cell::RefCell, collections::HashMap, collections::HashSet, rc::Rc, sync::Arc};
 
-use naga::{AddressSpace, Expression, GlobalVariable, Handle, LocalVariable, Module, Statement};
+use naga::{Expression, GlobalVariable, Handle, LocalVariable, Module, Statement};
 
 pub(crate) struct Evaluator {
     pub(crate) module: Arc<Module>,
     pub(crate) global_constants: GlobalConstants,
     pub(crate) global_values: HashMap<naga::Handle<GlobalVariable>, Value>,
+    pub(crate) entry_point_output: Option<Value>,
     pub(crate) stack: Vec<StackFrame>,
     pub(crate) threads: HashMap<[u32; 3], EvaluatorThread>,
     /// Global invocation ID of the currently active thread.
@@ -41,13 +44,13 @@ impl Evaluator {
 
         let mut threads = HashMap::new();
         let mut first_gid = [0u32; 3];
-        for x in 0..workgroup_config.size[0] {
-            for y in 0..workgroup_config.size[1] {
-                for z in 0..workgroup_config.size[2] {
+        for x in 0..workgroup_config.workgroup_size[0] {
+            for y in 0..workgroup_config.workgroup_size[1] {
+                for z in 0..workgroup_config.workgroup_size[2] {
                     let compute_inputs = ComputeThreadInputs::new(
                         [x, y, z],
-                        workgroup_config.size,
-                        workgroup_config.id,
+                        workgroup_config.workgroup_size,
+                        workgroup_config.workgroup_id,
                         workgroup_config.subgroup_size,
                     );
 
@@ -59,46 +62,48 @@ impl Evaluator {
                         compute_inputs,
                         vertex_inputs: VertexThreadInputs::default(),
                         fragment_inputs: FragmentThreadInputs::default(),
-                        stack: vec![],
-                        private_globals: module
-                            .global_variables
-                            .iter()
-                            .filter(|(_, v)| v.space == AddressSpace::Private)
-                            .map(|(h, v)| {
-                                let value: Value = match v.init {
-                                    Some(init_expr) => {
-                                        evaluate_global_expression(&module, init_expr)
-                                    }
-                                    None => Value::from(&module.types[v.ty].inner),
-                                };
-                                (h, value)
-                            })
-                            .collect(),
-                        status: crate::thread::ThreadStatus::Running,
                     };
                     threads.insert(gid, thread);
                 }
             }
         }
 
-        let mut evaluator = Evaluator {
-            global_values: global_values
-                .iter()
-                .map(|(k, v)| {
-                    let handle = module
-                        .global_variables
-                        .fetch_if(|h| h.binding.as_ref() == Some(k))
-                        .ok_or_else(|| {
-                            EvaluatorError::InternalError(format!(
-                                "no global variable with binding {:?}",
-                                k
-                            ))
-                        })?;
-                    Ok((handle, v.clone()))
-                })
-                .collect::<Result<_, EvaluatorError>>()?,
+        let mut global_values: HashMap<_, _> = global_values
+            .iter()
+            .map(|(k, v)| {
+                let handle = module
+                    .global_variables
+                    .fetch_if(|h| h.binding.as_ref() == Some(k))
+                    .ok_or_else(|| {
+                        EvaluatorError::InternalError(format!(
+                            "no global variable with binding {:?}",
+                            k
+                        ))
+                    })?;
+                let value = match v {
+                    Value::Pointer(_) => v.clone(),
+                    _ => Value::Pointer(Rc::new(RefCell::new(v.clone()))),
+                };
+                Ok((handle, value))
+            })
+            .collect::<Result<_, EvaluatorError>>()?;
+
+        for (handle, global) in module.global_variables.iter() {
+            if global_values.contains_key(&handle) || global.binding.is_some() {
+                continue;
+            }
+            let value = match global.init {
+                Some(expr) => evaluate_global_expression(&module, expr),
+                None => Value::from(&module.types[global.ty].inner),
+            };
+            global_values.insert(handle, Value::Pointer(Rc::new(RefCell::new(value))));
+        }
+
+        let evaluator = Evaluator {
+            global_values,
             module,
             global_constants,
+            entry_point_output: None,
             stack: vec![StackFrame::Function(Box::new(FunctionFrame {
                 function_ref: FunctionRef::EntryPoint(entry_point_index),
                 local_variables: HashMap::new(),
@@ -113,8 +118,6 @@ impl Evaluator {
             threads,
             active_thread_gid: first_gid,
         };
-        
-        evaluator.initialize_local_variables()?;
 
         Ok(evaluator)
     }
@@ -122,6 +125,16 @@ impl Evaluator {
     /// Return a reference to the currently active thread.
     pub(crate) fn active_thread(&self) -> &EvaluatorThread {
         &self.threads[&self.active_thread_gid]
+    }
+
+    pub(crate) fn set_active_thread_gid(&mut self, gid: [u32; 3]) -> Result<(), EvaluatorError> {
+        if !self.threads.contains_key(&gid) {
+            return Err(EvaluatorError::InternalError(format!(
+                "unknown thread gid {gid:?}"
+            )));
+        }
+        self.active_thread_gid = gid;
+        Ok(())
     }
 
     /// Resolve a [`FunctionRef`] to the actual `naga::Function` in the module.
@@ -495,20 +508,24 @@ impl Evaluator {
     /// to remove the returning function and everything above it.
     fn apply_return(&mut self, function_index: usize, value: Option<Value>) {
         // Read the result handle from the callee before truncating the stack.
-        let call_result_handle = match &self.stack[function_index] {
-            StackFrame::Function(frame) => frame.call_result_handle,
-            StackFrame::Block(_) => None,
+        let (function_ref, call_result_handle) = match &self.stack[function_index] {
+            StackFrame::Function(frame) => {
+                (Some(frame.function_ref.clone()), frame.call_result_handle)
+            }
+            StackFrame::Block(_) => (None, None),
         };
         // Store the return value in the parent frame's expression cache, keyed
         // by the CallResult expression handle so that each call's result is
         // independently retrievable even when multiple calls appear in sequence.
-        if let (Some(handle), Some(return_val)) = (call_result_handle, value)
+        if let (Some(handle), Some(return_val)) = (call_result_handle, value.clone())
             && let Some(parent_function_index) = self.parent_function_frame_index(function_index)
             && let StackFrame::Function(ref mut parent_frame) = self.stack[parent_function_index]
         {
             parent_frame
                 .evaluated_expressions
                 .insert(handle, return_val);
+        } else if matches!(function_ref, Some(FunctionRef::EntryPoint(_))) {
+            self.entry_point_output = value;
         }
         self.stack.truncate(function_index);
     }
@@ -562,7 +579,9 @@ impl Evaluator {
 impl Evaluator {
     fn handle_statement(&mut self, statement: Statement) -> Result<(), EvaluatorError> {
         match statement {
-            Statement::Emit(_) => {}
+            Statement::Emit(range) => {
+                self.initialize_local_variables_for_emit(range)?;
+            }
             Statement::Call {
                 function: function_handle,
                 arguments,
@@ -615,17 +634,34 @@ impl Evaluator {
             Statement::Continue => {
                 self.current_function_frame_mut()?.control_flow = ControlFlow::Continue;
             }
-            Statement::Kill
-            | Statement::ControlBarrier(_)
-            | Statement::MemoryBarrier(_)
-            | Statement::ImageStore { .. }
-            | Statement::Atomic { .. }
-            | Statement::ImageAtomic { .. }
-            | Statement::RayQuery { .. }
-            | Statement::WorkGroupUniformLoad { .. }
-            | Statement::SubgroupBallot { .. }
+            Statement::ControlBarrier(_) | Statement::MemoryBarrier(_) => {}
+            Statement::Kill => {
+                self.current_function_frame_mut()?.control_flow = ControlFlow::Return(None);
+            }
+            Statement::ImageStore { .. } => {
+                return Err(EvaluatorError::UnsupportedStatement("imageStore".into()));
+            }
+            Statement::Atomic { .. } => {
+                return Err(EvaluatorError::UnsupportedStatement("atomic".into()));
+            }
+            Statement::ImageAtomic { .. } => {
+                return Err(EvaluatorError::UnsupportedStatement("imageAtomic".into()));
+            }
+            Statement::RayQuery { .. } => {
+                return Err(EvaluatorError::UnsupportedStatement("rayQuery".into()));
+            }
+            Statement::WorkGroupUniformLoad { .. } => {
+                return Err(EvaluatorError::UnsupportedStatement(
+                    "workGroupUniformLoad".into(),
+                ));
+            }
+            Statement::SubgroupBallot { .. }
             | Statement::SubgroupGather { .. }
-            | Statement::SubgroupCollectiveOperation { .. } => {}
+            | Statement::SubgroupCollectiveOperation { .. } => {
+                return Err(EvaluatorError::UnsupportedStatement(
+                    "subgroup operation".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -655,22 +691,25 @@ impl Evaluator {
                 control_flow: ControlFlow::None,
             })));
 
-        self.initialize_local_variables()
+        Ok(())
     }
 
-    fn initialize_local_variables(&mut self) -> Result<(), EvaluatorError> {
+    fn initialize_local_variables_for_emit(
+        &mut self,
+        range: naga::Range<Expression>,
+    ) -> Result<(), EvaluatorError> {
         let mut insert_variables: Vec<(Handle<LocalVariable>, Value)> = Vec::new();
         {
             let function = self.current_function()?;
             let local_vars: Vec<_> = function.local_variables.iter().collect();
             for (handle, local_var) in local_vars {
-                let value = match &local_var.init {
-                    Some(init_expr) => self.evaluate_expression(*init_expr),
-                    None => {
-                        let ty = &self.module.types[local_var.ty];
-                        Value::from(&ty.inner)
-                    }
+                let Some(init_expr) = local_var.init else {
+                    continue;
                 };
+                if !range.clone().any(|emitted| emitted == init_expr) {
+                    continue;
+                };
+                let value = self.evaluate_expression(init_expr);
                 insert_variables.push((handle, value));
             }
         }
@@ -759,14 +798,112 @@ impl Evaluator {
         value: Handle<Expression>,
     ) -> Result<(), EvaluatorError> {
         let evaluated_value = self.evaluate_expression(value);
-        let evaluated_pointer = self.evaluate_expression(pointer);
+        self.assign_store_pointer(pointer, evaluated_value)
+    }
 
-        match evaluated_pointer {
-            Value::Pointer(inner) => {
-                *inner.borrow_mut() = evaluated_value;
-                Ok(())
+    fn assign_store_pointer(
+        &mut self,
+        pointer: Handle<Expression>,
+        value: Value,
+    ) -> Result<(), EvaluatorError> {
+        let (root, path) = self.resolve_store_place(pointer)?;
+        let Value::Pointer(inner) = root else {
+            return Err(EvaluatorError::StoreToNonPointer);
+        };
+        inner
+            .borrow_mut()
+            .assign_path(&path, value)
+            .map_err(EvaluatorError::InternalError)
+    }
+
+    fn resolve_store_place(
+        &mut self,
+        pointer: Handle<Expression>,
+    ) -> Result<(Value, Vec<usize>), EvaluatorError> {
+        let func_idx = self.current_function_frame_index()?;
+        let expression = {
+            let frame = self.current_function_frame()?;
+            let function = self.resolve_function(&frame.function_ref);
+            function.expressions[pointer].clone()
+        };
+
+        match expression {
+            Expression::LocalVariable(handle) => Ok((
+                self.ensure_local_variable_pointer(handle, func_idx)?,
+                vec![],
+            )),
+            Expression::GlobalVariable(handle) => {
+                Ok((self.ensure_global_variable_pointer(handle)?, vec![]))
             }
-            _ => Err(EvaluatorError::StoreToNonPointer),
+            Expression::AccessIndex { base, index } => {
+                let (root, mut path) = self.resolve_store_place(base)?;
+                path.push(index as usize);
+                Ok((root, path))
+            }
+            Expression::Access { base, index } => {
+                let index = self.evaluate_expression(index).leaf_value();
+                let index = match index {
+                    Value::Primitive(Primitive::U32(value)) => value as usize,
+                    Value::Primitive(Primitive::I32(value)) if value >= 0 => value as usize,
+                    other => return Err(EvaluatorError::IndexNotU32(format!("{other:?}"))),
+                };
+                let (root, mut path) = self.resolve_store_place(base)?;
+                path.push(index);
+                Ok((root, path))
+            }
+            _ => Ok((self.evaluate_expression(pointer), vec![])),
         }
+    }
+
+    fn ensure_local_variable_pointer(
+        &mut self,
+        handle: Handle<LocalVariable>,
+        func_idx: usize,
+    ) -> Result<Value, EvaluatorError> {
+        let (init, ty) = {
+            let StackFrame::Function(frame) = &self.stack[func_idx] else {
+                return Err(EvaluatorError::InternalError(
+                    "expected function frame".into(),
+                ));
+            };
+            if let Some(value) = frame.local_variables.get(&handle) {
+                return Ok(value.clone());
+            }
+            let function = self.resolve_function(&frame.function_ref);
+            let local = &function.local_variables[handle];
+            (local.init, local.ty)
+        };
+
+        let value = match init {
+            Some(expr) => self.eval_expr(expr, func_idx),
+            None => Value::from(&self.module.types[ty].inner),
+        };
+        let pointer = Value::Pointer(Rc::new(RefCell::new(value)));
+
+        let StackFrame::Function(frame) = &mut self.stack[func_idx] else {
+            return Err(EvaluatorError::InternalError(
+                "expected function frame".into(),
+            ));
+        };
+        frame.local_variables.insert(handle, pointer.clone());
+        Ok(pointer)
+    }
+
+    fn ensure_global_variable_pointer(
+        &mut self,
+        handle: Handle<GlobalVariable>,
+    ) -> Result<Value, EvaluatorError> {
+        if let Some(value) = self.global_values.get(&handle) {
+            return Ok(value.clone());
+        }
+
+        let global = &self.module.global_variables[handle];
+        let value = match global.init {
+            Some(expr) => evaluate_global_expression(&self.module, expr),
+            None => Value::from(&self.module.types[global.ty].inner),
+        };
+        let pointer = Value::Pointer(Rc::new(RefCell::new(value)));
+        self.global_values.insert(handle, pointer.clone());
+        Ok(pointer)
     }
 }

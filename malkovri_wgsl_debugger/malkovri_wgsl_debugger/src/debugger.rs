@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use std::sync::Arc;
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use naga::Statement;
 
@@ -32,22 +32,25 @@ pub struct ResourceBinding {
 #[serde(default, rename_all = "camelCase")]
 pub struct WorkgroupConfig {
     /// Number of threads along each dimension: [x, y, z].
-    pub size: [u32; 3],
+    #[serde(alias = "size")]
+    pub workgroup_size: [u32; 3],
     /// Which workgroup in the dispatch is being debugged: [x, y, z].
-    pub id: [u32; 3],
-    /// Subgroup (warp) size. Must divide the total thread count evenly.
+    #[serde(alias = "id")]
+    pub workgroup_id: [u32; 3],
+    /// Subgroup (warp) size. The final subgroup may be partial.
     pub subgroup_size: u32,
     /// Total number of workgroups in the dispatch: [x, y, z].
-    pub count: [u32; 3],
+    #[serde(alias = "count")]
+    pub num_workgroups: [u32; 3],
 }
 
 impl Default for WorkgroupConfig {
     fn default() -> Self {
         Self {
-            size: [1, 1, 1],
-            id: [0, 0, 0],
+            workgroup_size: [1, 1, 1],
+            workgroup_id: [0, 0, 0],
             subgroup_size: 4,
-            count: [1, 1, 1],
+            num_workgroups: [1, 1, 1],
         }
     }
 }
@@ -56,19 +59,18 @@ impl WorkgroupConfig {
     /// Validate the configuration against WGSL spec constraints:
     ///
     /// - `subgroup_size` must be a power of 2 in the range [4, 128].
-    /// - `subgroup_size` must not exceed the total number of threads in the workgroup.
     /// - `workgroup_size` must have at least one thread (no zero dimension).
     pub fn validate(&self) -> Result<(), String> {
-        let [wx, wy, wz] = self.size;
+        let [wx, wy, wz] = self.workgroup_size;
         if wx == 0 || wy == 0 || wz == 0 {
             return Err(format!(
                 "workgroup_size {:?} must not have a zero dimension",
-                self.size
+                self.workgroup_size
             ));
         }
 
         let s = self.subgroup_size;
-        if s < 4 || s > 128 {
+        if !(4..=128).contains(&s) {
             return Err(format!(
                 "subgroup_size {s} is outside the WGSL-specified range [4, 128]"
             ));
@@ -79,16 +81,25 @@ impl WorkgroupConfig {
             ));
         }
 
-        let total = wx * wy * wz;
-        if s > total {
-            return Err(format!(
-                "subgroup_size {s} exceeds total thread count {total} in workgroup {:?}",
-                self.size
-            ));
-        }
-
         Ok(())
     }
+}
+
+fn thread_order(config: &WorkgroupConfig) -> Vec<[u32; 3]> {
+    let mut threads = Vec::new();
+    let [wx, wy, wz] = config.workgroup_size;
+    for z in 0..wz {
+        for y in 0..wy {
+            for x in 0..wx {
+                threads.push([
+                    config.workgroup_id[0] * wx + x,
+                    config.workgroup_id[1] * wy + y,
+                    config.workgroup_id[2] * wz + z,
+                ]);
+            }
+        }
+    }
+    threads
 }
 
 /// Error returned by [`Debugger::new`].
@@ -133,12 +144,23 @@ pub struct StackFrameInfo {
     pub location: Option<SourceLocation>,
 }
 
+/// One debuggable shader invocation exposed as a DAP thread.
+#[derive(Debug, Clone)]
+pub struct DebugThread {
+    pub id: u64,
+    pub global_invocation_id: [u32; 3],
+    pub name: String,
+}
+
 /// A WGSL debugger session.
 ///
 /// Create with [`Debugger::new`], then call [`Debugger::step`] to advance
 /// execution and the inspection methods to read program state.
 pub struct Debugger {
-    evaluator: Evaluator,
+    evaluators: HashMap<[u32; 3], Evaluator>,
+    thread_order: Vec<[u32; 3]>,
+    thread_ids: HashMap<u64, [u32; 3]>,
+    focused_thread: [u32; 3],
     source: String,
 }
 
@@ -159,7 +181,7 @@ impl Debugger {
         config.validate().map_err(DebuggerError::InvalidConfig)?;
 
         let module = Arc::new(wgsl_to_module(source)?);
-        let naga_bindings = bindings
+        let naga_bindings: HashMap<naga::ResourceBinding, Value> = bindings
             .into_iter()
             .map(|(rb, v)| {
                 (
@@ -167,24 +189,47 @@ impl Debugger {
                         group: rb.group,
                         binding: rb.binding,
                     },
-                    v,
+                    Value::Pointer(Rc::new(RefCell::new(v))),
                 )
             })
             .collect();
 
         // Compute-related constants are derived from the workgroup config.
-        let [wx, wy, wz] = config.size;
+        let [wx, wy, wz] = config.workgroup_size;
         let total_threads = wx * wy * wz;
-        global_constants.workgroup_size = config.size;
-        global_constants.num_workgroups = config.count;
+        global_constants.workgroup_size = config.workgroup_size;
+        global_constants.num_workgroups = config.num_workgroups;
         global_constants.subgroup_size = config.subgroup_size;
-        global_constants.num_subgroups = total_threads / config.subgroup_size;
+        global_constants.num_subgroups = total_threads.div_ceil(config.subgroup_size);
 
-        let evaluator =
-            Evaluator::new(module, entry_point_index, global_constants, naga_bindings, config)?;
+        let thread_order = thread_order(&config);
+        let focused_thread = thread_order.first().copied().ok_or_else(|| {
+            DebuggerError::InvalidConfig("workgroup must contain at least one thread".into())
+        })?;
+        let thread_ids = thread_order
+            .iter()
+            .enumerate()
+            .map(|(index, gid)| (index as u64 + 1, *gid))
+            .collect();
+
+        let mut evaluators = HashMap::new();
+        for gid in &thread_order {
+            let mut evaluator = Evaluator::new(
+                module.clone(),
+                entry_point_index,
+                global_constants,
+                naga_bindings.clone(),
+                config.clone(),
+            )?;
+            evaluator.set_active_thread_gid(*gid)?;
+            evaluators.insert(*gid, evaluator);
+        }
 
         Ok(Self {
-            evaluator,
+            evaluators,
+            thread_order,
+            thread_ids,
+            focused_thread,
             source: source.to_string(),
         })
     }
@@ -194,12 +239,77 @@ impl Debugger {
         &self.source
     }
 
+    fn evaluator(&self) -> &Evaluator {
+        &self.evaluators[&self.focused_thread]
+    }
+
+    fn evaluator_mut(&mut self) -> &mut Evaluator {
+        self.evaluators
+            .get_mut(&self.focused_thread)
+            .expect("focused thread must have an evaluator")
+    }
+
+    pub fn threads(&self) -> Vec<DebugThread> {
+        self.thread_order
+            .iter()
+            .enumerate()
+            .map(|(index, gid)| DebugThread {
+                id: index as u64 + 1,
+                global_invocation_id: *gid,
+                name: format!("[{}, {}, {}]", gid[0], gid[1], gid[2]),
+            })
+            .collect()
+    }
+
+    pub fn focus_thread(&mut self, thread_id: u64) -> Result<(), EvaluatorError> {
+        let gid = self.thread_ids.get(&thread_id).copied().ok_or_else(|| {
+            EvaluatorError::InternalError(format!("unknown DAP thread id {thread_id}"))
+        })?;
+        self.focused_thread = gid;
+        Ok(())
+    }
+
+    pub fn focused_thread_id(&self) -> u64 {
+        self.thread_order
+            .iter()
+            .position(|gid| *gid == self.focused_thread)
+            .map(|index| index as u64 + 1)
+            .unwrap_or(1)
+    }
+
     /// Execute one user-visible statement, skipping internal `Emit`/`let` declarations.
     ///
     /// Returns [`StepResult::Finished`] when execution is complete.
     pub fn step(&mut self) -> Result<StepResult, EvaluatorError> {
+        self.step_focused()
+    }
+
+    pub fn step_thread(&mut self, thread_id: u64) -> Result<StepResult, EvaluatorError> {
+        self.focus_thread(thread_id)?;
+        self.step_focused()
+    }
+
+    pub fn step_all(&mut self) -> Result<StepResult, EvaluatorError> {
+        let mut any_continue = false;
+        let focused_thread = self.focused_thread;
+        let thread_order = self.thread_order.clone();
+        for gid in thread_order {
+            self.focused_thread = gid;
+            if matches!(self.step_focused()?, StepResult::Continue) {
+                any_continue = true;
+            }
+        }
+        self.focused_thread = focused_thread;
+        Ok(if any_continue {
+            StepResult::Continue
+        } else {
+            StepResult::Finished
+        })
+    }
+
+    fn step_focused(&mut self) -> Result<StepResult, EvaluatorError> {
         loop {
-            match self.evaluator.step()? {
+            match self.evaluator_mut().step()? {
                 None => return Ok(StepResult::Finished),
                 Some(next) => {
                     if !matches!(next.statement, Statement::Emit(_)) {
@@ -214,16 +324,16 @@ impl Debugger {
     ///
     /// Returns `None` if execution has finished (stack is empty).
     pub fn current_location(&self) -> Option<SourceLocation> {
-        let function_name = self.evaluator.current_function().ok()?.name.clone();
-        let (block, idx) = self.evaluator.current_active_block().ok()?;
+        let evaluator = self.evaluator();
+        let function_name = evaluator.current_function().ok()?.name.clone();
+        let (block, idx) = evaluator.current_active_block().ok()?;
         let (current_statement, span) = block.span_iter().nth(idx)?;
 
         let (line, column) = if matches!(current_statement, Statement::Return { .. }) {
             // For return statements, point to the line after the closing brace
             // of the function body rather than the span of the return itself.
-            let func = self.evaluator.current_function().ok()?;
-            let total_span =
-                naga::Span::total_span(func.body.span_iter().map(|(_, s)| *s));
+            let func = evaluator.current_function().ok()?;
+            let total_span = naga::Span::total_span(func.body.span_iter().map(|(_, s)| *s));
             let total_range = total_span.to_range()?;
             let prefix = &self.source[..total_range.end];
             let line_number = prefix.matches('\n').count() as u32 + 2;
@@ -245,9 +355,10 @@ impl Debugger {
         let mut frames = Vec::new();
         let mut is_innermost = true;
 
-        for stack_frame in self.evaluator.stack.iter().rev() {
+        let evaluator = self.evaluator();
+        for stack_frame in evaluator.stack.iter().rev() {
             if let StackFrame::Function(func_frame) = stack_frame {
-                let func = self.evaluator.resolve_function(&func_frame.function_ref);
+                let func = evaluator.resolve_function(&func_frame.function_ref);
                 let location = if is_innermost {
                     self.current_location()
                 } else {
@@ -268,10 +379,11 @@ impl Debugger {
     pub fn local_variables(&self) -> Vec<Variable> {
         let mut vars = Vec::new();
 
-        if let (Ok(in_scope), Ok(func), Ok(frame)) = (
-            self.evaluator.local_variables_in_current_scope(),
-            self.evaluator.current_function(),
-            self.evaluator.current_function_frame(),
+        if let (Ok(in_scope), Ok(func), Ok(frame), Ok(func_idx)) = (
+            self.evaluator().local_variables_in_current_scope(),
+            self.evaluator().current_function(),
+            self.evaluator().current_function_frame(),
+            self.evaluator().current_function_frame_index(),
         ) {
             for (handle, local) in func.local_variables.iter() {
                 if in_scope.contains(&handle) {
@@ -279,7 +391,9 @@ impl Debugger {
                         .local_variables
                         .get(&handle)
                         .cloned()
-                        .unwrap_or(Value::Uninitialized)
+                        .unwrap_or_else(|| {
+                            self.evaluator().evaluate_local_variable(handle, func_idx)
+                        })
                         .leaf_value();
                     vars.push(Variable {
                         name: local.name.clone(),
@@ -289,7 +403,7 @@ impl Debugger {
             }
         }
 
-        if let Ok(named) = self.evaluator.named_expression_values() {
+        if let Ok(named) = self.evaluator().named_expression_values() {
             for (name, value) in named {
                 vars.push(Variable {
                     name: Some(name),
@@ -303,7 +417,7 @@ impl Debugger {
 
     /// Current function arguments with their names and values.
     pub fn argument_variables(&self) -> Vec<Variable> {
-        self.evaluator
+        self.evaluator()
             .current_function_argument_values()
             .unwrap_or_default()
             .into_iter()
@@ -316,7 +430,7 @@ impl Debugger {
 
     /// All global variables with their names and values.
     pub fn global_variables(&self) -> Vec<Variable> {
-        self.evaluator
+        self.evaluator()
             .global_variable_values()
             .into_iter()
             .map(|(name, value)| Variable {
@@ -324,5 +438,9 @@ impl Debugger {
                 value: value.leaf_value(),
             })
             .collect()
+    }
+
+    pub fn entry_point_output(&self) -> Option<Value> {
+        self.evaluator().entry_point_output.clone()
     }
 }

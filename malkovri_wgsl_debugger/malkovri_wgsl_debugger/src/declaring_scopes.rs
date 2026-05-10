@@ -90,7 +90,10 @@ fn local_declaring_scopes(
         .iter()
         .filter_map(|(handle, _)| {
             let variable_range = function.local_variables.get_span(handle).to_range()?;
-            Some((handle, smallest_enclosing_scope(block_scopes, &variable_range)))
+            Some((
+                handle,
+                smallest_enclosing_scope(block_scopes, &variable_range),
+            ))
         })
         .collect()
 }

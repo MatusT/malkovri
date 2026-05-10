@@ -171,12 +171,8 @@ impl Evaluator {
                         Primitive::U32(thread.vertex_inputs.instance_index).into()
                     }
                     // vertex — global constants
-                    naga::ir::BuiltIn::BaseInstance => {
-                        Primitive::U32(gc.base_instance).into()
-                    }
-                    naga::ir::BuiltIn::BaseVertex => {
-                        Primitive::I32(gc.base_vertex).into()
-                    }
+                    naga::ir::BuiltIn::BaseInstance => Primitive::U32(gc.base_instance).into(),
+                    naga::ir::BuiltIn::BaseVertex => Primitive::I32(gc.base_vertex).into(),
                     naga::ir::BuiltIn::ClipDistance => Value::Array(
                         gc.clip_distance
                             .iter()
@@ -189,12 +185,8 @@ impl Evaluator {
                             .map(|&v| Primitive::F32(v).into())
                             .collect(),
                     ),
-                    naga::ir::BuiltIn::PointSize => {
-                        Primitive::F32(gc.point_size).into()
-                    }
-                    naga::ir::BuiltIn::DrawID => {
-                        Primitive::U32(gc.draw_id).into()
-                    }
+                    naga::ir::BuiltIn::PointSize => Primitive::F32(gc.point_size).into(),
+                    naga::ir::BuiltIn::DrawID => Primitive::U32(gc.draw_id).into(),
                     // fragment — per-thread
                     naga::ir::BuiltIn::Position { .. } => {
                         Primitive::F32x4(thread.fragment_inputs.position).into()
@@ -212,15 +204,9 @@ impl Evaluator {
                         Primitive::U32(thread.fragment_inputs.primitive_index).into()
                     }
                     // fragment — global constants
-                    naga::ir::BuiltIn::ViewIndex => {
-                        Primitive::I32(gc.view_index).into()
-                    }
-                    naga::ir::BuiltIn::FragDepth => {
-                        Primitive::F32(gc.frag_depth).into()
-                    }
-                    naga::ir::BuiltIn::PointCoord => {
-                        Primitive::F32x2(gc.point_coord).into()
-                    }
+                    naga::ir::BuiltIn::ViewIndex => Primitive::I32(gc.view_index).into(),
+                    naga::ir::BuiltIn::FragDepth => Primitive::F32(gc.frag_depth).into(),
+                    naga::ir::BuiltIn::PointCoord => Primitive::F32x2(gc.point_coord).into(),
                     // compute — per-thread
                     naga::ir::BuiltIn::GlobalInvocationId => {
                         Primitive::U32x3(thread.compute_inputs.global_invocation_id).into()
@@ -235,12 +221,8 @@ impl Evaluator {
                         Primitive::U32x3(thread.compute_inputs.workgroup_id).into()
                     }
                     // compute — global constants
-                    naga::ir::BuiltIn::WorkGroupSize => {
-                        Primitive::U32x3(gc.workgroup_size).into()
-                    }
-                    naga::ir::BuiltIn::NumWorkGroups => {
-                        Primitive::U32x3(gc.num_workgroups).into()
-                    }
+                    naga::ir::BuiltIn::WorkGroupSize => Primitive::U32x3(gc.workgroup_size).into(),
+                    naga::ir::BuiltIn::NumWorkGroups => Primitive::U32x3(gc.num_workgroups).into(),
                     // subgroup — per-thread
                     naga::ir::BuiltIn::SubgroupId => {
                         Primitive::U32(thread.compute_inputs.subgroup_id).into()
@@ -249,12 +231,8 @@ impl Evaluator {
                         Primitive::U32(thread.compute_inputs.subgroup_invocation_id).into()
                     }
                     // subgroup — global constants
-                    naga::ir::BuiltIn::NumSubgroups => {
-                        Primitive::U32(gc.num_subgroups).into()
-                    }
-                    naga::ir::BuiltIn::SubgroupSize => {
-                        Primitive::U32(gc.subgroup_size).into()
-                    }
+                    naga::ir::BuiltIn::NumSubgroups => Primitive::U32(gc.num_subgroups).into(),
+                    naga::ir::BuiltIn::SubgroupSize => Primitive::U32(gc.subgroup_size).into(),
                 },
                 naga::ir::Binding::Location { .. } => Value::Uninitialized,
             }
@@ -263,7 +241,11 @@ impl Evaluator {
         }
     }
 
-    fn evaluate_local_variable(&self, handle: Handle<LocalVariable>, func_idx: usize) -> Value {
+    pub(crate) fn evaluate_local_variable(
+        &self,
+        handle: Handle<LocalVariable>,
+        func_idx: usize,
+    ) -> Value {
         // Check if already initialized.
         let (cached, init_expr) = match &self.stack[func_idx] {
             StackFrame::Function(frame) => {
@@ -490,7 +472,10 @@ impl Evaluator {
 }
 
 /// Evaluate a global expression given only a module reference (no `Evaluator` instance needed).
-pub(crate) fn evaluate_global_expression(module: &naga::Module, expr_handle: Handle<Expression>) -> Value {
+pub(crate) fn evaluate_global_expression(
+    module: &naga::Module,
+    expr_handle: Handle<Expression>,
+) -> Value {
     let expression = &module.global_expressions[expr_handle];
     match expression {
         Expression::Literal(literal) => match literal {
@@ -553,15 +538,33 @@ pub(crate) fn evaluate_global_expression(module: &naga::Module, expr_handle: Han
         Expression::Splat { size, value } => {
             let val = evaluate_global_expression(module, *value).leaf_value();
             match (size, val) {
-                (VectorSize::Bi, Value::Primitive(Primitive::F32(v))) => Primitive::F32x2([v; 2]).into(),
-                (VectorSize::Tri, Value::Primitive(Primitive::F32(v))) => Primitive::F32x3([v; 3]).into(),
-                (VectorSize::Quad, Value::Primitive(Primitive::F32(v))) => Primitive::F32x4([v; 4]).into(),
-                (VectorSize::Bi, Value::Primitive(Primitive::I32(v))) => Primitive::I32x2([v; 2]).into(),
-                (VectorSize::Tri, Value::Primitive(Primitive::I32(v))) => Primitive::I32x3([v; 3]).into(),
-                (VectorSize::Quad, Value::Primitive(Primitive::I32(v))) => Primitive::I32x4([v; 4]).into(),
-                (VectorSize::Bi, Value::Primitive(Primitive::U32(v))) => Primitive::U32x2([v; 2]).into(),
-                (VectorSize::Tri, Value::Primitive(Primitive::U32(v))) => Primitive::U32x3([v; 3]).into(),
-                (VectorSize::Quad, Value::Primitive(Primitive::U32(v))) => Primitive::U32x4([v; 4]).into(),
+                (VectorSize::Bi, Value::Primitive(Primitive::F32(v))) => {
+                    Primitive::F32x2([v; 2]).into()
+                }
+                (VectorSize::Tri, Value::Primitive(Primitive::F32(v))) => {
+                    Primitive::F32x3([v; 3]).into()
+                }
+                (VectorSize::Quad, Value::Primitive(Primitive::F32(v))) => {
+                    Primitive::F32x4([v; 4]).into()
+                }
+                (VectorSize::Bi, Value::Primitive(Primitive::I32(v))) => {
+                    Primitive::I32x2([v; 2]).into()
+                }
+                (VectorSize::Tri, Value::Primitive(Primitive::I32(v))) => {
+                    Primitive::I32x3([v; 3]).into()
+                }
+                (VectorSize::Quad, Value::Primitive(Primitive::I32(v))) => {
+                    Primitive::I32x4([v; 4]).into()
+                }
+                (VectorSize::Bi, Value::Primitive(Primitive::U32(v))) => {
+                    Primitive::U32x2([v; 2]).into()
+                }
+                (VectorSize::Tri, Value::Primitive(Primitive::U32(v))) => {
+                    Primitive::U32x3([v; 3]).into()
+                }
+                (VectorSize::Quad, Value::Primitive(Primitive::U32(v))) => {
+                    Primitive::U32x4([v; 4]).into()
+                }
                 _ => Value::Uninitialized,
             }
         }
