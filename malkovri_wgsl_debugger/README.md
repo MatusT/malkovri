@@ -94,11 +94,3 @@ deno task build
 | `bindings[].file`      | string                         | —             | Path to a data file relative to the shader. Cannot be combined with `inline`.      |
 | `bindings[].fileContent` | string                       | —             | Inline file content; currently supports RON content.                               |
 | `bindings[].format`    | `"ron"` \| `"binary"`          | `"ron"`       | File format: `"ron"` (RON array) or `"binary"` (little-endian 4-byte values).     |
-
-## Architecture note
-
-The debugger models a compute workgroup as one `Evaluator` per invocation.
-`Debugger` owns the workgroup scheduler, DAP thread focus, breakpoints, and
-shared session state. Binding-backed globals and `var<workgroup>` globals are
-shared cells; `var<private>` globals and function-local state remain isolated
-per invocation.
