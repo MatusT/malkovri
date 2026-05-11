@@ -1,4 +1,6 @@
-use crate::{evaluator::Evaluator, primitive::Primitive, value::Value};
+use crate::{primitive::Primitive, value::Value};
+
+use super::Evaluator;
 
 use naga::{Expression, Handle, MathFunction, RelationalFunction, UnaryOperator};
 

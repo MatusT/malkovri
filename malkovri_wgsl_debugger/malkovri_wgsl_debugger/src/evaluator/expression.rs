@@ -1,10 +1,11 @@
 use crate::{
-    evaluator::Evaluator,
     function_state::StackFrame,
     place::{ArgumentValue, EvaluatedExpression, Place, PlaceRoot},
     primitive::Primitive,
     value::Value,
 };
+
+use super::Evaluator;
 
 use naga::{
     Expression, Handle, Literal, LocalVariable, SwizzleComponent, Type, TypeInner, UnaryOperator,
@@ -112,7 +113,7 @@ impl Evaluator {
                 convert,
             } => {
                 let val = self.eval_value(*expr, func_idx);
-                crate::eval_cast::evaluate_as(val, *kind, *convert).into()
+                super::cast::evaluate_as(val, *kind, *convert).into()
             }
             Expression::Math {
                 fun,
