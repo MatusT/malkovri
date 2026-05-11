@@ -109,6 +109,32 @@ fn launch_and_configure(session: &mut Session, shader: &str, breakpoints: &[u32]
 }
 
 #[test]
+fn initialize_advertises_only_implemented_capabilities() {
+    let mut s = Session::new();
+    let init = s.send("initialize", json!({}));
+    let body = response_body(&init, s.last_seq());
+
+    assert_eq!(body["supportsConfigurationDoneRequest"], true);
+    assert_eq!(body["supportsSingleThreadExecutionRequests"], true);
+    assert_eq!(body["supportsTerminateRequest"], true);
+
+    let unsupported = [
+        "supportsCancelRequest",
+        "supportsConditionalBreakpoints",
+        "supportsExceptionInfoRequest",
+        "supportsHitConditionalBreakpoints",
+        "supportsRestartRequest",
+        "supportsSetVariable",
+    ];
+    for capability in unsupported {
+        assert!(
+            body.get(capability).is_none(),
+            "{capability} should not be advertised"
+        );
+    }
+}
+
+#[test]
 fn control_flow_session_matches_vscode_request_flow() {
     let mut s = Session::new();
     let shader = shader_path("test_control_flow.wgsl");
@@ -359,6 +385,43 @@ fn workgroup_threads_route_stack_and_variables_by_thread_id() {
     let args = s.send("variables", json!({ "variablesReference": arguments_ref }));
     let args = variables_map(response_body(&args, s.last_seq()));
     assert_eq!(args["global_id"], "Primitive(U32x3([1, 0, 0]))");
+}
+
+#[test]
+fn single_thread_execution_launch_mode_steps_only_selected_thread() {
+    let mut s = Session::new();
+    let shader = shader_path("test_nested_named_expression_scope.wgsl");
+
+    s.send("initialize", json!({}));
+    s.send(
+        "launch",
+        json!({
+            "program": shader,
+            "stopOnEntry": true,
+            "singleThreadExecution": true,
+            "workgroupConfig": { "workgroupSize": [2, 1, 1] },
+        }),
+    );
+    let cfg = s.send("configurationDone", json!({}));
+    assert_eq!(event_body(&cfg, "stopped")["reason"], "entry");
+
+    let next = s.send("next", json!({ "threadId": 2, "singleThread": false }));
+    assert_eq!(event_body(&next, "stopped")["reason"], "step");
+    assert_eq!(event_body(&next, "stopped")["threadId"], 2);
+
+    let thread_2_stack = s.send("stackTrace", json!({ "threadId": 2 }));
+    let thread_2_line = response_body(&thread_2_stack, s.last_seq())["stackFrames"][0]["line"]
+        .as_u64()
+        .unwrap();
+    let thread_1_stack = s.send("stackTrace", json!({ "threadId": 1 }));
+    let thread_1_line = response_body(&thread_1_stack, s.last_seq())["stackFrames"][0]["line"]
+        .as_u64()
+        .unwrap();
+
+    assert_ne!(
+        thread_1_line, thread_2_line,
+        "thread 1 should stay at entry while thread 2 steps"
+    );
 }
 
 #[test]

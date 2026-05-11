@@ -38,6 +38,11 @@
                 "default": false,
                 "description": "Stop at the entry point before running to breakpoints."
               },
+              "singleThreadExecution": {
+                "type": "boolean",
+                "default": false,
+                "description": "Advance only the selected VS Code thread for Step Over and Continue requests."
+              },
               "workgroupConfig": {
                 "type": "object",
                 "description": "Workgroup and subgroup configuration for the debug session. Compute builtins (global_invocation_id, local_invocation_id, etc.) are derived from these values.",

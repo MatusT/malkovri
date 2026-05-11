@@ -53,6 +53,7 @@ deno task build
   "request": "launch",
   "name": "Debug shader",
   "program": "${workspaceFolder}/shader.wgsl",
+  "singleThreadExecution": false,
   "workgroupConfig": {
     "workgroupSize": [64, 1, 1],
     "workgroupId": [0, 0, 0],
@@ -76,6 +77,7 @@ deno task build
 |------------------------|--------------------------------|---------------|------------------------------------------------------------------------------------|
 | `program`              | string                         | —             | Absolute path to the WGSL shader file.                                             |
 | `stopOnEntry`          | boolean                        | `false`       | Stop at the entry point before running to breakpoints.                             |
+| `singleThreadExecution` | boolean                       | `false`       | Step Over and Continue advance only the selected VS Code thread instead of the whole workgroup. |
 | `workgroupConfig.workgroupSize` | `[u32, u32, u32]`     | `[1, 1, 1]`   | Number of threads along each dimension of the workgroup being debugged.            |
 | `workgroupConfig.workgroupId`   | `[u32, u32, u32]`     | `[0, 0, 0]`   | Which workgroup in the dispatch to debug.                                           |
 | `workgroupConfig.subgroupSize`  | number                | `4`           | Subgroup (warp) size. Must be a power of 2 in `[4, 128]` (WGSL spec). All thread IDs are derived from this and `workgroupSize`. |

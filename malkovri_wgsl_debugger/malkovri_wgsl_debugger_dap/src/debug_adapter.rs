@@ -117,6 +117,7 @@ pub struct DebugAdapter {
     delayed_init_seq: Option<i64>,
     configuration_done: bool,
     stop_on_entry: bool,
+    single_thread_execution: bool,
 }
 
 impl Default for DebugAdapter {
@@ -136,6 +137,7 @@ impl DebugAdapter {
             delayed_init_seq: None,
             configuration_done: false,
             stop_on_entry: false,
+            single_thread_execution: false,
         }
     }
 
@@ -237,15 +239,9 @@ impl DebugAdapter {
             self.make_response(
                 seq,
                 &dapts::Capabilities {
-                    supports_cancel_request: Some(true),
-                    supports_exception_info_request: Some(true),
                     supports_terminate_request: Some(true),
-                    supports_restart_request: Some(true),
-                    supports_set_variable: Some(true),
                     supports_single_thread_execution_requests: Some(true),
                     supports_configuration_done_request: Some(true),
-                    supports_conditional_breakpoints: Some(true),
-                    supports_hit_conditional_breakpoints: Some(true),
                     ..Default::default()
                 },
             )?,
@@ -279,6 +275,10 @@ impl DebugAdapter {
         self.program_name = Some(program_name);
         self.stop_on_entry = arguments
             .get("stopOnEntry")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        self.single_thread_execution = arguments
+            .get("singleThreadExecution")
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
 
@@ -569,9 +569,11 @@ impl DebugAdapter {
         req: &dapts::Request,
     ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         let arguments = serde_json::from_value::<dapts::NextArguments>(req.arguments.clone())?;
+        let single_thread =
+            self.single_thread_execution || arguments.single_thread.unwrap_or(false);
         let debugger = self.debugger_mut()?;
         debugger.focus_thread(arguments.thread_id)?;
-        let has_more = if arguments.single_thread.unwrap_or(false) {
+        let has_more = if single_thread {
             matches!(
                 debugger.step_thread(arguments.thread_id)?,
                 StepResult::Continue
@@ -594,11 +596,10 @@ impl DebugAdapter {
         req: &dapts::Request,
     ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         let arguments = serde_json::from_value::<dapts::ContinueArguments>(req.arguments.clone())?;
+        let single_thread =
+            self.single_thread_execution || arguments.single_thread.unwrap_or(false);
         let response = self.make_response(req.seq, &serde_json::json!({}))?;
-        let event = self.run_to_breakpoint(
-            arguments.thread_id,
-            arguments.single_thread.unwrap_or(false),
-        )?;
+        let event = self.run_to_breakpoint(arguments.thread_id, single_thread)?;
         Ok(vec![response, event])
     }
 
