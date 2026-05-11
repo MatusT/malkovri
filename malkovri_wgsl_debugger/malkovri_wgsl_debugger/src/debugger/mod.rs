@@ -168,6 +168,9 @@ pub struct Variable {
     pub value: Value,
 }
 
+/// DAP-facing thread id for one debuggable shader invocation.
+pub type DebugThreadId = u64;
+
 /// Source location of the current execution point.
 #[derive(Debug, Clone)]
 pub struct SourceLocation {
@@ -186,7 +189,7 @@ pub struct StackFrameInfo {
 /// One debuggable shader invocation exposed as a DAP thread.
 #[derive(Debug, Clone)]
 pub struct DebugThread {
-    pub id: u64,
+    pub id: DebugThreadId,
     pub global_invocation_id: [u32; 3],
     pub name: String,
 }
@@ -199,9 +202,13 @@ pub struct Debugger {
     evaluators: HashMap<[u32; 3], Evaluator>,
     thread_status: HashMap<[u32; 3], ThreadStatus>,
     thread_order: Vec<[u32; 3]>,
-    thread_ids: HashMap<u64, [u32; 3]>,
+    thread_ids: HashMap<DebugThreadId, [u32; 3]>,
     focused_thread: [u32; 3],
     source: String,
+}
+
+fn thread_id_for_index(index: usize) -> DebugThreadId {
+    index as DebugThreadId + 1
 }
 
 impl Debugger {
@@ -263,7 +270,7 @@ impl Debugger {
         let thread_ids = thread_order
             .iter()
             .enumerate()
-            .map(|(index, gid)| (index as u64 + 1, *gid))
+            .map(|(index, gid)| (thread_id_for_index(index), *gid))
             .collect();
 
         let mut evaluators = HashMap::new();
@@ -315,14 +322,14 @@ impl Debugger {
             .iter()
             .enumerate()
             .map(|(index, gid)| DebugThread {
-                id: index as u64 + 1,
+                id: thread_id_for_index(index),
                 global_invocation_id: *gid,
                 name: format!("[{}, {}, {}]", gid[0], gid[1], gid[2]),
             })
             .collect()
     }
 
-    pub fn focus_thread(&mut self, thread_id: u64) -> Result<(), EvaluatorError> {
+    pub fn focus_thread(&mut self, thread_id: DebugThreadId) -> Result<(), EvaluatorError> {
         let gid = self.thread_ids.get(&thread_id).copied().ok_or_else(|| {
             EvaluatorError::InternalError(format!("unknown DAP thread id {thread_id}"))
         })?;
@@ -330,11 +337,11 @@ impl Debugger {
         Ok(())
     }
 
-    pub fn focused_thread_id(&self) -> u64 {
+    pub fn focused_thread_id(&self) -> DebugThreadId {
         self.thread_order
             .iter()
             .position(|gid| *gid == self.focused_thread)
-            .map(|index| index as u64 + 1)
+            .map(thread_id_for_index)
             .unwrap_or(1)
     }
 }

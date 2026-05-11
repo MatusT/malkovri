@@ -11,8 +11,8 @@ mod value;
 mod wgsl;
 
 pub use debugger::{
-    DebugThread, Debugger, DebuggerError, ResourceBinding, SourceLocation, StackFrameInfo,
-    StepResult, Variable, WorkgroupConfig,
+    DebugThread, DebugThreadId, Debugger, DebuggerError, ResourceBinding, SourceLocation,
+    StackFrameInfo, StepResult, Variable, WorkgroupConfig,
 };
 pub use entry_point_inputs::GlobalConstants;
 pub use error::EvaluatorError;

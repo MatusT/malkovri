@@ -1,134 +1,33 @@
 use std::{
-    fmt::Debug,
+    collections::HashMap,
     path::{Path, PathBuf},
 };
 
 #[cfg(not(target_arch = "wasm32"))]
-use std::{
-    fs,
-    io::{BufRead, BufReader, BufWriter, Write},
-};
+use std::fs;
 
 use dapts::Breakpoint;
-use serde::Serialize;
 
 use crate::error::DebugAdapterError;
 use crate::parse_input;
-use malkovri_wgsl_debugger::{Debugger, StepResult};
+use crate::protocol::{
+    ARGUMENTS_SCOPE_REF, BreakpointId, GLOBALS_SCOPE_REF, LOCALS_SCOPE_REF, OutgoingMessage,
+    StackFrameId, make_scope_ref, make_variable, parse_scope_ref,
+};
+use malkovri_wgsl_debugger::{DebugThreadId, Debugger, StepResult};
 
-const LOCALS_SCOPE_REF: u32 = 1;
-const ARGUMENTS_SCOPE_REF: u32 = 2;
-const GLOBALS_SCOPE_REF: u32 = 3;
-const MAIN_THREAD_ID: u64 = 1;
-const FRAME_ID_SCALE: u64 = 1000;
 // Defensive UI budget, not shader semantics: if catch-up cannot settle, stop anyway.
 const BREAKPOINT_CATCH_UP_STEP_BUDGET: usize = 100_000;
 
-fn make_scope_ref(thread_id: u64, scope: u32) -> u32 {
-    (thread_id as u32) * 10 + scope
-}
-
-fn parse_scope_ref(reference: u32) -> (u64, u32) {
-    if reference <= GLOBALS_SCOPE_REF {
-        (MAIN_THREAD_ID, reference)
-    } else {
-        ((reference / 10) as u64, reference % 10)
-    }
-}
-
-fn make_frame_id(thread_id: u64, frame_index: usize) -> u64 {
-    if frame_index == 0 {
-        thread_id
-    } else {
-        thread_id * FRAME_ID_SCALE + frame_index as u64
-    }
-}
-
-fn thread_id_from_frame_id(frame_id: u64) -> u64 {
-    if frame_id < FRAME_ID_SCALE {
-        frame_id
-    } else {
-        frame_id / FRAME_ID_SCALE
-    }
-}
-
-#[derive(Clone, Debug)]
-pub enum OutgoingMessage {
-    Response {
-        seq: i64,
-        request_seq: i64,
-        body: serde_json::Value,
-    },
-    Event {
-        seq: i64,
-        event: String,
-        body: serde_json::Value,
-    },
-}
-
-impl OutgoingMessage {
-    pub fn request_seq(&self) -> Option<i64> {
-        match self {
-            OutgoingMessage::Response { request_seq, .. } => Some(*request_seq),
-            OutgoingMessage::Event { .. } => None,
-        }
-    }
-
-    pub fn event_name(&self) -> Option<&str> {
-        match self {
-            OutgoingMessage::Event { event, .. } => Some(event),
-            OutgoingMessage::Response { .. } => None,
-        }
-    }
-
-    pub fn body(&self) -> &serde_json::Value {
-        match self {
-            OutgoingMessage::Response { body, .. } | OutgoingMessage::Event { body, .. } => body,
-        }
-    }
-
-    pub fn to_json(&self) -> serde_json::Value {
-        match self {
-            OutgoingMessage::Response {
-                seq,
-                request_seq,
-                body,
-            } => serde_json::json!({
-                "seq": seq,
-                "type": "response",
-                "request_seq": request_seq,
-                "success": true,
-                "message": null,
-                "body": body,
-            }),
-            OutgoingMessage::Event { seq, event, body } => serde_json::json!({
-                "seq": seq,
-                "type": "event",
-                "event": event,
-                "body": body,
-            }),
-        }
-    }
-}
-
-fn make_variable(name: Option<String>, value: &str) -> dapts::Variable {
-    dapts::Variable {
-        name: name.clone().unwrap_or("unnamed".to_string()),
-        evaluate_name: name,
-        value: value.to_string(),
-        variables_reference: 0,
-        declaration_location_reference: None,
-        indexed_variables: None,
-        memory_reference: None,
-        named_variables: None,
-        presentation_hint: None,
-        ty: None,
-        value_location_reference: None,
-    }
+#[derive(Clone, Copy, Debug)]
+struct FrameReference {
+    thread_id: DebugThreadId,
 }
 
 pub struct DebugAdapter {
     sequence_number: i64,
+    next_frame_id: StackFrameId,
+    frame_references: HashMap<StackFrameId, FrameReference>,
     breakpoints: Vec<Breakpoint>,
     program_name: Option<String>,
     program_path: Option<PathBuf>,
@@ -149,6 +48,8 @@ impl DebugAdapter {
     pub fn new() -> Self {
         DebugAdapter {
             sequence_number: 1,
+            next_frame_id: 1,
+            frame_references: HashMap::new(),
             breakpoints: Vec::new(),
             debugger: None,
             program_name: None,
@@ -158,30 +59,6 @@ impl DebugAdapter {
             stop_on_entry: false,
             single_thread_execution: false,
         }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn from_stdio(&mut self) -> Result<(), DebugAdapterError> {
-        let stdin = std::io::stdin();
-        let stdout = std::io::stdout();
-        let mut reader = BufReader::new(stdin.lock());
-        let mut writer = BufWriter::new(stdout.lock());
-        self.from_streams(&mut reader, &mut writer)
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn from_streams<R: BufRead, W: Write>(
-        &mut self,
-        reader: &mut R,
-        writer: &mut W,
-    ) -> Result<(), DebugAdapterError> {
-        while let Some(req) = Self::poll_request(reader)? {
-            for message in self.handle_request(&req)? {
-                Self::write_message(writer, &message)?;
-            }
-        }
-
-        Ok(())
     }
 
     /// Process a single DAP request from a raw JSON string.
@@ -251,6 +128,25 @@ impl DebugAdapter {
         self.debugger
             .as_mut()
             .ok_or_else(|| DebugAdapterError::InvalidProgram("debugger not initialized".into()))
+    }
+
+    fn register_frame_reference(&mut self, thread_id: DebugThreadId) -> StackFrameId {
+        let frame_id = self.next_frame_id;
+        self.next_frame_id += 1;
+        self.frame_references
+            .insert(frame_id, FrameReference { thread_id });
+        frame_id
+    }
+
+    fn frame_reference(&self, frame_id: StackFrameId) -> Result<FrameReference, DebugAdapterError> {
+        self.frame_references
+            .get(&frame_id)
+            .copied()
+            .ok_or_else(|| {
+                DebugAdapterError::InvalidProgram(format!(
+                    "unknown stack frame id {frame_id}; request stackTrace before scopes"
+                ))
+            })
     }
 
     fn handle_initialize(&mut self, seq: i64) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
@@ -336,6 +232,8 @@ impl DebugAdapter {
             global_constants,
             bindings,
         )?);
+        self.frame_references.clear();
+        self.next_frame_id = 1;
 
         let mut messages = Vec::new();
         if !self.configuration_done {
@@ -354,11 +252,12 @@ impl DebugAdapter {
     ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         let arguments =
             serde_json::from_value::<dapts::StackTraceArguments>(req.arguments.clone())?;
-        let thread_id = arguments.thread_id;
-        let debugger = self.debugger_mut()?;
-        debugger.focus_thread(thread_id)?;
-
-        let frames = debugger.call_stack();
+        let thread_id: DebugThreadId = arguments.thread_id;
+        let frames = {
+            let debugger = self.debugger_mut()?;
+            debugger.focus_thread(thread_id)?;
+            debugger.call_stack()
+        };
         let path = self
             .program_path
             .as_ref()
@@ -366,41 +265,39 @@ impl DebugAdapter {
             .to_string_lossy()
             .to_string();
 
-        let stack_frames = frames
-            .iter()
-            .enumerate()
-            .map(|(index, frame)| {
-                let location = frame.location.as_ref().or_else(|| {
-                    frames
-                        .first()
-                        .and_then(|innermost| innermost.location.as_ref())
-                });
-                let line = location.map(|loc| loc.line).unwrap_or(1);
-                let column = location.map(|loc| loc.column).unwrap_or(0);
-                dapts::StackFrame {
-                    id: make_frame_id(thread_id, index),
-                    name: frame.name.as_deref().unwrap_or("main").to_string(),
-                    source: Some(dapts::Source {
-                        name: self.program_name.clone(),
-                        path: Some(path.clone()),
-                        adapter_data: None,
-                        checksums: None,
-                        origin: None,
-                        presentation_hint: None,
-                        source_reference: None,
-                        sources: None,
-                    }),
-                    can_restart: None,
-                    instruction_pointer_reference: None,
-                    module_id: None,
-                    presentation_hint: Some(dapts::StackFramePresentationHint::Normal),
-                    line,
-                    column,
-                    end_line: None,
-                    end_column: None,
-                }
-            })
-            .collect::<Vec<_>>();
+        let mut stack_frames = Vec::new();
+        for frame in &frames {
+            let frame_id = self.register_frame_reference(thread_id);
+            let location = frame.location.as_ref().or_else(|| {
+                frames
+                    .first()
+                    .and_then(|innermost| innermost.location.as_ref())
+            });
+            let line = location.map(|loc| loc.line).unwrap_or(1);
+            let column = location.map(|loc| loc.column).unwrap_or(0);
+            stack_frames.push(dapts::StackFrame {
+                id: frame_id,
+                name: frame.name.as_deref().unwrap_or("main").to_string(),
+                source: Some(dapts::Source {
+                    name: self.program_name.clone(),
+                    path: Some(path.clone()),
+                    adapter_data: None,
+                    checksums: None,
+                    origin: None,
+                    presentation_hint: None,
+                    source_reference: None,
+                    sources: None,
+                }),
+                can_restart: None,
+                instruction_pointer_reference: None,
+                module_id: None,
+                presentation_hint: Some(dapts::StackFramePresentationHint::Normal),
+                line,
+                column,
+                end_line: None,
+                end_column: None,
+            });
+        }
 
         Ok(vec![self.make_response(
             req.seq,
@@ -416,8 +313,9 @@ impl DebugAdapter {
         req: &dapts::Request,
     ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         let arguments = serde_json::from_value::<dapts::ScopesArguments>(req.arguments.clone())?;
-        let frame_id = arguments.frame_id;
-        let thread_id = thread_id_from_frame_id(frame_id);
+        let frame_id: StackFrameId = arguments.frame_id;
+        let frame_reference = self.frame_reference(frame_id)?;
+        let thread_id = frame_reference.thread_id;
         let debugger = self.debugger_mut()?;
         debugger.focus_thread(thread_id)?;
 
@@ -537,7 +435,7 @@ impl DebugAdapter {
             .iter()
             .enumerate()
             .map(|(i, bp)| Breakpoint {
-                id: Some(i as u64 + 1),
+                id: Some(i as BreakpointId + 1),
                 verified: source_matches,
                 message: if source_matches {
                     None
@@ -597,13 +495,11 @@ impl DebugAdapter {
         let arguments = serde_json::from_value::<dapts::NextArguments>(req.arguments.clone())?;
         let single_thread =
             self.single_thread_execution || arguments.single_thread.unwrap_or(false);
+        let thread_id: DebugThreadId = arguments.thread_id;
         let debugger = self.debugger_mut()?;
-        debugger.focus_thread(arguments.thread_id)?;
+        debugger.focus_thread(thread_id)?;
         let has_more = if single_thread {
-            matches!(
-                debugger.step_thread(arguments.thread_id)?,
-                StepResult::Continue
-            )
+            matches!(debugger.step_thread(thread_id)?, StepResult::Continue)
         } else {
             matches!(debugger.step_all()?, StepResult::Continue)
         };
@@ -625,17 +521,20 @@ impl DebugAdapter {
         let single_thread =
             self.single_thread_execution || arguments.single_thread.unwrap_or(false);
         let response = self.make_response(req.seq, &serde_json::json!({}))?;
-        let event = self.run_to_breakpoint(arguments.thread_id, single_thread)?;
+        let thread_id: DebugThreadId = arguments.thread_id;
+        let event = self.run_to_breakpoint(thread_id, single_thread)?;
         Ok(vec![response, event])
     }
 
     fn handle_disconnect(&mut self, seq: i64) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         self.debugger = None;
+        self.frame_references.clear();
         Ok(vec![self.make_response(seq, &serde_json::json!({}))?])
     }
 
     fn handle_terminate(&mut self, seq: i64) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         self.debugger = None;
+        self.frame_references.clear();
         Ok(vec![
             self.make_response(seq, &serde_json::json!({}))?,
             self.make_event("terminated", &serde_json::json!({}))?,
@@ -676,82 +575,9 @@ impl DebugAdapter {
         )?])
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn poll_request<R: BufRead>(
-        reader: &mut R,
-    ) -> Result<Option<dapts::Request>, DebugAdapterError> {
-        let mut buffer = String::new();
-
-        // Read header line
-        if reader.read_line(&mut buffer)? == 0 {
-            return Ok(None);
-        }
-        let (name, value) = buffer
-            .trim_end()
-            .split_once(':')
-            .ok_or_else(|| DebugAdapterError::Parse("Header is incorrect".to_string()))?;
-        let content_length: usize = match name {
-            "Content-Length" => value.trim().parse().map_err(|_| {
-                DebugAdapterError::Parse("Content-Length is not a valid number".to_string())
-            })?,
-            other => {
-                return Err(DebugAdapterError::Parse(format!("Unknown header: {other}")));
-            }
-        };
-
-        // Skip blank line separator
-        buffer.clear();
-        reader.read_line(&mut buffer)?;
-
-        // Read content body
-        let mut content = vec![0; content_length];
-        reader.read_exact(&mut content)?;
-        let content = std::str::from_utf8(&content)
-            .map_err(|e| DebugAdapterError::Parse(format!("Invalid UTF-8: {e}")))?;
-        let request: dapts::Request = serde_json::from_str(content)?;
-
-        Ok(Some(request))
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn write_message<W: Write>(
-        writer: &mut W,
-        message: &OutgoingMessage,
-    ) -> Result<(), DebugAdapterError> {
-        let payload = serde_json::to_string(&message.to_json())?;
-        let framed = format!("Content-Length: {}\r\n\r\n{}", payload.len(), payload);
-        writer.write_all(framed.as_bytes())?;
-        writer.flush()?;
-        Ok(())
-    }
-
-    fn make_response<T: Serialize + Debug>(
-        &mut self,
-        request_seq: i64,
-        body: &T,
-    ) -> Result<OutgoingMessage, DebugAdapterError> {
-        Ok(OutgoingMessage::Response {
-            seq: self.next_sequence_number(),
-            request_seq,
-            body: serde_json::to_value(body)?,
-        })
-    }
-
-    fn make_event<T: Serialize + Debug>(
-        &mut self,
-        event: &str,
-        body: &T,
-    ) -> Result<OutgoingMessage, DebugAdapterError> {
-        Ok(OutgoingMessage::Event {
-            seq: self.next_sequence_number(),
-            event: event.to_string(),
-            body: serde_json::to_value(body)?,
-        })
-    }
-
     fn run_to_breakpoint(
         &mut self,
-        thread_id: u64,
+        thread_id: DebugThreadId,
         single_thread: bool,
     ) -> Result<OutgoingMessage, DebugAdapterError> {
         let debugger = self
@@ -819,7 +645,10 @@ impl DebugAdapter {
     }
 
     // Find the first thread whose current line is a verified breakpoint.
-    fn first_breakpoint_hit(debugger: &Debugger, breakpoints: &[Breakpoint]) -> Option<(u64, u32)> {
+    fn first_breakpoint_hit(
+        debugger: &Debugger,
+        breakpoints: &[Breakpoint],
+    ) -> Option<(DebugThreadId, u32)> {
         debugger
             .all_thread_locations()
             .into_iter()
@@ -831,9 +660,9 @@ impl DebugAdapter {
     // Let lanes that are still before a hit breakpoint reach that same source line.
     fn catch_up_threads_to_breakpoint(
         debugger: &mut Debugger,
-        hit_thread_id: u64,
+        hit_thread_id: DebugThreadId,
         target_line: u32,
-    ) -> Result<u64, DebugAdapterError> {
+    ) -> Result<DebugThreadId, DebugAdapterError> {
         let mut remaining_step_budget = BREAKPOINT_CATCH_UP_STEP_BUDGET;
 
         loop {
@@ -875,7 +704,8 @@ impl DebugAdapter {
         if self.stop_on_entry {
             self.make_stopped_event(dapts::StoppedEventReason::Entry)
         } else {
-            self.run_to_breakpoint(MAIN_THREAD_ID, false)
+            let thread_id = self.debugger()?.focused_thread_id();
+            self.run_to_breakpoint(thread_id, false)
         }
     }
 
@@ -897,7 +727,7 @@ impl DebugAdapter {
         )
     }
 
-    fn next_sequence_number(&mut self) -> i64 {
+    pub(crate) fn next_sequence_number(&mut self) -> i64 {
         let seq = self.sequence_number;
         self.sequence_number += 1;
         seq

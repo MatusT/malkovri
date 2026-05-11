@@ -2,14 +2,14 @@ use naga::Statement;
 
 use crate::error::EvaluatorError;
 
-use super::{Debugger, ParkReason, StepResult, ThreadStatus};
+use super::{DebugThreadId, Debugger, ParkReason, StepResult, ThreadStatus};
 
 impl Debugger {
     pub fn step(&mut self) -> Result<StepResult, EvaluatorError> {
         self.step_gid(self.focused_thread)
     }
 
-    pub fn step_thread(&mut self, thread_id: u64) -> Result<StepResult, EvaluatorError> {
+    pub fn step_thread(&mut self, thread_id: DebugThreadId) -> Result<StepResult, EvaluatorError> {
         self.focus_thread(thread_id)?;
         self.step_gid(self.focused_thread)
     }

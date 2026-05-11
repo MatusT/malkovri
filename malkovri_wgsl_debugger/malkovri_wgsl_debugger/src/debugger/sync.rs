@@ -2,7 +2,7 @@ use naga::Barrier;
 
 use crate::error::EvaluatorError;
 
-use super::{Debugger, ParkReason, ParkScope, ThreadStatus};
+use super::{DebugThreadId, Debugger, ParkReason, ParkScope, ThreadStatus};
 
 impl Debugger {
     pub(super) fn release_ready_parked_threads(&mut self) -> Result<(), EvaluatorError> {
@@ -88,11 +88,11 @@ impl Debugger {
         EvaluatorError::SynchronizationError(format!("{label}: {threads}"))
     }
 
-    pub(super) fn thread_id_for_gid(&self, gid: [u32; 3]) -> u64 {
+    pub(super) fn thread_id_for_gid(&self, gid: [u32; 3]) -> DebugThreadId {
         self.thread_order
             .iter()
             .position(|candidate| *candidate == gid)
-            .map(|index| index as u64 + 1)
+            .map(super::thread_id_for_index)
             .unwrap_or(1)
     }
 

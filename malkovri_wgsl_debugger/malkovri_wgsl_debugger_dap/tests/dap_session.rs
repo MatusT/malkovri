@@ -1,7 +1,7 @@
 use std::{collections::HashMap, path::PathBuf};
 
-use malkovri_wgsl_debugger::{Debugger, GlobalConstants, WorkgroupConfig};
-use malkovri_wgsl_debugger_dap::DebugAdapter;
+use malkovri_wgsl_debugger::{DebugThreadId, Debugger, GlobalConstants, WorkgroupConfig};
+use malkovri_wgsl_debugger_dap::{DebugAdapter, StackFrameId};
 use serde_json::{Value, json};
 
 fn workspace_root() -> PathBuf {
@@ -80,6 +80,13 @@ fn scope_reference(scopes_body: &Value, scope_name: &str) -> u32 {
         .unwrap() as u32
 }
 
+fn top_frame_id(session: &mut Session, thread_id: DebugThreadId) -> StackFrameId {
+    let stack = session.send("stackTrace", json!({ "threadId": thread_id }));
+    response_body(&stack, session.last_seq())["stackFrames"][0]["id"]
+        .as_u64()
+        .unwrap()
+}
+
 fn variables_map(variables_body: &Value) -> HashMap<String, String> {
     variables_body["variables"]
         .as_array()
@@ -94,7 +101,7 @@ fn variables_map(variables_body: &Value) -> HashMap<String, String> {
         .collect()
 }
 
-fn globals_for_thread(session: &mut Session, thread_id: u64) -> HashMap<String, String> {
+fn globals_for_thread(session: &mut Session, thread_id: DebugThreadId) -> HashMap<String, String> {
     let variables = session.send(
         "variables",
         json!({ "variablesReference": (thread_id as u32) * 10 + 3 }),
@@ -191,6 +198,7 @@ fn control_flow_session_matches_vscode_request_flow() {
     let stack = s.send("stackTrace", json!({ "threadId": 1 }));
     let frames = &response_body(&stack, s.last_seq())["stackFrames"];
     assert_eq!(frames[0]["source"]["path"], json!(shader));
+    let frame_id = frames[0]["id"].as_u64().unwrap();
 
     let source = s.send(
         "source",
@@ -206,7 +214,7 @@ fn control_flow_session_matches_vscode_request_flow() {
             .contains("var count = idx % 16u;")
     );
 
-    let scopes = s.send("scopes", json!({ "frameId": 1 }));
+    let scopes = s.send("scopes", json!({ "frameId": frame_id }));
     let scopes_body = response_body(&scopes, s.last_seq());
     let locals_ref = scope_reference(scopes_body, "Locals");
     let arguments_ref = scope_reference(scopes_body, "Function Arguments");
@@ -257,7 +265,8 @@ fn expression_shader_variables_include_binding_backed_values() {
     // Run to the breakpoint so all variables are in scope.
     assert_eq!(event_body(&cfg, "stopped")["reason"], "breakpoint");
 
-    let scopes = s.send("scopes", json!({ "frameId": 1 }));
+    let frame_id = top_frame_id(&mut s, 1);
+    let scopes = s.send("scopes", json!({ "frameId": frame_id }));
     let scopes_body = response_body(&scopes, s.last_seq());
     let locals_ref = scope_reference(scopes_body, "Locals");
     let arguments_ref = scope_reference(scopes_body, "Function Arguments");
@@ -294,7 +303,8 @@ fn local_variables_initialize_at_declaration_time() {
     let cfg = launch_and_configure(&mut s, &shader, &[10]);
     assert_eq!(event_body(&cfg, "stopped")["reason"], "breakpoint");
 
-    let scopes = s.send("scopes", json!({ "frameId": 1 }));
+    let frame_id = top_frame_id(&mut s, 1);
+    let scopes = s.send("scopes", json!({ "frameId": frame_id }));
     let locals_ref = scope_reference(response_body(&scopes, s.last_seq()), "Locals");
 
     let locals = s.send("variables", json!({ "variablesReference": locals_ref }));
@@ -313,7 +323,8 @@ fn loop_local_variables_reinitialize_when_the_loop_body_reenters() {
     let cfg = launch_and_configure(&mut s, &shader, &[12]);
     assert_eq!(event_body(&cfg, "stopped")["reason"], "breakpoint");
 
-    let scopes = s.send("scopes", json!({ "frameId": 1 }));
+    let frame_id = top_frame_id(&mut s, 1);
+    let scopes = s.send("scopes", json!({ "frameId": frame_id }));
     let locals_ref = scope_reference(response_body(&scopes, s.last_seq()), "Locals");
 
     let locals = s.send("variables", json!({ "variablesReference": locals_ref }));
@@ -344,7 +355,8 @@ fn nested_named_expressions_stay_visible_inside_their_block() {
     let cfg = s.send("configurationDone", json!({}));
     assert_eq!(event_body(&cfg, "stopped")["reason"], "breakpoint");
 
-    let scopes = s.send("scopes", json!({ "frameId": 1 }));
+    let frame_id = top_frame_id(&mut s, 1);
+    let scopes = s.send("scopes", json!({ "frameId": frame_id }));
     let locals_ref = scope_reference(response_body(&scopes, s.last_seq()), "Locals");
 
     let locals = s.send("variables", json!({ "variablesReference": locals_ref }));
@@ -387,7 +399,10 @@ fn workgroup_threads_route_stack_and_variables_by_thread_id() {
     let frame_id = response_body(&stack, s.last_seq())["stackFrames"][0]["id"]
         .as_u64()
         .unwrap();
-    assert_eq!(frame_id, 2);
+    assert_ne!(
+        frame_id, 2,
+        "frame ids should be allocated independently from DAP thread ids"
+    );
 
     let scopes = s.send("scopes", json!({ "frameId": frame_id }));
     let arguments_ref = scope_reference(response_body(&scopes, s.last_seq()), "Function Arguments");
@@ -441,7 +456,8 @@ fn private_globals_are_initialized_and_mutable() {
     let cfg = launch_and_configure(&mut s, &shader, &[8]);
     assert_eq!(event_body(&cfg, "stopped")["reason"], "breakpoint");
 
-    let scopes = s.send("scopes", json!({ "frameId": 1 }));
+    let frame_id = top_frame_id(&mut s, 1);
+    let scopes = s.send("scopes", json!({ "frameId": frame_id }));
     let scopes_body = response_body(&scopes, s.last_seq());
     let locals_ref = scope_reference(scopes_body, "Locals");
     let globals_ref = scope_reference(scopes_body, "Globals");
@@ -463,7 +479,8 @@ fn pointer_arguments_write_through_places_and_zero_nested_values() {
     let cfg = launch_and_configure(&mut s, &shader, &[27]);
     assert_eq!(event_body(&cfg, "stopped")["reason"], "breakpoint");
 
-    let scopes = s.send("scopes", json!({ "frameId": 1 }));
+    let frame_id = top_frame_id(&mut s, 1);
+    let scopes = s.send("scopes", json!({ "frameId": frame_id }));
     let scopes_body = response_body(&scopes, s.last_seq());
     let locals_ref = scope_reference(scopes_body, "Locals");
     let globals_ref = scope_reference(scopes_body, "Globals");

@@ -2,25 +2,25 @@ use naga::Statement;
 
 use crate::{function_state::StackFrame, value::Value};
 
-use super::{Debugger, SourceLocation, StackFrameInfo, ThreadStatus, Variable};
+use super::{DebugThreadId, Debugger, SourceLocation, StackFrameInfo, ThreadStatus, Variable};
 
 impl Debugger {
     pub fn current_location(&self) -> Option<SourceLocation> {
         self.location_for_gid(self.focused_thread)
     }
 
-    pub fn thread_current_location(&self, thread_id: u64) -> Option<SourceLocation> {
+    pub fn thread_current_location(&self, thread_id: DebugThreadId) -> Option<SourceLocation> {
         let gid = *self.thread_ids.get(&thread_id)?;
         self.location_for_gid(gid)
     }
 
-    pub fn all_thread_locations(&self) -> Vec<(u64, SourceLocation)> {
+    pub fn all_thread_locations(&self) -> Vec<(DebugThreadId, SourceLocation)> {
         self.thread_order
             .iter()
             .enumerate()
             .filter_map(|(index, gid)| {
                 self.location_for_gid(*gid)
-                    .map(|location| (index as u64 + 1, location))
+                    .map(|location| (super::thread_id_for_index(index), location))
             })
             .collect()
     }
