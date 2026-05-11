@@ -36,6 +36,7 @@ pub struct DebugAdapter {
     configuration_done: bool,
     stop_on_entry: bool,
     single_thread_execution: bool,
+    trace_enabled: bool,
 }
 
 impl Default for DebugAdapter {
@@ -58,6 +59,7 @@ impl DebugAdapter {
             configuration_done: false,
             stop_on_entry: false,
             single_thread_execution: false,
+            trace_enabled: false,
         }
     }
 
@@ -194,6 +196,11 @@ impl DebugAdapter {
             .unwrap_or(false);
         self.single_thread_execution = arguments
             .get("singleThreadExecution")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        self.trace_enabled = arguments
+            .get("trace")
+            .or_else(|| arguments.get("debugTrace"))
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
 
@@ -429,7 +436,7 @@ impl DebugAdapter {
         let source_matches = arguments.source.path.as_deref().map(Path::new) == Some(program_path)
             || arguments.source.name.as_deref() == Some(program_name);
 
-        self.breakpoints = arguments
+        let breakpoints = arguments
             .breakpoints
             .unwrap_or_default()
             .iter()
@@ -451,11 +458,30 @@ impl DebugAdapter {
                 instruction_reference: None,
                 offset: None,
             })
-            .collect();
+            .collect::<Vec<_>>();
 
-        Ok(vec![
-            self.make_response(req.seq, &self.breakpoints.clone())?,
-        ])
+        let mut trace = Vec::new();
+        if self.trace_enabled {
+            let source_path = arguments.source.path.as_deref().unwrap_or("<none>");
+            let source_name = arguments.source.name.as_deref().unwrap_or("<none>");
+            let lines = breakpoints
+                .iter()
+                .filter_map(|bp| bp.line)
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            trace.push(format!(
+                "setBreakpoints source_matches={source_matches} source_name={source_name} source_path={source_path} lines=[{lines}]"
+            ));
+        }
+
+        if source_matches {
+            self.breakpoints = breakpoints.clone();
+        }
+
+        let mut messages = self.make_trace_events(&trace)?;
+        messages.push(self.make_response(req.seq, &dapts::SetBreakpointsResponse { breakpoints })?);
+        Ok(messages)
     }
 
     fn handle_configuration_done(
@@ -522,8 +548,13 @@ impl DebugAdapter {
             self.single_thread_execution || arguments.single_thread.unwrap_or(false);
         let response = self.make_response(req.seq, &serde_json::json!({}))?;
         let thread_id: DebugThreadId = arguments.thread_id;
-        let event = self.run_to_breakpoint(thread_id, single_thread)?;
-        Ok(vec![response, event])
+        let mut trace = Vec::new();
+        let event = self.run_to_breakpoint(thread_id, single_thread, &mut trace)?;
+
+        let mut messages = vec![response];
+        messages.extend(self.make_trace_events(&trace)?);
+        messages.push(event);
+        Ok(messages)
     }
 
     fn handle_disconnect(&mut self, seq: i64) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
@@ -579,6 +610,7 @@ impl DebugAdapter {
         &mut self,
         thread_id: DebugThreadId,
         single_thread: bool,
+        trace: &mut Vec<String>,
     ) -> Result<OutgoingMessage, DebugAdapterError> {
         let debugger = self
             .debugger
@@ -586,9 +618,22 @@ impl DebugAdapter {
             .ok_or_else(|| DebugAdapterError::InvalidProgram("debugger not initialized".into()))?;
         debugger.focus_thread(thread_id)?;
         let breakpoints = &self.breakpoints;
+        if self.trace_enabled {
+            let lines = breakpoints
+                .iter()
+                .filter_map(|bp| bp.line)
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            trace.push(format!(
+                "continue start thread={thread_id} single_thread={single_thread} breakpoints=[{lines}] locations={}",
+                Self::format_thread_locations(debugger),
+            ));
+        }
 
         let mut has_more = false;
         let mut hit_thread_id = thread_id;
+        let mut steps = 0usize;
         loop {
             // Continue is implemented as repeated debugger steps until stop or termination.
             let result = if single_thread {
@@ -596,6 +641,13 @@ impl DebugAdapter {
             } else {
                 debugger.step_all()?
             };
+            steps += 1;
+            if self.trace_enabled {
+                trace.push(format!(
+                    "continue step {steps}: result={result:?} locations={}",
+                    Self::format_thread_locations(debugger),
+                ));
+            }
             match result {
                 StepResult::Finished => break,
                 StepResult::Continue => {
@@ -611,12 +663,19 @@ impl DebugAdapter {
                     };
 
                     if let Some((candidate_thread_id, line)) = hit {
+                        if self.trace_enabled {
+                            trace.push(format!(
+                                "breakpoint candidate thread={candidate_thread_id} line={line}"
+                            ));
+                        }
                         // Converged lines can be reached by fast lanes before slower lanes catch up.
                         if !single_thread {
                             hit_thread_id = Self::catch_up_threads_to_breakpoint(
                                 debugger,
                                 candidate_thread_id,
                                 line,
+                                trace,
+                                self.trace_enabled,
                             )?;
                         } else {
                             hit_thread_id = candidate_thread_id;
@@ -662,6 +721,8 @@ impl DebugAdapter {
         debugger: &mut Debugger,
         hit_thread_id: DebugThreadId,
         target_line: u32,
+        trace: &mut Vec<String>,
+        trace_enabled: bool,
     ) -> Result<DebugThreadId, DebugAdapterError> {
         let mut remaining_step_budget = BREAKPOINT_CATCH_UP_STEP_BUDGET;
 
@@ -674,6 +735,12 @@ impl DebugAdapter {
 
             // If every live thread reports this line, VS Code will show a coherent stop.
             if locations.iter().all(|(_, loc)| loc.line == target_line) {
+                if trace_enabled {
+                    trace.push(format!(
+                        "catch-up complete target_line={target_line} locations={}",
+                        Self::format_thread_locations(debugger),
+                    ));
+                }
                 return Ok(first_at_target.unwrap_or(hit_thread_id));
             }
 
@@ -684,6 +751,12 @@ impl DebugAdapter {
                 .collect::<Vec<_>>();
 
             if candidates.is_empty() {
+                if trace_enabled {
+                    trace.push(format!(
+                        "catch-up stopped target_line={target_line}; no candidates locations={}",
+                        Self::format_thread_locations(debugger),
+                    ));
+                }
                 return Ok(first_at_target.unwrap_or(hit_thread_id));
             }
 
@@ -692,6 +765,12 @@ impl DebugAdapter {
             // reconverges at this breakpoint.
             for candidate_thread_id in candidates {
                 debugger.step_thread(candidate_thread_id)?;
+                if trace_enabled {
+                    trace.push(format!(
+                        "catch-up stepped thread={candidate_thread_id} locations={}",
+                        Self::format_thread_locations(debugger),
+                    ));
+                }
                 remaining_step_budget = remaining_step_budget.saturating_sub(1);
                 if remaining_step_budget == 0 {
                     return Ok(first_at_target.unwrap_or(hit_thread_id));
@@ -705,8 +784,42 @@ impl DebugAdapter {
             self.make_stopped_event(dapts::StoppedEventReason::Entry)
         } else {
             let thread_id = self.debugger()?.focused_thread_id();
-            self.run_to_breakpoint(thread_id, false)
+            self.run_to_breakpoint(thread_id, false, &mut Vec::new())
         }
+    }
+
+    fn format_thread_locations(debugger: &Debugger) -> String {
+        debugger
+            .all_thread_locations()
+            .into_iter()
+            .map(|(thread_id, loc)| {
+                let function = loc.function_name.unwrap_or_else(|| "unknown".to_string());
+                format!("{thread_id}:{function}:{}:{}", loc.line, loc.column)
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn make_trace_events(
+        &mut self,
+        trace: &[String],
+    ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
+        if !self.trace_enabled {
+            return Ok(Vec::new());
+        }
+
+        trace
+            .iter()
+            .map(|line| {
+                self.make_event(
+                    "output",
+                    &serde_json::json!({
+                        "category": "console",
+                        "output": format!("[wgsl-debugger] {line}\n"),
+                    }),
+                )
+            })
+            .collect()
     }
 
     fn make_stopped_event(

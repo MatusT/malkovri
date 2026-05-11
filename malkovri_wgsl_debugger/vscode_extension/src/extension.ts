@@ -141,6 +141,7 @@ interface DapMessage {
   type: string;
   seq: number;
   command: string;
+  arguments?: Record<string, unknown>;
 }
 
 class WasmDebugAdapterImpl implements vscode.DebugAdapter {
@@ -150,6 +151,7 @@ class WasmDebugAdapterImpl implements vscode.DebugAdapter {
   readonly onDidSendMessage: vscode.Event<vscode.DebugProtocolMessage> =
     this._onDidSendMessage.event;
   private adapter: WgslDebugAdapter;
+  private trace = false;
 
   constructor(private readonly outputChannel: vscode.OutputChannel) {
     this.adapter = new WgslDebugAdapter();
@@ -157,8 +159,18 @@ class WasmDebugAdapterImpl implements vscode.DebugAdapter {
 
   handleMessage(message: vscode.DebugProtocolMessage): void {
     try {
+      const m = message as DapMessage & vscode.DebugProtocolMessage;
+      if (m.type === "request" && m.command === "launch") {
+        this.trace = m.arguments?.trace === true ||
+          m.arguments?.debugTrace === true;
+      }
+      if (this.trace && m.type === "request") {
+        this.outputChannel.appendLine(`[DAP <-] ${JSON.stringify(message)}`);
+      }
+
       const responses = this.adapter.handleMessage(JSON.stringify(message));
       for (const json of responses) {
+        if (this.trace) this.outputChannel.appendLine(`[DAP ->] ${json}`);
         this._onDidSendMessage.fire(
           JSON.parse(json) as vscode.DebugProtocolMessage,
         );

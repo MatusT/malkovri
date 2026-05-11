@@ -10,6 +10,7 @@
 			"request": "launch",
 			"name": "Debug test_call_stack.wgsl",
 			"program": "${workspaceFolder}/test_call_stack.wgsl",
+			"trace": true,
 			"workgroupConfig": {
 				"workgroupSize": [1, 1, 1],
 				"workgroupId": [0, 0, 0],

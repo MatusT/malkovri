@@ -186,7 +186,10 @@ fn control_flow_session_matches_vscode_request_flow() {
             "breakpoints": [{ "line": 24 }],
         }),
     );
-    assert_eq!(response_body(&bp, s.last_seq())[0]["verified"], true);
+    assert_eq!(
+        response_body(&bp, s.last_seq())["breakpoints"][0]["verified"],
+        true
+    );
 
     let cfg = s.send("configurationDone", json!({}));
     let cfg_seq = s.last_seq();
@@ -852,4 +855,92 @@ fn stack_trace_returns_all_call_frames() {
     assert_eq!(frames.len(), 2);
     assert_eq!(frames[0]["name"], "helper");
     assert_eq!(frames[1]["name"], "main");
+}
+
+#[test]
+fn continue_from_call_site_breakpoint_stops_inside_called_function() {
+    let mut s = Session::new();
+    let shader = shader_path("test_call_stack.wgsl");
+
+    let cfg = launch_and_configure(&mut s, &shader, &[4, 10]);
+    assert_eq!(event_body(&cfg, "stopped")["reason"], "breakpoint");
+    assert_eq!(top_frame_line(&mut s, 1), 10);
+
+    let cont = s.send("continue", json!({ "threadId": 1 }));
+    assert_eq!(event_body(&cont, "stopped")["reason"], "breakpoint");
+
+    let stack = s.send("stackTrace", json!({ "threadId": 1 }));
+    let frames = response_body(&stack, s.last_seq())["stackFrames"]
+        .as_array()
+        .unwrap();
+    assert_eq!(frames[0]["name"], "helper");
+    assert_eq!(frames[0]["line"], 4);
+    assert_eq!(frames[1]["name"], "main");
+}
+
+#[test]
+fn unrelated_source_breakpoints_do_not_replace_program_breakpoints() {
+    let mut s = Session::new();
+    let shader = shader_path("test_call_stack.wgsl");
+
+    s.send("initialize", json!({}));
+    s.send(
+        "launch",
+        json!({
+            "program": shader,
+        }),
+    );
+    s.send("setBreakpoints", json!({
+        "source": { "name": PathBuf::from(&shader).file_name().unwrap().to_string_lossy(), "path": shader },
+        "breakpoints": [{ "line": 4 }, { "line": 10 }],
+    }));
+    s.send(
+        "setBreakpoints",
+        json!({
+            "source": { "name": "other.wgsl", "path": "/tmp/other.wgsl" },
+            "breakpoints": [{ "line": 13 }],
+        }),
+    );
+    let cfg = s.send("configurationDone", json!({}));
+    assert_eq!(event_body(&cfg, "stopped")["reason"], "breakpoint");
+    assert_eq!(top_frame_line(&mut s, 1), 10);
+
+    let cont = s.send("continue", json!({ "threadId": 1 }));
+    assert_eq!(event_body(&cont, "stopped")["reason"], "breakpoint");
+
+    let stack = s.send("stackTrace", json!({ "threadId": 1 }));
+    let frames = response_body(&stack, s.last_seq())["stackFrames"]
+        .as_array()
+        .unwrap();
+    assert_eq!(frames[0]["name"], "helper");
+    assert_eq!(frames[0]["line"], 4);
+}
+
+#[test]
+fn call_stack_shader_stop_on_entry_does_not_terminate_immediately() {
+    let mut s = Session::new();
+    let shader = shader_path("test_call_stack.wgsl");
+
+    s.send("initialize", json!({}));
+    s.send(
+        "launch",
+        json!({
+            "program": shader,
+            "stopOnEntry": true,
+        }),
+    );
+    s.send("setBreakpoints", json!({
+        "source": { "name": PathBuf::from(&shader).file_name().unwrap().to_string_lossy(), "path": shader },
+        "breakpoints": [],
+    }));
+    let cfg = s.send("configurationDone", json!({}));
+    assert_eq!(event_body(&cfg, "stopped")["reason"], "entry");
+    assert_eq!(top_frame_line(&mut s, 1), 10);
+
+    let stack = s.send("stackTrace", json!({ "threadId": 1 }));
+    let frames = response_body(&stack, s.last_seq())["stackFrames"]
+        .as_array()
+        .unwrap();
+    assert_eq!(frames[0]["name"], "main");
+    assert_eq!(frames[0]["line"], 10);
 }
