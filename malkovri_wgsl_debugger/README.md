@@ -7,6 +7,8 @@ A DAP (Debug Adapter Protocol) debugger for WGSL shaders, with a VS Code extensi
 
 Simulates shader execution on the CPU using [naga](https://github.com/gfx-rs/naga) and exposes (so far) step-through, and variable inspection via the standard debug adapter protocol.
 
+![VS Code demo of the WGSL debugger](docs/vscode-demo.gif)
+
 Supported:
 - [x] Basic compute shaders
 - [x] Basic buffer global inputs
