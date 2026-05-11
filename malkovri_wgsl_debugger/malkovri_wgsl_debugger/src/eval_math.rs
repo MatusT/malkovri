@@ -71,10 +71,10 @@ impl Evaluator {
         arg3: Option<Handle<Expression>>,
         func_idx: usize,
     ) -> Value {
-        let a = self.eval_expr(arg, func_idx).leaf_value();
-        let b = arg1.map(|h| self.eval_expr(h, func_idx).leaf_value());
-        let c = arg2.map(|h| self.eval_expr(h, func_idx).leaf_value());
-        let _d = arg3.map(|h| self.eval_expr(h, func_idx).leaf_value());
+        let a = self.eval_value(arg, func_idx);
+        let b = arg1.map(|h| self.eval_value(h, func_idx));
+        let c = arg2.map(|h| self.eval_value(h, func_idx));
+        let _d = arg3.map(|h| self.eval_value(h, func_idx));
 
         match fun {
             // --- Comparison ---

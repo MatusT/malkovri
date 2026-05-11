@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use naga::{Expression, Function, Handle, LocalVariable};
 
-use crate::value::Value;
+use crate::{place::ArgumentValue, place::ExpressionCache, value::Value};
 
 /// Control-flow signal set on a [`FunctionFrame`] by `break`, `continue`, or `return`.
 /// [`Evaluator::step`] reads these signals and performs the appropriate stack
@@ -50,8 +50,8 @@ pub(crate) struct FunctionFrame {
     /// Reference to the function in the module.
     pub(crate) function_ref: FunctionRef,
     pub(crate) local_variables: HashMap<Handle<LocalVariable>, Value>,
-    pub(crate) evaluated_expressions: HashMap<Handle<Expression>, Value>,
-    pub(crate) evaluated_function_arguments: Vec<Value>,
+    pub(crate) evaluated_expressions: ExpressionCache,
+    pub(crate) evaluated_function_arguments: Vec<ArgumentValue>,
     /// The top-level statements of the function body.
     pub(crate) statements: naga::Block,
     pub(crate) current_statement_index: usize,

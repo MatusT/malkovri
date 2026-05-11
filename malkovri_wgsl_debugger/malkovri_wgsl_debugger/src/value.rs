@@ -1,7 +1,7 @@
-use naga::TypeInner;
+use naga::{ArraySize, Module, Scalar, ScalarKind, TypeInner, VectorSize};
 use std::ops::{Add, BitAnd, BitOr, BitXor, Div, Mul, Rem, Shl, Shr, Sub};
-use std::{cell::RefCell, rc::Rc};
 
+use crate::place::PlaceSegment;
 use crate::primitive::Primitive;
 
 #[derive(Clone, Debug, Default)]
@@ -12,7 +12,6 @@ pub enum Value {
     Array(Vec<Value>),
     /// Named fields in declaration order.
     Struct(Vec<(String, Value)>),
-    Pointer(Rc<RefCell<Value>>),
 }
 
 // ── Core accessors ─────────────────────────────────────────────────────────────
@@ -26,13 +25,6 @@ impl Value {
             Value::Primitive(Primitive::U32(v)) => *v != 0,
             Value::Primitive(Primitive::I32(v)) => *v != 0,
             _ => false,
-        }
-    }
-
-    pub fn leaf_value(&self) -> Value {
-        match self {
-            Value::Pointer(inner) => inner.borrow().leaf_value(),
-            _ => self.clone(),
         }
     }
 
@@ -56,11 +48,26 @@ impl Value {
         }
     }
 
-    pub fn assign_path(&mut self, path: &[usize], value: Value) -> Result<(), String> {
-        let Some((index, rest)) = path.split_first() else {
+    pub(crate) fn at_path(&self, path: &[PlaceSegment]) -> Value {
+        let Some((segment, rest)) = path.split_first() else {
+            return self.clone();
+        };
+
+        match segment {
+            PlaceSegment::Index(index) => self.index_into(*index).at_path(rest),
+        }
+    }
+
+    pub(crate) fn assign_path(
+        &mut self,
+        path: &[PlaceSegment],
+        value: Value,
+    ) -> Result<(), String> {
+        let Some((segment, rest)) = path.split_first() else {
             *self = value;
             return Ok(());
         };
+        let PlaceSegment::Index(index) = segment;
 
         match self {
             Value::Array(elements) => {
@@ -83,9 +90,74 @@ impl Value {
                     .assign_component(*index, value)
                     .map_err(str::to_string)
             }
-            Value::Pointer(inner) => inner.borrow_mut().assign_path(path, value),
             other => Err(format!("cannot assign through {:?}", other)),
         }
+    }
+
+    pub(crate) fn zero(module: &Module, ty: naga::Handle<naga::Type>) -> Self {
+        let ty_inner = &module.types[ty].inner;
+        match ty_inner {
+            TypeInner::Array { base, size, .. } => match size {
+                ArraySize::Constant(count) => Value::Array(
+                    (0..count.get())
+                        .map(|_| Value::zero(module, *base))
+                        .collect(),
+                ),
+                ArraySize::Pending(_) | ArraySize::Dynamic => Value::Array(Vec::new()),
+            },
+            TypeInner::Struct { members, .. } => Value::Struct(
+                members
+                    .iter()
+                    .map(|member| {
+                        (
+                            member.name.clone().unwrap_or_default(),
+                            Value::zero(module, member.ty),
+                        )
+                    })
+                    .collect(),
+            ),
+            TypeInner::Atomic(scalar) => zero_scalar(*scalar)
+                .map(Value::Primitive)
+                .unwrap_or(Value::Uninitialized),
+            TypeInner::Matrix {
+                columns,
+                rows,
+                scalar,
+            } => {
+                let column = TypeInner::Vector {
+                    size: *rows,
+                    scalar: *scalar,
+                };
+                let Some(column) = Primitive::try_from(&column).ok().map(Value::Primitive) else {
+                    return Value::Uninitialized;
+                };
+                Value::Array(vec![column; vector_size_len(*columns)])
+            }
+            _ => Primitive::try_from(ty_inner)
+                .map(Value::Primitive)
+                .unwrap_or(Value::Uninitialized),
+        }
+    }
+}
+
+fn vector_size_len(size: VectorSize) -> usize {
+    match size {
+        VectorSize::Bi => 2,
+        VectorSize::Tri => 3,
+        VectorSize::Quad => 4,
+    }
+}
+
+fn zero_scalar(scalar: Scalar) -> Option<Primitive> {
+    match (scalar.kind, scalar.width) {
+        (ScalarKind::Float, 4) => Some(Primitive::F32(0.0)),
+        (ScalarKind::Float, 8) => Some(Primitive::F64(0.0)),
+        (ScalarKind::Sint, 4) => Some(Primitive::I32(0)),
+        (ScalarKind::Sint, 8) => Some(Primitive::I64(0)),
+        (ScalarKind::Uint, 4) => Some(Primitive::U32(0)),
+        (ScalarKind::Uint, 8) => Some(Primitive::U64(0)),
+        (ScalarKind::Bool, _) => Some(Primitive::U32(0)),
+        _ => None,
     }
 }
 
@@ -330,7 +402,7 @@ impl IntoIterator for Value {
     type IntoIter = std::vec::IntoIter<Value>;
 
     fn into_iter(self) -> Self::IntoIter {
-        match self.leaf_value() {
+        match self {
             Value::Array(elements) => elements.into_iter(),
             Value::Primitive(p) => p
                 .into_iter()
@@ -355,7 +427,6 @@ impl PartialEq for Value {
             (Value::Primitive(a), Value::Primitive(b)) => a == b,
             (Value::Array(a), Value::Array(b)) => a == b,
             (Value::Struct(a), Value::Struct(b)) => a == b,
-            (Value::Pointer(a), Value::Pointer(b)) => Rc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -375,7 +446,7 @@ impl PartialOrd for Value {
 impl Add for Value {
     type Output = Value;
     fn add(self, rhs: Self) -> Value {
-        match (self.leaf_value(), rhs.leaf_value()) {
+        match (self, rhs) {
             (Value::Array(a), Value::Array(b)) if a.len() == b.len() => {
                 Value::Array(a.into_iter().zip(b).map(|(x, y)| x + y).collect())
             }
@@ -388,7 +459,7 @@ impl Add for Value {
 impl Sub for Value {
     type Output = Value;
     fn sub(self, rhs: Self) -> Value {
-        match (self.leaf_value(), rhs.leaf_value()) {
+        match (self, rhs) {
             (Value::Array(a), Value::Array(b)) if a.len() == b.len() => {
                 Value::Array(a.into_iter().zip(b).map(|(x, y)| x - y).collect())
             }
@@ -401,7 +472,7 @@ impl Sub for Value {
 impl Mul for Value {
     type Output = Value;
     fn mul(self, rhs: Self) -> Value {
-        match (self.leaf_value(), rhs.leaf_value()) {
+        match (self, rhs) {
             (Value::Array(a), Value::Array(b)) if a.len() == b.len() => {
                 Value::Array(a.into_iter().zip(b).map(|(x, y)| x * y).collect())
             }
@@ -414,7 +485,7 @@ impl Mul for Value {
 impl Div for Value {
     type Output = Value;
     fn div(self, rhs: Self) -> Value {
-        match (self.leaf_value(), rhs.leaf_value()) {
+        match (self, rhs) {
             (Value::Array(a), Value::Array(b)) if a.len() == b.len() => {
                 Value::Array(a.into_iter().zip(b).map(|(x, y)| x / y).collect())
             }
@@ -427,7 +498,7 @@ impl Div for Value {
 impl Rem for Value {
     type Output = Value;
     fn rem(self, rhs: Self) -> Value {
-        match (self.leaf_value(), rhs.leaf_value()) {
+        match (self, rhs) {
             (Value::Array(a), Value::Array(b)) if a.len() == b.len() => {
                 Value::Array(a.into_iter().zip(b).map(|(x, y)| x % y).collect())
             }
@@ -440,7 +511,7 @@ impl Rem for Value {
 impl BitAnd for Value {
     type Output = Value;
     fn bitand(self, rhs: Self) -> Value {
-        match (self.leaf_value(), rhs.leaf_value()) {
+        match (self, rhs) {
             (Value::Primitive(a), Value::Primitive(b)) => Value::Primitive(a & b),
             (a, b) => panic!("Value::bitand type mismatch: {:?} & {:?}", a, b),
         }
@@ -450,7 +521,7 @@ impl BitAnd for Value {
 impl BitOr for Value {
     type Output = Value;
     fn bitor(self, rhs: Self) -> Value {
-        match (self.leaf_value(), rhs.leaf_value()) {
+        match (self, rhs) {
             (Value::Primitive(a), Value::Primitive(b)) => Value::Primitive(a | b),
             (a, b) => panic!("Value::bitor type mismatch: {:?} | {:?}", a, b),
         }
@@ -460,7 +531,7 @@ impl BitOr for Value {
 impl BitXor for Value {
     type Output = Value;
     fn bitxor(self, rhs: Self) -> Value {
-        match (self.leaf_value(), rhs.leaf_value()) {
+        match (self, rhs) {
             (Value::Primitive(a), Value::Primitive(b)) => Value::Primitive(a ^ b),
             (a, b) => panic!("Value::bitxor type mismatch: {:?} ^ {:?}", a, b),
         }
@@ -470,7 +541,7 @@ impl BitXor for Value {
 impl Shl for Value {
     type Output = Value;
     fn shl(self, rhs: Self) -> Value {
-        match (self.leaf_value(), rhs.leaf_value()) {
+        match (self, rhs) {
             (Value::Primitive(a), Value::Primitive(b)) => Value::Primitive(a << b),
             (a, b) => panic!("Value::shl type mismatch: {:?} << {:?}", a, b),
         }
@@ -480,7 +551,7 @@ impl Shl for Value {
 impl Shr for Value {
     type Output = Value;
     fn shr(self, rhs: Self) -> Value {
-        match (self.leaf_value(), rhs.leaf_value()) {
+        match (self, rhs) {
             (Value::Primitive(a), Value::Primitive(b)) => Value::Primitive(a >> b),
             (a, b) => panic!("Value::shr type mismatch: {:?} >> {:?}", a, b),
         }

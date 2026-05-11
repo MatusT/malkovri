@@ -382,3 +382,33 @@ fn private_globals_are_initialized_and_mutable() {
     let globals = variables_map(response_body(&globals, s.last_seq()));
     assert_eq!(globals["counter"], "Primitive(U32(8))");
 }
+
+#[test]
+fn pointer_arguments_write_through_places_and_zero_nested_values() {
+    let mut s = Session::new();
+    let shader = shader_path("test_pointer_places.wgsl");
+
+    let cfg = launch_and_configure(&mut s, &shader, &[27]);
+    assert_eq!(event_body(&cfg, "stopped")["reason"], "breakpoint");
+
+    let scopes = s.send("scopes", json!({ "frameId": 1 }));
+    let scopes_body = response_body(&scopes, s.last_seq());
+    let locals_ref = scope_reference(scopes_body, "Locals");
+    let globals_ref = scope_reference(scopes_body, "Globals");
+
+    let locals = s.send("variables", json!({ "variablesReference": locals_ref }));
+    let locals = variables_map(response_body(&locals, s.last_seq()));
+    assert_eq!(locals["x"], "Primitive(U32(5))");
+    assert_eq!(locals["stop_here"], "Primitive(U32(21))");
+    assert_eq!(
+        locals["s"],
+        "Struct([(\"value\", Primitive(U32(7))), (\"more\", Array([Primitive(U32(0)), Primitive(U32(9))]))])"
+    );
+
+    let cont = s.send("continue", json!({ "threadId": 1 }));
+    assert_eq!(event_body(&cont, "terminated"), &json!({}));
+
+    let globals = s.send("variables", json!({ "variablesReference": globals_ref }));
+    let globals = variables_map(response_body(&globals, s.last_seq()));
+    assert_eq!(globals["sink"], "Primitive(U32(21))");
+}

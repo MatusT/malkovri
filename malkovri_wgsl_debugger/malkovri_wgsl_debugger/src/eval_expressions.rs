@@ -1,10 +1,14 @@
-use crate::{evaluator::Evaluator, function_state::StackFrame, primitive::Primitive, value::Value};
-
-use std::{cell::RefCell, rc::Rc};
+use crate::{
+    evaluator::Evaluator,
+    function_state::StackFrame,
+    place::{ArgumentValue, EvaluatedExpression, Place, PlaceRoot},
+    primitive::Primitive,
+    value::Value,
+};
 
 use naga::{
-    Expression, GlobalVariable, Handle, Literal, LocalVariable, SwizzleComponent, Type, TypeInner,
-    UnaryOperator, VectorSize,
+    Expression, Handle, Literal, LocalVariable, SwizzleComponent, Type, TypeInner, UnaryOperator,
+    VectorSize,
 };
 
 impl Evaluator {
@@ -13,7 +17,28 @@ impl Evaluator {
         let Ok(func_idx) = self.current_function_frame_index() else {
             return Value::Uninitialized;
         };
-        self.eval_expr(expression_handle, func_idx)
+        self.eval_value(expression_handle, func_idx)
+    }
+
+    pub(crate) fn evaluate_argument(&self, expression_handle: Handle<Expression>) -> ArgumentValue {
+        let Ok(func_idx) = self.current_function_frame_index() else {
+            return ArgumentValue::Value(Value::Uninitialized);
+        };
+        match self.eval_expr(expression_handle, func_idx) {
+            EvaluatedExpression::Value(value) => ArgumentValue::Value(value),
+            EvaluatedExpression::Place(place) => ArgumentValue::Place(place),
+        }
+    }
+
+    pub(crate) fn eval_value(
+        &self,
+        expression_handle: Handle<Expression>,
+        func_idx: usize,
+    ) -> Value {
+        match self.eval_expr(expression_handle, func_idx) {
+            EvaluatedExpression::Value(value) => value,
+            EvaluatedExpression::Place(place) => self.read_place(&place),
+        }
     }
 
     /// Internal expression evaluator that takes a pre-computed function frame index.
@@ -22,59 +47,72 @@ impl Evaluator {
         &self,
         expression_handle: Handle<Expression>,
         func_idx: usize,
-    ) -> Value {
+    ) -> EvaluatedExpression {
         let StackFrame::Function(ref frame) = self.stack[func_idx] else {
-            return Value::Uninitialized;
+            return Value::Uninitialized.into();
         };
         let function = self.resolve_function(&frame.function_ref);
         let expression = &function.expressions[expression_handle];
 
         match expression {
-            Expression::Literal(literal) => self.evaluate_literal(literal),
-            Expression::Constant(handle) => {
-                self.evaluate_global_expression(self.module.constants[*handle].init)
-            }
+            Expression::Literal(literal) => self.evaluate_literal(literal).into(),
+            Expression::Constant(handle) => self
+                .evaluate_global_expression(self.module.constants[*handle].init)
+                .into(),
             Expression::Override(handle) => match self.module.overrides[*handle].init {
-                Some(init) => self.evaluate_global_expression(init),
-                None => Value::Uninitialized,
+                Some(init) => self.evaluate_global_expression(init).into(),
+                None => Value::Uninitialized.into(),
             },
-            Expression::ZeroValue(ty) => Value::from(&self.module.types[*ty].inner),
+            Expression::ZeroValue(ty) => Value::zero(&self.module, *ty).into(),
             Expression::Compose { ty, components } => {
-                self.evaluate_compose(*ty, components, func_idx)
+                self.evaluate_compose(*ty, components, func_idx).into()
             }
-            Expression::Splat { size, value } => self.evaluate_splat(*size, *value, func_idx),
+            Expression::Splat { size, value } => {
+                self.evaluate_splat(*size, *value, func_idx).into()
+            }
             Expression::Swizzle {
                 size,
                 vector,
                 pattern,
-            } => self.evaluate_swizzle(*size, *vector, *pattern, func_idx),
-            Expression::Load { pointer } => self.evaluate_load(*pointer, func_idx),
+            } => self
+                .evaluate_swizzle(*size, *vector, *pattern, func_idx)
+                .into(),
+            Expression::Load { pointer } => self.evaluate_load(*pointer, func_idx).into(),
             Expression::AccessIndex { base, index } => {
                 self.evaluate_access_index(*base, *index, func_idx)
             }
             Expression::FunctionArgument(index) => {
-                self.evaluate_function_argument(*index as usize, func_idx)
+                match self.evaluate_argument_at(*index as usize, func_idx) {
+                    ArgumentValue::Value(value) => value.into(),
+                    ArgumentValue::Place(place) => place.into(),
+                }
             }
-            Expression::LocalVariable(handle) => self.evaluate_local_variable(*handle, func_idx),
+            Expression::LocalVariable(handle) => Place::new(PlaceRoot::Local {
+                function_frame_index: func_idx,
+                handle: *handle,
+            })
+            .into(),
             Expression::Binary { op, left, right } => {
-                self.evaluate_binary(*op, *left, *right, func_idx)
+                self.evaluate_binary(*op, *left, *right, func_idx).into()
             }
             Expression::Unary { op, expr } => {
-                let val = self.eval_expr(*expr, func_idx).leaf_value();
-                self.evaluate_unary(*op, val)
+                let val = self.eval_value(*expr, func_idx);
+                self.evaluate_unary(*op, val).into()
             }
             Expression::Select {
                 condition,
                 accept,
                 reject,
-            } => self.evaluate_select(*condition, *accept, *reject, func_idx),
+            } => self
+                .evaluate_select(*condition, *accept, *reject, func_idx)
+                .into(),
             Expression::As {
                 expr,
                 kind,
                 convert,
             } => {
-                let val = self.eval_expr(*expr, func_idx);
-                crate::eval_cast::evaluate_as(val, *kind, *convert)
+                let val = self.eval_value(*expr, func_idx);
+                crate::eval_cast::evaluate_as(val, *kind, *convert).into()
             }
             Expression::Math {
                 fun,
@@ -82,19 +120,24 @@ impl Evaluator {
                 arg1,
                 arg2,
                 arg3,
-            } => self.evaluate_math(*fun, *arg, *arg1, *arg2, *arg3, func_idx),
+            } => self
+                .evaluate_math(*fun, *arg, *arg1, *arg2, *arg3, func_idx)
+                .into(),
             Expression::Relational { fun, argument } => {
-                let val = self.eval_expr(*argument, func_idx).leaf_value();
-                self.evaluate_relational(*fun, val)
+                let val = self.eval_value(*argument, func_idx);
+                self.evaluate_relational(*fun, val).into()
             }
             Expression::ArrayLength(expr) => {
-                let argument = self.eval_expr(*expr, func_idx).leaf_value();
+                let argument = self.eval_value(*expr, func_idx);
                 match argument {
-                    Value::Array(elements) => Primitive::U32(elements.len() as u32).into(),
+                    Value::Array(elements) => Value::from(Primitive::U32(elements.len() as u32)),
                     _ => Value::Uninitialized,
                 }
+                .into()
             }
-            Expression::GlobalVariable(handle) => self.evaluate_global_variable(*handle),
+            Expression::GlobalVariable(handle) => {
+                Place::new(PlaceRoot::Global { handle: *handle }).into()
+            }
             Expression::Access { base, index } => self.evaluate_access(*base, *index, func_idx),
             Expression::CallResult(_) => {
                 // The return value was stored in evaluated_expressions by apply_return,
@@ -104,8 +147,9 @@ impl Evaluator {
                     .get(&expression_handle)
                     .cloned()
                     .unwrap_or(Value::Uninitialized)
+                    .into()
             }
-            _ => Value::Uninitialized,
+            _ => Value::Uninitialized.into(),
         }
     }
 
@@ -132,12 +176,8 @@ impl Evaluator {
             return value;
         }
         match self.eval_expr(pointer, func_idx) {
-            Value::Pointer(inner) => inner.borrow().clone(),
-            // Access into a global storage array evaluates directly to a value
-            // (not a pointer) because global_values stores plain Value::Array.
-            // Return it as-is rather than falling through to Uninitialized.
-            Value::Uninitialized => Value::Uninitialized,
-            value => value,
+            EvaluatedExpression::Place(place) => self.read_place(&place),
+            EvaluatedExpression::Value(value) => value,
         }
     }
 
@@ -146,14 +186,23 @@ impl Evaluator {
         base: Handle<Expression>,
         index: u32,
         func_idx: usize,
-    ) -> Value {
-        let value = self.eval_expr(base, func_idx).leaf_value();
-        value.index_into(index as usize)
+    ) -> EvaluatedExpression {
+        match self.eval_expr(base, func_idx) {
+            EvaluatedExpression::Place(place) => place.with_index(index as usize).into(),
+            EvaluatedExpression::Value(value) => value.index_into(index as usize).into(),
+        }
     }
 
     pub(crate) fn evaluate_function_argument(&self, index: usize, func_idx: usize) -> Value {
+        match self.evaluate_argument_at(index, func_idx) {
+            ArgumentValue::Value(value) => value,
+            ArgumentValue::Place(place) => self.read_place(&place),
+        }
+    }
+
+    pub(crate) fn evaluate_argument_at(&self, index: usize, func_idx: usize) -> ArgumentValue {
         let StackFrame::Function(ref frame) = self.stack[func_idx] else {
-            return Value::Uninitialized;
+            return ArgumentValue::Value(Value::Uninitialized);
         };
         let function = self.resolve_function(&frame.function_ref);
         let function_argument = &function.arguments[index];
@@ -164,80 +213,106 @@ impl Evaluator {
             match binding {
                 naga::ir::Binding::BuiltIn(built_in) => match built_in {
                     // vertex — per-thread
-                    naga::ir::BuiltIn::VertexIndex => {
-                        Primitive::U32(thread.vertex_inputs.vertex_index).into()
-                    }
-                    naga::ir::BuiltIn::InstanceIndex => {
-                        Primitive::U32(thread.vertex_inputs.instance_index).into()
-                    }
+                    naga::ir::BuiltIn::VertexIndex => ArgumentValue::Value(
+                        Primitive::U32(thread.vertex_inputs.vertex_index).into(),
+                    ),
+                    naga::ir::BuiltIn::InstanceIndex => ArgumentValue::Value(
+                        Primitive::U32(thread.vertex_inputs.instance_index).into(),
+                    ),
                     // vertex — global constants
-                    naga::ir::BuiltIn::BaseInstance => Primitive::U32(gc.base_instance).into(),
-                    naga::ir::BuiltIn::BaseVertex => Primitive::I32(gc.base_vertex).into(),
-                    naga::ir::BuiltIn::ClipDistance => Value::Array(
+                    naga::ir::BuiltIn::BaseInstance => {
+                        ArgumentValue::Value(Primitive::U32(gc.base_instance).into())
+                    }
+                    naga::ir::BuiltIn::BaseVertex => {
+                        ArgumentValue::Value(Primitive::I32(gc.base_vertex).into())
+                    }
+                    naga::ir::BuiltIn::ClipDistance => ArgumentValue::Value(Value::Array(
                         gc.clip_distance
                             .iter()
                             .map(|&v| Primitive::F32(v).into())
                             .collect(),
-                    ),
-                    naga::ir::BuiltIn::CullDistance => Value::Array(
+                    )),
+                    naga::ir::BuiltIn::CullDistance => ArgumentValue::Value(Value::Array(
                         gc.cull_distance
                             .iter()
                             .map(|&v| Primitive::F32(v).into())
                             .collect(),
-                    ),
-                    naga::ir::BuiltIn::PointSize => Primitive::F32(gc.point_size).into(),
-                    naga::ir::BuiltIn::DrawID => Primitive::U32(gc.draw_id).into(),
+                    )),
+                    naga::ir::BuiltIn::PointSize => {
+                        ArgumentValue::Value(Primitive::F32(gc.point_size).into())
+                    }
+                    naga::ir::BuiltIn::DrawID => {
+                        ArgumentValue::Value(Primitive::U32(gc.draw_id).into())
+                    }
                     // fragment — per-thread
-                    naga::ir::BuiltIn::Position { .. } => {
-                        Primitive::F32x4(thread.fragment_inputs.position).into()
-                    }
-                    naga::ir::BuiltIn::FrontFacing => {
-                        Primitive::U32(thread.fragment_inputs.front_facing as u32).into()
-                    }
-                    naga::ir::BuiltIn::SampleIndex => {
-                        Primitive::U32(thread.fragment_inputs.sample_index).into()
-                    }
-                    naga::ir::BuiltIn::SampleMask => {
-                        Primitive::U32(thread.fragment_inputs.sample_mask).into()
-                    }
-                    naga::ir::BuiltIn::PrimitiveIndex => {
-                        Primitive::U32(thread.fragment_inputs.primitive_index).into()
-                    }
+                    naga::ir::BuiltIn::Position { .. } => ArgumentValue::Value(
+                        Primitive::F32x4(thread.fragment_inputs.position).into(),
+                    ),
+                    naga::ir::BuiltIn::FrontFacing => ArgumentValue::Value(
+                        Primitive::U32(thread.fragment_inputs.front_facing as u32).into(),
+                    ),
+                    naga::ir::BuiltIn::SampleIndex => ArgumentValue::Value(
+                        Primitive::U32(thread.fragment_inputs.sample_index).into(),
+                    ),
+                    naga::ir::BuiltIn::SampleMask => ArgumentValue::Value(
+                        Primitive::U32(thread.fragment_inputs.sample_mask).into(),
+                    ),
+                    naga::ir::BuiltIn::PrimitiveIndex => ArgumentValue::Value(
+                        Primitive::U32(thread.fragment_inputs.primitive_index).into(),
+                    ),
                     // fragment — global constants
-                    naga::ir::BuiltIn::ViewIndex => Primitive::I32(gc.view_index).into(),
-                    naga::ir::BuiltIn::FragDepth => Primitive::F32(gc.frag_depth).into(),
-                    naga::ir::BuiltIn::PointCoord => Primitive::F32x2(gc.point_coord).into(),
+                    naga::ir::BuiltIn::ViewIndex => {
+                        ArgumentValue::Value(Primitive::I32(gc.view_index).into())
+                    }
+                    naga::ir::BuiltIn::FragDepth => {
+                        ArgumentValue::Value(Primitive::F32(gc.frag_depth).into())
+                    }
+                    naga::ir::BuiltIn::PointCoord => {
+                        ArgumentValue::Value(Primitive::F32x2(gc.point_coord).into())
+                    }
                     // compute — per-thread
-                    naga::ir::BuiltIn::GlobalInvocationId => {
-                        Primitive::U32x3(thread.compute_inputs.global_invocation_id).into()
-                    }
-                    naga::ir::BuiltIn::LocalInvocationId => {
-                        Primitive::U32x3(thread.compute_inputs.local_invocation_id).into()
-                    }
-                    naga::ir::BuiltIn::LocalInvocationIndex => {
-                        Primitive::U32(thread.compute_inputs.local_invocation_index).into()
-                    }
-                    naga::ir::BuiltIn::WorkGroupId => {
-                        Primitive::U32x3(thread.compute_inputs.workgroup_id).into()
-                    }
+                    naga::ir::BuiltIn::GlobalInvocationId => ArgumentValue::Value(
+                        Primitive::U32x3(thread.compute_inputs.global_invocation_id).into(),
+                    ),
+                    naga::ir::BuiltIn::LocalInvocationId => ArgumentValue::Value(
+                        Primitive::U32x3(thread.compute_inputs.local_invocation_id).into(),
+                    ),
+                    naga::ir::BuiltIn::LocalInvocationIndex => ArgumentValue::Value(
+                        Primitive::U32(thread.compute_inputs.local_invocation_index).into(),
+                    ),
+                    naga::ir::BuiltIn::WorkGroupId => ArgumentValue::Value(
+                        Primitive::U32x3(thread.compute_inputs.workgroup_id).into(),
+                    ),
                     // compute — global constants
-                    naga::ir::BuiltIn::WorkGroupSize => Primitive::U32x3(gc.workgroup_size).into(),
-                    naga::ir::BuiltIn::NumWorkGroups => Primitive::U32x3(gc.num_workgroups).into(),
+                    naga::ir::BuiltIn::WorkGroupSize => {
+                        ArgumentValue::Value(Primitive::U32x3(gc.workgroup_size).into())
+                    }
+                    naga::ir::BuiltIn::NumWorkGroups => {
+                        ArgumentValue::Value(Primitive::U32x3(gc.num_workgroups).into())
+                    }
                     // subgroup — per-thread
-                    naga::ir::BuiltIn::SubgroupId => {
-                        Primitive::U32(thread.compute_inputs.subgroup_id).into()
-                    }
-                    naga::ir::BuiltIn::SubgroupInvocationId => {
-                        Primitive::U32(thread.compute_inputs.subgroup_invocation_id).into()
-                    }
+                    naga::ir::BuiltIn::SubgroupId => ArgumentValue::Value(
+                        Primitive::U32(thread.compute_inputs.subgroup_id).into(),
+                    ),
+                    naga::ir::BuiltIn::SubgroupInvocationId => ArgumentValue::Value(
+                        Primitive::U32(thread.compute_inputs.subgroup_invocation_id).into(),
+                    ),
                     // subgroup — global constants
-                    naga::ir::BuiltIn::NumSubgroups => Primitive::U32(gc.num_subgroups).into(),
-                    naga::ir::BuiltIn::SubgroupSize => Primitive::U32(gc.subgroup_size).into(),
+                    naga::ir::BuiltIn::NumSubgroups => {
+                        ArgumentValue::Value(Primitive::U32(gc.num_subgroups).into())
+                    }
+                    naga::ir::BuiltIn::SubgroupSize => {
+                        ArgumentValue::Value(Primitive::U32(gc.subgroup_size).into())
+                    }
                 },
-                naga::ir::Binding::Location { .. } => Value::Uninitialized,
+                naga::ir::Binding::Location { .. } => ArgumentValue::Value(Value::Uninitialized),
             }
         } else {
-            frame.evaluated_function_arguments[index].clone()
+            frame
+                .evaluated_function_arguments
+                .get(index)
+                .cloned()
+                .unwrap_or(ArgumentValue::Value(Value::Uninitialized))
         }
     }
 
@@ -246,32 +321,10 @@ impl Evaluator {
         handle: Handle<LocalVariable>,
         func_idx: usize,
     ) -> Value {
-        // Check if already initialized.
-        let (cached, init_expr) = match &self.stack[func_idx] {
-            StackFrame::Function(frame) => {
-                let cached = frame.local_variables.get(&handle).cloned();
-                let function = self.resolve_function(&frame.function_ref);
-                let init = function.local_variables[handle].init;
-                (cached, init)
-            }
-            StackFrame::Block(_) => return Value::Uninitialized,
-        };
-
-        if let Some(value) = cached {
-            return value;
-        }
-
-        match init_expr {
-            Some(expr) => Value::Pointer(Rc::new(RefCell::new(self.eval_expr(expr, func_idx)))),
-            None => Value::Uninitialized,
-        }
-    }
-
-    fn evaluate_global_variable(&self, handle: Handle<GlobalVariable>) -> Value {
-        self.global_values
-            .get(&handle)
-            .cloned()
-            .unwrap_or(Value::Uninitialized)
+        self.read_place(&Place::new(PlaceRoot::Local {
+            function_frame_index: func_idx,
+            handle,
+        }))
     }
 
     fn evaluate_access(
@@ -279,17 +332,19 @@ impl Evaluator {
         base: Handle<Expression>,
         index: Handle<Expression>,
         func_idx: usize,
-    ) -> Value {
-        let base_value = self.eval_expr(base, func_idx).leaf_value();
-        let index_value = self.eval_expr(index, func_idx).leaf_value();
+    ) -> EvaluatedExpression {
+        let index_value = self.eval_value(index, func_idx);
 
         let index: usize = match index_value {
             Value::Primitive(Primitive::U32(i)) => i as usize,
             Value::Primitive(Primitive::I32(i)) => i.max(0) as usize,
-            _ => return Value::Uninitialized,
+            _ => return Value::Uninitialized.into(),
         };
 
-        base_value.index_into(index)
+        match self.eval_expr(base, func_idx) {
+            EvaluatedExpression::Place(place) => place.with_index(index).into(),
+            EvaluatedExpression::Value(value) => value.index_into(index).into(),
+        }
     }
 
     /// Evaluate an expression from the module's global_expressions arena (used for constants/overrides).
@@ -347,7 +402,7 @@ impl Evaluator {
         let ty_inner = &self.module.types[ty].inner;
         let vals: Vec<Value> = components
             .iter()
-            .map(|c| self.eval_expr(*c, func_idx).leaf_value())
+            .map(|c| self.eval_value(*c, func_idx))
             .collect();
         self.assemble_compose(ty_inner, &vals)
     }
@@ -392,7 +447,7 @@ impl Evaluator {
         value: Handle<Expression>,
         func_idx: usize,
     ) -> Value {
-        let val = self.eval_expr(value, func_idx).leaf_value();
+        let val = self.eval_value(value, func_idx);
         self.splat_value(size, val)
     }
 
@@ -403,7 +458,7 @@ impl Evaluator {
         pattern: [SwizzleComponent; 4],
         func_idx: usize,
     ) -> Value {
-        let vec_val = self.eval_expr(vector, func_idx).leaf_value();
+        let vec_val = self.eval_value(vector, func_idx);
 
         let count = match size {
             VectorSize::Bi => 2,
@@ -456,7 +511,7 @@ impl Evaluator {
         reject: Handle<Expression>,
         func_idx: usize,
     ) -> Value {
-        let cond = self.eval_expr(condition, func_idx).leaf_value();
+        let cond = self.eval_value(condition, func_idx);
 
         let is_true = match cond {
             Value::Primitive(Primitive::U32(v)) => v != 0,
@@ -464,9 +519,9 @@ impl Evaluator {
         };
 
         if is_true {
-            self.eval_expr(accept, func_idx)
+            self.eval_value(accept, func_idx)
         } else {
-            self.eval_expr(reject, func_idx)
+            self.eval_value(reject, func_idx)
         }
     }
 }
@@ -488,7 +543,7 @@ pub(crate) fn evaluate_global_expression(
             Literal::Bool(v) => Primitive::U32(if *v { 1 } else { 0 }).into(),
             _ => Value::Uninitialized,
         },
-        Expression::ZeroValue(ty) => Value::from(&module.types[*ty].inner),
+        Expression::ZeroValue(ty) => Value::zero(module, *ty),
         Expression::Constant(handle) => {
             evaluate_global_expression(module, module.constants[*handle].init)
         }
@@ -536,7 +591,7 @@ pub(crate) fn evaluate_global_expression(
             }
         }
         Expression::Splat { size, value } => {
-            let val = evaluate_global_expression(module, *value).leaf_value();
+            let val = evaluate_global_expression(module, *value);
             match (size, val) {
                 (VectorSize::Bi, Value::Primitive(Primitive::F32(v))) => {
                     Primitive::F32x2([v; 2]).into()

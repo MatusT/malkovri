@@ -10,7 +10,6 @@ pub(crate) fn evaluate_as(
     use Primitive::*;
     use naga::ScalarKind::*;
 
-    let val = val.leaf_value();
     let Value::Primitive(ref p) = val else {
         return Value::Uninitialized;
     };

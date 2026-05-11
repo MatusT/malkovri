@@ -181,7 +181,7 @@ impl Debugger {
         config.validate().map_err(DebuggerError::InvalidConfig)?;
 
         let module = Arc::new(wgsl_to_module(source)?);
-        let naga_bindings: HashMap<naga::ResourceBinding, Value> = bindings
+        let naga_bindings: HashMap<naga::ResourceBinding, Rc<RefCell<Value>>> = bindings
             .into_iter()
             .map(|(rb, v)| {
                 (
@@ -189,7 +189,7 @@ impl Debugger {
                         group: rb.group,
                         binding: rb.binding,
                     },
-                    Value::Pointer(Rc::new(RefCell::new(v))),
+                    Rc::new(RefCell::new(v)),
                 )
             })
             .collect();
@@ -393,8 +393,7 @@ impl Debugger {
                         .cloned()
                         .unwrap_or_else(|| {
                             self.evaluator().evaluate_local_variable(handle, func_idx)
-                        })
-                        .leaf_value();
+                        });
                     vars.push(Variable {
                         name: local.name.clone(),
                         value,
@@ -407,7 +406,7 @@ impl Debugger {
             for (name, value) in named {
                 vars.push(Variable {
                     name: Some(name),
-                    value: value.leaf_value(),
+                    value,
                 });
             }
         }
@@ -421,10 +420,7 @@ impl Debugger {
             .current_function_argument_values()
             .unwrap_or_default()
             .into_iter()
-            .map(|(name, value)| Variable {
-                name,
-                value: value.leaf_value(),
-            })
+            .map(|(name, value)| Variable { name, value })
             .collect()
     }
 
@@ -433,10 +429,7 @@ impl Debugger {
         self.evaluator()
             .global_variable_values()
             .into_iter()
-            .map(|(name, value)| Variable {
-                name,
-                value: value.leaf_value(),
-            })
+            .map(|(name, value)| Variable { name, value })
             .collect()
     }
 

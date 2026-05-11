@@ -9,6 +9,7 @@ use crate::{
     function_state::{
         BlockFrame, BlockKind, ControlFlow, FunctionFrame, FunctionRef, NextStatement, StackFrame,
     },
+    place::{ArgumentValue, EvaluatedExpression, Place, PlaceRoot},
     primitive::Primitive,
     thread::EvaluatorThread,
     value::Value,
@@ -18,10 +19,37 @@ use std::{cell::RefCell, collections::HashMap, collections::HashSet, rc::Rc, syn
 
 use naga::{Expression, GlobalVariable, Handle, LocalVariable, Module, Statement};
 
+#[derive(Clone, Debug)]
+pub(crate) enum GlobalValue {
+    Private(Value),
+    Shared(Rc<RefCell<Value>>),
+}
+
+impl GlobalValue {
+    fn read(&self) -> Value {
+        match self {
+            GlobalValue::Private(value) => value.clone(),
+            GlobalValue::Shared(value) => value.borrow().clone(),
+        }
+    }
+
+    fn write_path(
+        &mut self,
+        path: &[crate::place::PlaceSegment],
+        value: Value,
+    ) -> Result<(), EvaluatorError> {
+        match self {
+            GlobalValue::Private(slot) => slot.assign_path(path, value),
+            GlobalValue::Shared(slot) => slot.borrow_mut().assign_path(path, value),
+        }
+        .map_err(EvaluatorError::InternalError)
+    }
+}
+
 pub(crate) struct Evaluator {
     pub(crate) module: Arc<Module>,
     pub(crate) global_constants: GlobalConstants,
-    pub(crate) global_values: HashMap<naga::Handle<GlobalVariable>, Value>,
+    pub(crate) global_values: HashMap<naga::Handle<GlobalVariable>, GlobalValue>,
     pub(crate) entry_point_output: Option<Value>,
     pub(crate) stack: Vec<StackFrame>,
     pub(crate) threads: HashMap<[u32; 3], EvaluatorThread>,
@@ -35,7 +63,7 @@ impl Evaluator {
         module: Arc<Module>,
         entry_point_index: usize,
         global_constants: GlobalConstants,
-        global_values: HashMap<naga::ResourceBinding, Value>,
+        global_values: HashMap<naga::ResourceBinding, Rc<RefCell<Value>>>,
         workgroup_config: WorkgroupConfig,
     ) -> Result<Self, EvaluatorError> {
         let statements = module.entry_points[entry_point_index].function.body.clone();
@@ -80,11 +108,7 @@ impl Evaluator {
                             k
                         ))
                     })?;
-                let value = match v {
-                    Value::Pointer(_) => v.clone(),
-                    _ => Value::Pointer(Rc::new(RefCell::new(v.clone()))),
-                };
-                Ok((handle, value))
+                Ok((handle, GlobalValue::Shared(v.clone())))
             })
             .collect::<Result<_, EvaluatorError>>()?;
 
@@ -94,9 +118,9 @@ impl Evaluator {
             }
             let value = match global.init {
                 Some(expr) => evaluate_global_expression(&module, expr),
-                None => Value::from(&module.types[global.ty].inner),
+                None => Value::zero(&module, global.ty),
             };
-            global_values.insert(handle, Value::Pointer(Rc::new(RefCell::new(value))));
+            global_values.insert(handle, GlobalValue::Private(value));
         }
 
         let evaluator = Evaluator {
@@ -226,7 +250,7 @@ impl Evaluator {
             .iter()
             .map(|(handle, value)| {
                 let name = self.module.global_variables[*handle].name.clone();
-                (name, value.clone())
+                (name, value.read())
             })
             .collect()
     }
@@ -249,6 +273,87 @@ impl Evaluator {
                 )
             })
             .collect())
+    }
+
+    pub(crate) fn read_place(&self, place: &Place) -> Value {
+        let root_value = match &place.root {
+            PlaceRoot::Local {
+                function_frame_index,
+                handle,
+            } => self.read_local_value(*function_frame_index, *handle),
+            PlaceRoot::Global { handle } => self
+                .global_values
+                .get(handle)
+                .map(GlobalValue::read)
+                .unwrap_or(Value::Uninitialized),
+        };
+        root_value.at_path(&place.path)
+    }
+
+    fn read_local_value(
+        &self,
+        function_frame_index: usize,
+        handle: Handle<LocalVariable>,
+    ) -> Value {
+        let Some(StackFrame::Function(frame)) = self.stack.get(function_frame_index) else {
+            return Value::Uninitialized;
+        };
+        if let Some(value) = frame.local_variables.get(&handle) {
+            return value.clone();
+        }
+        self.local_initial_value(function_frame_index, handle)
+    }
+
+    fn local_initial_value(
+        &self,
+        function_frame_index: usize,
+        handle: Handle<LocalVariable>,
+    ) -> Value {
+        let Some(StackFrame::Function(frame)) = self.stack.get(function_frame_index) else {
+            return Value::Uninitialized;
+        };
+        let function = self.resolve_function(&frame.function_ref);
+        let local = &function.local_variables[handle];
+        match local.init {
+            Some(expr) => self.eval_value(expr, function_frame_index),
+            None => Value::zero(&self.module, local.ty),
+        }
+    }
+
+    pub(crate) fn write_place(
+        &mut self,
+        place: &Place,
+        value: Value,
+    ) -> Result<(), EvaluatorError> {
+        match &place.root {
+            PlaceRoot::Local {
+                function_frame_index,
+                handle,
+            } => {
+                self.ensure_local_variable_value(*handle, *function_frame_index)?;
+                let StackFrame::Function(frame) = &mut self.stack[*function_frame_index] else {
+                    return Err(EvaluatorError::InternalError(
+                        "expected function frame".into(),
+                    ));
+                };
+                let slot = frame.local_variables.get_mut(handle).ok_or_else(|| {
+                    EvaluatorError::InternalError(format!(
+                        "local variable {handle:?} was not initialized"
+                    ))
+                })?;
+                slot.assign_path(&place.path, value)
+                    .map_err(EvaluatorError::InternalError)
+            }
+            PlaceRoot::Global { handle } => {
+                self.ensure_global_variable_value(*handle)?;
+                let slot = self.global_values.get_mut(handle).ok_or_else(|| {
+                    EvaluatorError::InternalError(format!(
+                        "global variable {handle:?} was not initialized"
+                    ))
+                })?;
+                slot.write_path(&place.path, value)
+            }
+        }
     }
 
     /// Index of the `Function` frame below `function_index` — the caller's frame, used for `CallResult`.
@@ -674,7 +779,7 @@ impl Evaluator {
     ) -> Result<(), EvaluatorError> {
         let evaluated_function_arguments = arguments
             .iter()
-            .map(|&arg| self.evaluate_expression(arg))
+            .map(|&arg| self.evaluate_argument(arg))
             .collect();
 
         let statements = self.module.functions[function_handle].body.clone();
@@ -716,9 +821,7 @@ impl Evaluator {
 
         let frame = self.current_function_frame_mut()?;
         for (handle, value) in insert_variables {
-            frame
-                .local_variables
-                .insert(handle, Value::Pointer(Rc::new(RefCell::new(value))));
+            frame.local_variables.insert(handle, value);
         }
         Ok(())
     }
@@ -806,20 +909,14 @@ impl Evaluator {
         pointer: Handle<Expression>,
         value: Value,
     ) -> Result<(), EvaluatorError> {
-        let (root, path) = self.resolve_store_place(pointer)?;
-        let Value::Pointer(inner) = root else {
-            return Err(EvaluatorError::StoreToNonPointer);
-        };
-        inner
-            .borrow_mut()
-            .assign_path(&path, value)
-            .map_err(EvaluatorError::InternalError)
+        let place = self.resolve_store_place(pointer)?;
+        self.write_place(&place, value)
     }
 
     fn resolve_store_place(
         &mut self,
         pointer: Handle<Expression>,
-    ) -> Result<(Value, Vec<usize>), EvaluatorError> {
+    ) -> Result<Place, EvaluatorError> {
         let func_idx = self.current_function_frame_index()?;
         let expression = {
             let frame = self.current_function_frame()?;
@@ -828,46 +925,57 @@ impl Evaluator {
         };
 
         match expression {
-            Expression::LocalVariable(handle) => Ok((
-                self.ensure_local_variable_pointer(handle, func_idx)?,
-                vec![],
-            )),
+            Expression::LocalVariable(handle) => {
+                self.ensure_local_variable_value(handle, func_idx)?;
+                Ok(Place::new(PlaceRoot::Local {
+                    function_frame_index: func_idx,
+                    handle,
+                }))
+            }
             Expression::GlobalVariable(handle) => {
-                Ok((self.ensure_global_variable_pointer(handle)?, vec![]))
+                self.ensure_global_variable_value(handle)?;
+                Ok(Place::new(PlaceRoot::Global { handle }))
+            }
+            Expression::FunctionArgument(index) => {
+                match self.evaluate_argument_at(index as usize, func_idx) {
+                    ArgumentValue::Place(place) => Ok(place),
+                    ArgumentValue::Value(_) => Err(EvaluatorError::StoreToNonPointer),
+                }
             }
             Expression::AccessIndex { base, index } => {
-                let (root, mut path) = self.resolve_store_place(base)?;
-                path.push(index as usize);
-                Ok((root, path))
+                let place = self.resolve_store_place(base)?;
+                Ok(place.with_index(index as usize))
             }
             Expression::Access { base, index } => {
-                let index = self.evaluate_expression(index).leaf_value();
+                let index = self.evaluate_expression(index);
                 let index = match index {
                     Value::Primitive(Primitive::U32(value)) => value as usize,
                     Value::Primitive(Primitive::I32(value)) if value >= 0 => value as usize,
                     other => return Err(EvaluatorError::IndexNotU32(format!("{other:?}"))),
                 };
-                let (root, mut path) = self.resolve_store_place(base)?;
-                path.push(index);
-                Ok((root, path))
+                let place = self.resolve_store_place(base)?;
+                Ok(place.with_index(index))
             }
-            _ => Ok((self.evaluate_expression(pointer), vec![])),
+            _ => match self.eval_expr(pointer, func_idx) {
+                EvaluatedExpression::Place(place) => Ok(place),
+                EvaluatedExpression::Value(_) => Err(EvaluatorError::StoreToNonPointer),
+            },
         }
     }
 
-    fn ensure_local_variable_pointer(
+    fn ensure_local_variable_value(
         &mut self,
         handle: Handle<LocalVariable>,
         func_idx: usize,
-    ) -> Result<Value, EvaluatorError> {
+    ) -> Result<(), EvaluatorError> {
         let (init, ty) = {
             let StackFrame::Function(frame) = &self.stack[func_idx] else {
                 return Err(EvaluatorError::InternalError(
                     "expected function frame".into(),
                 ));
             };
-            if let Some(value) = frame.local_variables.get(&handle) {
-                return Ok(value.clone());
+            if frame.local_variables.contains_key(&handle) {
+                return Ok(());
             }
             let function = self.resolve_function(&frame.function_ref);
             let local = &function.local_variables[handle];
@@ -875,35 +983,34 @@ impl Evaluator {
         };
 
         let value = match init {
-            Some(expr) => self.eval_expr(expr, func_idx),
-            None => Value::from(&self.module.types[ty].inner),
+            Some(expr) => self.eval_value(expr, func_idx),
+            None => Value::zero(&self.module, ty),
         };
-        let pointer = Value::Pointer(Rc::new(RefCell::new(value)));
 
         let StackFrame::Function(frame) = &mut self.stack[func_idx] else {
             return Err(EvaluatorError::InternalError(
                 "expected function frame".into(),
             ));
         };
-        frame.local_variables.insert(handle, pointer.clone());
-        Ok(pointer)
+        frame.local_variables.insert(handle, value);
+        Ok(())
     }
 
-    fn ensure_global_variable_pointer(
+    fn ensure_global_variable_value(
         &mut self,
         handle: Handle<GlobalVariable>,
-    ) -> Result<Value, EvaluatorError> {
-        if let Some(value) = self.global_values.get(&handle) {
-            return Ok(value.clone());
+    ) -> Result<(), EvaluatorError> {
+        if self.global_values.contains_key(&handle) {
+            return Ok(());
         }
 
         let global = &self.module.global_variables[handle];
         let value = match global.init {
             Some(expr) => evaluate_global_expression(&self.module, expr),
-            None => Value::from(&self.module.types[global.ty].inner),
+            None => Value::zero(&self.module, global.ty),
         };
-        let pointer = Value::Pointer(Rc::new(RefCell::new(value)));
-        self.global_values.insert(handle, pointer.clone());
-        Ok(pointer)
+        self.global_values
+            .insert(handle, GlobalValue::Private(value));
+        Ok(())
     }
 }

@@ -13,8 +13,8 @@ impl Evaluator {
     ) -> Value {
         use naga::BinaryOperator::*;
 
-        let l = self.eval_expr(left, func_idx).leaf_value();
-        let r = self.eval_expr(right, func_idx).leaf_value();
+        let l = self.eval_value(left, func_idx);
+        let r = self.eval_value(right, func_idx);
 
         match op {
             // Arithmetic — Value trait impls handle all scalars, vectors, and scalar×vector
