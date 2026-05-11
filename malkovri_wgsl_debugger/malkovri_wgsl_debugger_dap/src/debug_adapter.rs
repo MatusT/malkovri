@@ -21,6 +21,8 @@ const ARGUMENTS_SCOPE_REF: u32 = 2;
 const GLOBALS_SCOPE_REF: u32 = 3;
 const MAIN_THREAD_ID: u64 = 1;
 const FRAME_ID_SCALE: u64 = 1000;
+// Defensive UI budget, not shader semantics: if catch-up cannot settle, stop anyway.
+const BREAKPOINT_CATCH_UP_STEP_BUDGET: usize = 100_000;
 
 fn make_scope_ref(thread_id: u64, scope: u32) -> u32 {
     (thread_id as u32) * 10 + scope
@@ -762,6 +764,7 @@ impl DebugAdapter {
         let mut has_more = false;
         let mut hit_thread_id = thread_id;
         loop {
+            // Continue is implemented as repeated debugger steps until stop or termination.
             let result = if single_thread {
                 debugger.step_thread(thread_id)?
             } else {
@@ -770,27 +773,29 @@ impl DebugAdapter {
             match result {
                 StepResult::Finished => break,
                 StepResult::Continue => {
+                    // Single-thread continue only inspects the selected DAP thread.
                     let hit = if single_thread {
                         debugger.thread_current_location(thread_id).and_then(|loc| {
-                            breakpoints
-                                .iter()
-                                .any(|bp| bp.verified && bp.line == Some(loc.line))
-                                .then_some(thread_id)
+                            Self::verified_breakpoint_line(breakpoints, loc.line)
+                                .map(|line| (thread_id, line))
                         })
                     } else {
-                        debugger.all_thread_locations().into_iter().find_map(
-                            |(candidate_thread_id, loc)| {
-                                breakpoints
-                                    .iter()
-                                    .any(|bp| bp.verified && bp.line == Some(loc.line))
-                                    .then_some(candidate_thread_id)
-                            },
-                        )
+                        // Lockstep continue checks every thread because any lane may hit first.
+                        Self::first_breakpoint_hit(debugger, breakpoints)
                     };
 
-                    if let Some(candidate_thread_id) = hit {
-                        debugger.focus_thread(candidate_thread_id)?;
-                        hit_thread_id = candidate_thread_id;
+                    if let Some((candidate_thread_id, line)) = hit {
+                        // Converged lines can be reached by fast lanes before slower lanes catch up.
+                        if !single_thread {
+                            hit_thread_id = Self::catch_up_threads_to_breakpoint(
+                                debugger,
+                                candidate_thread_id,
+                                line,
+                            )?;
+                        } else {
+                            hit_thread_id = candidate_thread_id;
+                        }
+                        debugger.focus_thread(hit_thread_id)?;
                         has_more = true;
                         break;
                     }
@@ -803,6 +808,66 @@ impl DebugAdapter {
             self.make_stopped_event(dapts::StoppedEventReason::Breakpoint)
         } else {
             self.make_event("terminated", &serde_json::json!({}))
+        }
+    }
+
+    // Return the verified breakpoint line when the current source line matches one.
+    fn verified_breakpoint_line(breakpoints: &[Breakpoint], line: u32) -> Option<u32> {
+        breakpoints
+            .iter()
+            .find_map(|bp| (bp.verified && bp.line == Some(line)).then_some(line))
+    }
+
+    // Find the first thread whose current line is a verified breakpoint.
+    fn first_breakpoint_hit(debugger: &Debugger, breakpoints: &[Breakpoint]) -> Option<(u64, u32)> {
+        debugger
+            .all_thread_locations()
+            .into_iter()
+            .find_map(|(thread_id, loc)| {
+                Self::verified_breakpoint_line(breakpoints, loc.line).map(|line| (thread_id, line))
+            })
+    }
+
+    // Let lanes that are still before a hit breakpoint reach that same source line.
+    fn catch_up_threads_to_breakpoint(
+        debugger: &mut Debugger,
+        hit_thread_id: u64,
+        target_line: u32,
+    ) -> Result<u64, DebugAdapterError> {
+        let mut remaining_step_budget = BREAKPOINT_CATCH_UP_STEP_BUDGET;
+
+        loop {
+            let locations = debugger.all_thread_locations();
+            // Prefer reporting the earliest DAP thread already sitting on the breakpoint.
+            let first_at_target = locations
+                .iter()
+                .find_map(|(thread_id, loc)| (loc.line == target_line).then_some(*thread_id));
+
+            // If every live thread reports this line, VS Code will show a coherent stop.
+            if locations.iter().all(|(_, loc)| loc.line == target_line) {
+                return Ok(first_at_target.unwrap_or(hit_thread_id));
+            }
+
+            // Threads beyond the line are from divergent paths, so they cannot be caught up.
+            let candidates = locations
+                .iter()
+                .filter_map(|(thread_id, loc)| (loc.line < target_line).then_some(*thread_id))
+                .collect::<Vec<_>>();
+
+            if candidates.is_empty() {
+                return Ok(first_at_target.unwrap_or(hit_thread_id));
+            }
+
+            // Threads already at the breakpoint stay parked there. Threads still
+            // visibly before the line may be draining divergent control flow that
+            // reconverges at this breakpoint.
+            for candidate_thread_id in candidates {
+                debugger.step_thread(candidate_thread_id)?;
+                remaining_step_budget = remaining_step_budget.saturating_sub(1);
+                if remaining_step_budget == 0 {
+                    return Ok(first_at_target.unwrap_or(hit_thread_id));
+                }
+            }
         }
     }
 

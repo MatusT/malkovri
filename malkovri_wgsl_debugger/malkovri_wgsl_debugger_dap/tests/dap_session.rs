@@ -685,6 +685,38 @@ fn lockstep_continue_reports_breakpoint_thread_that_actually_hit() {
 }
 
 #[test]
+fn lockstep_continue_catches_threads_up_to_converged_breakpoint() {
+    let mut s = Session::new();
+    let shader = shader_path("test_control_flow.wgsl");
+
+    s.send("initialize", json!({}));
+    s.send(
+        "launch",
+        json!({
+            "program": shader,
+            "workgroupConfig": { "workgroupSize": [4, 1, 1] },
+        }),
+    );
+    s.send("setBreakpoints", json!({
+        "source": { "name": PathBuf::from(&shader).file_name().unwrap().to_string_lossy(), "path": shader },
+        "breakpoints": [{ "line": 91 }],
+    }));
+    let cfg = s.send("configurationDone", json!({}));
+    assert_eq!(event_body(&cfg, "stopped")["reason"], "breakpoint");
+
+    for thread_id in 1..=4 {
+        let stack = s.send("stackTrace", json!({ "threadId": thread_id }));
+        let line = response_body(&stack, s.last_seq())["stackFrames"][0]["line"]
+            .as_u64()
+            .unwrap();
+        assert_eq!(
+            line, 91,
+            "thread {thread_id} should stop at the converged breakpoint"
+        );
+    }
+}
+
+#[test]
 fn stack_trace_returns_all_call_frames() {
     let mut s = Session::new();
     let shader = shader_path("test_call_stack.wgsl");
