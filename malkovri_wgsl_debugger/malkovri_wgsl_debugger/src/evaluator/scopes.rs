@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use naga::{Handle, LocalVariable, Statement};
+use naga::{Expression, Handle, LocalVariable, Statement};
 
 use crate::{error::EvaluatorError, value::Value};
 
@@ -108,6 +108,11 @@ impl Evaluator {
                 if i > limit {
                     break;
                 }
+                if i < limit
+                    && let Some(result) = statement_result_expression(stmt)
+                {
+                    emitted.insert(result);
+                }
                 if let Statement::Emit(range) = stmt {
                     emitted.extend(range.clone());
                 }
@@ -129,5 +134,19 @@ impl Evaluator {
             })
             .map(|(handle, name)| (name.clone(), self.evaluate_expression(*handle)))
             .collect())
+    }
+}
+
+fn statement_result_expression(statement: &Statement) -> Option<Handle<Expression>> {
+    match statement {
+        Statement::Call {
+            result: Some(result),
+            ..
+        }
+        | Statement::WorkGroupUniformLoad { result, .. }
+        | Statement::SubgroupBallot { result, .. }
+        | Statement::SubgroupCollectiveOperation { result, .. }
+        | Statement::SubgroupGather { result, .. } => Some(*result),
+        _ => None,
     }
 }

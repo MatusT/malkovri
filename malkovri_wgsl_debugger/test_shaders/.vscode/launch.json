@@ -8,8 +8,117 @@
 		{
 			"type": "wgsl",
 			"request": "launch",
+			"name": "Debug test_call_stack.wgsl",
+			"program": "${workspaceFolder}/test_call_stack.wgsl",
+			"workgroupConfig": {
+				"workgroupSize": [1, 1, 1],
+				"workgroupId": [0, 0, 0],
+				"numWorkgroups": [1, 1, 1]
+			}
+		},
+		{
+			"type": "wgsl",
+			"request": "launch",
+			"name": "Debug test_control_flow.wgsl",
+			"program": "${workspaceFolder}/test_control_flow.wgsl",
+			"workgroupConfig": {
+				"workgroupSize": [64, 1, 1],
+				"workgroupId": [0, 0, 0],
+				"numWorkgroups": [1, 1, 1]
+			},
+			"bindings": {
+				"0:0": {
+					"type": "u32",
+					"inline": [
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0,
+						0
+					]
+				}
+			}
+		},
+		{
+			"type": "wgsl",
+			"request": "launch",
+			"name": "Debug test_divergent_breakpoint_thread.wgsl",
+			"program": "${workspaceFolder}/test_divergent_breakpoint_thread.wgsl",
+			"workgroupConfig": {
+				"workgroupSize": [2, 1, 1],
+				"workgroupId": [0, 0, 0],
+				"numWorkgroups": [1, 1, 1]
+			}
+		},
+		{
+			"type": "wgsl",
+			"request": "launch",
 			"name": "Debug test_expressions.wgsl",
 			"program": "${workspaceFolder}/test_expressions.wgsl",
+			"workgroupConfig": {
+				"workgroupSize": [64, 1, 1],
+				"workgroupId": [0, 0, 0],
+				"numWorkgroups": [1, 1, 1]
+			},
 			"bindings": {
 				"0:0": {
 					"type": "f32",
@@ -58,35 +167,101 @@
 		{
 			"type": "wgsl",
 			"request": "launch",
-			"name": "Debug test_control_flow.wgsl",
-			"program": "${workspaceFolder}/test_control_flow.wgsl",
+			"name": "Debug test_local_initialization_timing.wgsl",
+			"program": "${workspaceFolder}/test_local_initialization_timing.wgsl",
 			"workgroupConfig": {
-				"workgroupSize": [64, 1, 1],
+				"workgroupSize": [1, 1, 1],
 				"workgroupId": [0, 0, 0],
-				"numWorkgroups": [1, 1, 1],
-			},
-			"bindings": {
-				"0:0": {
-					"type": "f32",
-					"inline": [
-						1.0,
-						2.0,
-						3.0,
-						4.0,
-						5.0,
-						6.0,
-						7.0,
-						8.0,
-						9.0,
-						10.0,
-						11.0,
-						12.0,
-						13.0,
-						14.0,
-						15.0,
-						16.0
-					]
-				}
+				"numWorkgroups": [1, 1, 1]
+			}
+		},
+		{
+			"type": "wgsl",
+			"request": "launch",
+			"name": "Debug test_loop_local_initialization_timing.wgsl",
+			"program": "${workspaceFolder}/test_loop_local_initialization_timing.wgsl",
+			"workgroupConfig": {
+				"workgroupSize": [1, 1, 1],
+				"workgroupId": [0, 0, 0],
+				"numWorkgroups": [1, 1, 1]
+			}
+		},
+		{
+			"type": "wgsl",
+			"request": "launch",
+			"name": "Debug test_nested_named_expression_scope.wgsl",
+			"program": "${workspaceFolder}/test_nested_named_expression_scope.wgsl",
+			"workgroupConfig": {
+				"workgroupSize": [1, 1, 1],
+				"workgroupId": [0, 0, 0],
+				"numWorkgroups": [1, 1, 1]
+			}
+		},
+		{
+			"type": "wgsl",
+			"request": "launch",
+			"name": "Debug test_pointer_places.wgsl",
+			"program": "${workspaceFolder}/test_pointer_places.wgsl",
+			"workgroupConfig": {
+				"workgroupSize": [1, 1, 1],
+				"workgroupId": [0, 0, 0],
+				"numWorkgroups": [1, 1, 1]
+			}
+		},
+		{
+			"type": "wgsl",
+			"request": "launch",
+			"name": "Debug test_private_global.wgsl",
+			"program": "${workspaceFolder}/test_private_global.wgsl",
+			"workgroupConfig": {
+				"workgroupSize": [1, 1, 1],
+				"workgroupId": [0, 0, 0],
+				"numWorkgroups": [1, 1, 1]
+			}
+		},
+		{
+			"type": "wgsl",
+			"request": "launch",
+			"name": "Debug test_private_global_isolation.wgsl",
+			"program": "${workspaceFolder}/test_private_global_isolation.wgsl",
+			"workgroupConfig": {
+				"workgroupSize": [2, 1, 1],
+				"workgroupId": [0, 0, 0],
+				"numWorkgroups": [1, 1, 1]
+			}
+		},
+		{
+			"type": "wgsl",
+			"request": "launch",
+			"name": "Debug test_subgroup_collectives.wgsl",
+			"program": "${workspaceFolder}/test_subgroup_collectives.wgsl",
+			"workgroupConfig": {
+				"workgroupSize": [4, 1, 1],
+				"workgroupId": [0, 0, 0],
+				"subgroupSize": 4,
+				"numWorkgroups": [1, 1, 1]
+			}
+		},
+		{
+			"type": "wgsl",
+			"request": "launch",
+			"name": "Debug test_workgroup_memory_barrier.wgsl",
+			"program": "${workspaceFolder}/test_workgroup_memory_barrier.wgsl",
+			"workgroupConfig": {
+				"workgroupSize": [2, 1, 1],
+				"workgroupId": [0, 0, 0],
+				"numWorkgroups": [1, 1, 1]
+			}
+		},
+		{
+			"type": "wgsl",
+			"request": "launch",
+			"name": "Debug test_workgroup_uniform_load.wgsl",
+			"program": "${workspaceFolder}/test_workgroup_uniform_load.wgsl",
+			"workgroupConfig": {
+				"workgroupSize": [2, 1, 1],
+				"workgroupId": [0, 0, 0],
+				"numWorkgroups": [1, 1, 1]
 			}
 		}
 	]

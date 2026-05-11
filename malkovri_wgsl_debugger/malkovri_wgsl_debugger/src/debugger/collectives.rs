@@ -259,7 +259,7 @@ impl Debugger {
                     EvaluatorError::InternalError(format!("missing evaluator for {gid:?}"))
                 })?;
                 evaluator.set_current_expression_value(result, value)?;
-                evaluator.consume_current_statement_without_running()?
+                evaluator.consume_current_statement_and_skip_emits()?
             };
             self.thread_status.insert(
                 gid,

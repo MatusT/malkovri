@@ -4,6 +4,8 @@ use crate::{
     value::Value,
 };
 
+use naga::Statement;
+
 use super::Evaluator;
 
 impl Evaluator {
@@ -119,6 +121,21 @@ impl Evaluator {
         self.advance_to_live_statement()?;
 
         Ok(self.peek_next_statement())
+    }
+
+    pub(crate) fn consume_current_statement_and_skip_emits(
+        &mut self,
+    ) -> Result<Option<NextStatement>, EvaluatorError> {
+        let mut next = self.consume_current_statement_without_running()?;
+        while matches!(
+            next,
+            Some(NextStatement {
+                statement: Statement::Emit(_),
+            })
+        ) {
+            next = self.step()?;
+        }
+        Ok(next)
     }
 
     fn peek_next_statement(&self) -> Option<NextStatement> {

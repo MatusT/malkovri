@@ -16,8 +16,17 @@ impl Debugger {
 
     pub fn step_all(&mut self) -> Result<StepResult, EvaluatorError> {
         let focused_thread = self.focused_thread;
-        let thread_order = self.thread_order.clone();
-        for gid in thread_order {
+        let runnable_threads = self
+            .thread_order
+            .iter()
+            .copied()
+            .filter(|gid| matches!(self.thread_status.get(gid), Some(ThreadStatus::Running)))
+            .collect::<Vec<_>>();
+
+        for gid in runnable_threads {
+            if !matches!(self.thread_status.get(&gid), Some(ThreadStatus::Running)) {
+                continue;
+            }
             self.focused_thread = gid;
             self.step_gid(gid)?;
         }

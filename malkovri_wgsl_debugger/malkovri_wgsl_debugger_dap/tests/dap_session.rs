@@ -87,6 +87,13 @@ fn top_frame_id(session: &mut Session, thread_id: DebugThreadId) -> StackFrameId
         .unwrap()
 }
 
+fn top_frame_line(session: &mut Session, thread_id: DebugThreadId) -> u32 {
+    let stack = session.send("stackTrace", json!({ "threadId": thread_id }));
+    response_body(&stack, session.last_seq())["stackFrames"][0]["line"]
+        .as_u64()
+        .unwrap() as u32
+}
+
 fn variables_map(variables_body: &Value) -> HashMap<String, String> {
     variables_body["variables"]
         .as_array()
@@ -615,6 +622,35 @@ fn workgroup_globals_are_shared_and_barrier_synchronizes_threads() {
 }
 
 #[test]
+fn breakpoint_after_workgroup_barrier_stops_all_threads_before_store() {
+    let mut s = Session::new();
+    let shader = shader_path("test_workgroup_memory_barrier.wgsl");
+
+    s.send("initialize", json!({}));
+    s.send(
+        "launch",
+        json!({
+            "program": shader,
+            "workgroupConfig": { "workgroupSize": [2, 1, 1] },
+        }),
+    );
+    s.send("setBreakpoints", json!({
+        "source": { "name": PathBuf::from(&shader).file_name().unwrap().to_string_lossy(), "path": shader },
+        "breakpoints": [{ "line": 10 }],
+    }));
+    let cfg = s.send("configurationDone", json!({}));
+    assert_eq!(event_body(&cfg, "stopped")["reason"], "breakpoint");
+
+    assert_eq!(top_frame_line(&mut s, 1), 10);
+    assert_eq!(top_frame_line(&mut s, 2), 10);
+
+    let thread_1_globals = globals_for_thread(&mut s, 1);
+    let thread_2_globals = globals_for_thread(&mut s, 2);
+    assert_eq!(thread_1_globals["observed"], "Primitive(U32(0))");
+    assert_eq!(thread_2_globals["observed"], "Primitive(U32(0))");
+}
+
+#[test]
 fn workgroup_uniform_load_broadcasts_the_loaded_value() {
     let mut s = Session::new();
     let shader = shader_path("test_workgroup_uniform_load.wgsl");
@@ -677,6 +713,74 @@ fn subgroup_collectives_release_per_subgroup() {
     assert_eq!(thread_1_globals["stop_value"], "Primitive(U32(26))");
     assert_eq!(thread_4_globals["inclusive_value"], "Primitive(U32(10))");
     assert_eq!(thread_4_globals["stop_value"], "Primitive(U32(35))");
+}
+
+#[test]
+fn subgroup_collective_result_is_visible_in_locals_after_release() {
+    let mut s = Session::new();
+    let shader = shader_path("test_subgroup_collectives.wgsl");
+
+    s.send("initialize", json!({}));
+    s.send(
+        "launch",
+        json!({
+            "program": shader,
+            "workgroupConfig": { "workgroupSize": [4, 1, 1], "subgroupSize": 4 },
+        }),
+    );
+    s.send("setBreakpoints", json!({
+        "source": { "name": PathBuf::from(&shader).file_name().unwrap().to_string_lossy(), "path": shader },
+        "breakpoints": [{ "line": 14 }],
+    }));
+    let cfg = s.send("configurationDone", json!({}));
+    assert_eq!(event_body(&cfg, "stopped")["reason"], "breakpoint");
+
+    let frame_id = top_frame_id(&mut s, 1);
+    let scopes = s.send("scopes", json!({ "frameId": frame_id }));
+    let locals_ref = scope_reference(response_body(&scopes, s.last_seq()), "Locals");
+
+    let locals = s.send("variables", json!({ "variablesReference": locals_ref }));
+    let locals = variables_map(response_body(&locals, s.last_seq()));
+    assert_eq!(locals["sum"], "Primitive(U32(10))");
+}
+
+#[test]
+fn stepping_over_subgroup_collective_stops_on_next_source_statement() {
+    let mut s = Session::new();
+    let shader = shader_path("test_subgroup_collectives.wgsl");
+
+    s.send("initialize", json!({}));
+    s.send(
+        "launch",
+        json!({
+            "program": shader,
+            "stopOnEntry": true,
+            "workgroupConfig": { "workgroupSize": [4, 1, 1], "subgroupSize": 4 },
+        }),
+    );
+    s.send("setBreakpoints", json!({
+        "source": { "name": PathBuf::from(&shader).file_name().unwrap().to_string_lossy(), "path": shader },
+        "breakpoints": [],
+    }));
+    let cfg = s.send("configurationDone", json!({}));
+    assert_eq!(event_body(&cfg, "stopped")["reason"], "entry");
+
+    assert_eq!(top_frame_line(&mut s, 1), 9);
+    let next = s.send("next", json!({ "threadId": 1 }));
+    assert_eq!(event_body(&next, "stopped")["reason"], "step");
+    assert_eq!(top_frame_line(&mut s, 1), 10);
+
+    let next = s.send("next", json!({ "threadId": 1 }));
+    assert_eq!(event_body(&next, "stopped")["reason"], "step");
+    assert_eq!(top_frame_line(&mut s, 1), 11);
+
+    let frame_id = top_frame_id(&mut s, 1);
+    let scopes = s.send("scopes", json!({ "frameId": frame_id }));
+    let locals_ref = scope_reference(response_body(&scopes, s.last_seq()), "Locals");
+
+    let locals = s.send("variables", json!({ "variablesReference": locals_ref }));
+    let locals = variables_map(response_body(&locals, s.last_seq()));
+    assert_eq!(locals["sum"], "Primitive(U32(10))");
 }
 
 #[test]

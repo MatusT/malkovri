@@ -177,7 +177,7 @@ impl Debugger {
                 let evaluator = self.evaluators.get_mut(&gid).ok_or_else(|| {
                     EvaluatorError::InternalError(format!("missing evaluator for {gid:?}"))
                 })?;
-                evaluator.consume_current_statement_without_running()?
+                evaluator.consume_current_statement_and_skip_emits()?
             };
             self.thread_status.insert(
                 gid,
