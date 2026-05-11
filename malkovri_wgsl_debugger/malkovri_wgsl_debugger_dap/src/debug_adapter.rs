@@ -20,6 +20,7 @@ const LOCALS_SCOPE_REF: u32 = 1;
 const ARGUMENTS_SCOPE_REF: u32 = 2;
 const GLOBALS_SCOPE_REF: u32 = 3;
 const MAIN_THREAD_ID: u64 = 1;
+const FRAME_ID_SCALE: u64 = 1000;
 
 fn make_scope_ref(thread_id: u64, scope: u32) -> u32 {
     (thread_id as u32) * 10 + scope
@@ -30,6 +31,22 @@ fn parse_scope_ref(reference: u32) -> (u64, u32) {
         (MAIN_THREAD_ID, reference)
     } else {
         ((reference / 10) as u64, reference % 10)
+    }
+}
+
+fn make_frame_id(thread_id: u64, frame_index: usize) -> u64 {
+    if frame_index == 0 {
+        thread_id
+    } else {
+        thread_id * FRAME_ID_SCALE + frame_index as u64
+    }
+}
+
+fn thread_id_from_frame_id(frame_id: u64) -> u64 {
+    if frame_id < FRAME_ID_SCALE {
+        frame_id
+    } else {
+        frame_id / FRAME_ID_SCALE
     }
 }
 
@@ -340,11 +357,6 @@ impl DebugAdapter {
         debugger.focus_thread(thread_id)?;
 
         let frames = debugger.call_stack();
-        let location = frames
-            .first()
-            .and_then(|f| f.location.as_ref())
-            .ok_or_else(|| DebugAdapterError::InvalidProgram("no current location".into()))?;
-
         let path = self
             .program_path
             .as_ref()
@@ -352,19 +364,23 @@ impl DebugAdapter {
             .to_string_lossy()
             .to_string();
 
-        Ok(vec![self.make_response(
-            req.seq,
-            &dapts::StackTraceResponse {
-                stack_frames: vec![dapts::StackFrame {
-                    id: thread_id,
-                    name: frames
+        let stack_frames = frames
+            .iter()
+            .enumerate()
+            .map(|(index, frame)| {
+                let location = frame.location.as_ref().or_else(|| {
+                    frames
                         .first()
-                        .and_then(|f| f.name.as_deref())
-                        .unwrap_or("main")
-                        .to_string(),
+                        .and_then(|innermost| innermost.location.as_ref())
+                });
+                let line = location.map(|loc| loc.line).unwrap_or(1);
+                let column = location.map(|loc| loc.column).unwrap_or(0);
+                dapts::StackFrame {
+                    id: make_frame_id(thread_id, index),
+                    name: frame.name.as_deref().unwrap_or("main").to_string(),
                     source: Some(dapts::Source {
                         name: self.program_name.clone(),
-                        path: Some(path),
+                        path: Some(path.clone()),
                         adapter_data: None,
                         checksums: None,
                         origin: None,
@@ -376,12 +392,19 @@ impl DebugAdapter {
                     instruction_pointer_reference: None,
                     module_id: None,
                     presentation_hint: Some(dapts::StackFramePresentationHint::Normal),
-                    line: location.line,
-                    column: location.column,
+                    line,
+                    column,
                     end_line: None,
                     end_column: None,
-                }],
-                total_frames: None,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        Ok(vec![self.make_response(
+            req.seq,
+            &dapts::StackTraceResponse {
+                stack_frames,
+                total_frames: Some(frames.len() as u64),
             },
         )?])
     }
@@ -392,8 +415,9 @@ impl DebugAdapter {
     ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         let arguments = serde_json::from_value::<dapts::ScopesArguments>(req.arguments.clone())?;
         let frame_id = arguments.frame_id;
+        let thread_id = thread_id_from_frame_id(frame_id);
         let debugger = self.debugger_mut()?;
-        debugger.focus_thread(frame_id)?;
+        debugger.focus_thread(thread_id)?;
 
         let local_count = debugger.local_variables().len();
         let argument_count = debugger.argument_variables().len();
@@ -401,7 +425,7 @@ impl DebugAdapter {
 
         let mut scopes = vec![dapts::Scope {
             name: "Locals".to_string(),
-            variables_reference: make_scope_ref(frame_id, LOCALS_SCOPE_REF),
+            variables_reference: make_scope_ref(thread_id, LOCALS_SCOPE_REF),
             named_variables: Some(local_count as u32),
             indexed_variables: None,
             expensive: false,
@@ -416,7 +440,7 @@ impl DebugAdapter {
         if argument_count > 0 {
             scopes.push(dapts::Scope {
                 name: "Function Arguments".to_string(),
-                variables_reference: make_scope_ref(frame_id, ARGUMENTS_SCOPE_REF),
+                variables_reference: make_scope_ref(thread_id, ARGUMENTS_SCOPE_REF),
                 named_variables: Some(argument_count as u32),
                 indexed_variables: None,
                 expensive: false,
@@ -432,7 +456,7 @@ impl DebugAdapter {
         if !globals.is_empty() {
             scopes.push(dapts::Scope {
                 name: "Globals".to_string(),
-                variables_reference: make_scope_ref(frame_id, GLOBALS_SCOPE_REF),
+                variables_reference: make_scope_ref(thread_id, GLOBALS_SCOPE_REF),
                 named_variables: Some(globals.len() as u32),
                 indexed_variables: None,
                 expensive: false,
@@ -736,6 +760,7 @@ impl DebugAdapter {
         let breakpoints = &self.breakpoints;
 
         let mut has_more = false;
+        let mut hit_thread_id = thread_id;
         loop {
             let result = if single_thread {
                 debugger.step_thread(thread_id)?
@@ -745,11 +770,27 @@ impl DebugAdapter {
             match result {
                 StepResult::Finished => break,
                 StepResult::Continue => {
-                    if let Some(loc) = debugger.current_location()
-                        && breakpoints
-                            .iter()
-                            .any(|bp| bp.verified && bp.line == Some(loc.line))
-                    {
+                    let hit = if single_thread {
+                        debugger.thread_current_location(thread_id).and_then(|loc| {
+                            breakpoints
+                                .iter()
+                                .any(|bp| bp.verified && bp.line == Some(loc.line))
+                                .then_some(thread_id)
+                        })
+                    } else {
+                        debugger.all_thread_locations().into_iter().find_map(
+                            |(candidate_thread_id, loc)| {
+                                breakpoints
+                                    .iter()
+                                    .any(|bp| bp.verified && bp.line == Some(loc.line))
+                                    .then_some(candidate_thread_id)
+                            },
+                        )
+                    };
+
+                    if let Some(candidate_thread_id) = hit {
+                        debugger.focus_thread(candidate_thread_id)?;
+                        hit_thread_id = candidate_thread_id;
                         has_more = true;
                         break;
                     }
@@ -758,6 +799,7 @@ impl DebugAdapter {
         }
 
         if has_more {
+            debugger.focus_thread(hit_thread_id)?;
             self.make_stopped_event(dapts::StoppedEventReason::Breakpoint)
         } else {
             self.make_event("terminated", &serde_json::json!({}))

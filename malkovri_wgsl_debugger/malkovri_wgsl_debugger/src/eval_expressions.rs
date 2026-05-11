@@ -139,9 +139,12 @@ impl Evaluator {
                 Place::new(PlaceRoot::Global { handle: *handle }).into()
             }
             Expression::Access { base, index } => self.evaluate_access(*base, *index, func_idx),
-            Expression::CallResult(_) => {
-                // The return value was stored in evaluated_expressions by apply_return,
-                // keyed by expression_handle (the Handle<Expression> for this CallResult).
+            Expression::CallResult(_)
+            | Expression::WorkGroupUniformLoadResult { .. }
+            | Expression::SubgroupBallotResult
+            | Expression::SubgroupOperationResult { .. } => {
+                // Statement results are stored in evaluated_expressions by the
+                // statement or collective scheduler, keyed by this expression handle.
                 frame
                     .evaluated_expressions
                     .get(&expression_handle)

@@ -23,8 +23,12 @@ pub(crate) fn wgsl_to_module(source: &str) -> Result<Module, WgslToModuleError> 
     let mut frontend = wgsl::Frontend::new();
     let module = frontend.parse(source)?;
 
-    let mut validator =
-        valid::Validator::new(valid::ValidationFlags::all(), valid::Capabilities::all());
+    // Keep this explicit so Naga-only extensions such as ray queries stay rejected.
+    let capabilities = valid::Capabilities::default()
+        | valid::Capabilities::SUBGROUP
+        | valid::Capabilities::SUBGROUP_BARRIER
+        | valid::Capabilities::SHADER_FLOAT16_IN_FLOAT32;
+    let mut validator = valid::Validator::new(valid::ValidationFlags::all(), capabilities);
     let _module_info = validator.validate(&module)?;
 
     Ok(module)

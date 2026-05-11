@@ -57,24 +57,37 @@ pub(crate) struct FragmentThreadInputs {
 
 /// Constant globals that are the same across all threads, set by the user.
 #[derive(Copy, Clone, Debug, Default, serde::Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct GlobalConstants {
     // vertex
+    #[serde(alias = "base_instance")]
     pub base_instance: u32,
+    #[serde(alias = "base_vertex")]
     pub base_vertex: i32,
+    #[serde(alias = "clip_distance")]
     pub clip_distance: [f32; 8],
+    #[serde(alias = "cull_distance")]
     pub cull_distance: [f32; 8],
+    #[serde(alias = "point_size")]
     pub point_size: f32,
+    #[serde(alias = "draw_id")]
     pub draw_id: u32,
 
     // fragment
+    #[serde(alias = "view_index")]
     pub view_index: i32,
+    #[serde(alias = "frag_depth")]
     pub frag_depth: f32,
+    #[serde(alias = "point_coord")]
     pub point_coord: [f32; 2],
 
     // compute
+    #[serde(alias = "workgroup_size")]
     pub workgroup_size: [u32; 3],
+    #[serde(alias = "num_workgroups")]
     pub num_workgroups: [u32; 3],
+    #[serde(alias = "subgroup_size")]
     pub subgroup_size: u32,
+    #[serde(alias = "num_subgroups")]
     pub num_subgroups: u32,
 }

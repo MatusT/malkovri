@@ -30,6 +30,8 @@ pub enum EvaluatorError {
     UnknownExpression(String),
     #[error("Unsupported vector type: {0}")]
     UnsupportedVectorType(String),
+    #[error("Synchronization error: {0}")]
+    SynchronizationError(String),
     #[error("Internal error: {0}")]
     InternalError(String),
 }

@@ -116,11 +116,11 @@
                 "description": "WebGPU resource bindings, keyed by 'group:binding' (e.g. '0:0').",
                 "additionalProperties": {
                   "type": "object",
-                  "required": ["type"],
                   "properties": {
                     "type": {
                       "type": "string",
                       "enum": ["f32", "i32", "u32"],
+                      "default": "f32",
                       "description": "Scalar element type of the buffer."
                     },
                     "inline": {
@@ -130,6 +130,10 @@
                     "file": {
                       "type": "string",
                       "description": "Path to a data file (relative to the shader). Cannot be combined with 'inline'."
+                    },
+                    "fileContent": {
+                      "type": "string",
+                      "description": "Inline file content. Supports RON content and is useful in browser/WASM contexts."
                     },
                     "format": {
                       "type": "string",

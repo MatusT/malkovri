@@ -1,5 +1,6 @@
 use std::{collections::HashMap, path::PathBuf};
 
+use malkovri_wgsl_debugger::{Debugger, GlobalConstants, WorkgroupConfig};
 use malkovri_wgsl_debugger_dap::DebugAdapter;
 use serde_json::{Value, json};
 
@@ -91,6 +92,14 @@ fn variables_map(variables_body: &Value) -> HashMap<String, String> {
             )
         })
         .collect()
+}
+
+fn globals_for_thread(session: &mut Session, thread_id: u64) -> HashMap<String, String> {
+    let variables = session.send(
+        "variables",
+        json!({ "variablesReference": (thread_id as u32) * 10 + 3 }),
+    );
+    variables_map(response_body(&variables, session.last_seq()))
 }
 
 fn launch_and_configure(session: &mut Session, shader: &str, breakpoints: &[u32]) -> Vec<Value> {
@@ -231,7 +240,7 @@ fn expression_shader_variables_include_binding_backed_values() {
             "program": shader,
             "workgroupConfig": { "workgroupId": [2, 0, 0] },
             "bindings": {
-                "0:0": { "type": "f32", "inline": [1.0, 2.0, 3.0, 4.0] },
+                "0:0": { "inline": [1.0, 2.0, 3.0, 4.0] },
                 "0:1": { "type": "u32", "inline": [0, 0, 0, 0] },
             },
         }),
@@ -474,4 +483,220 @@ fn pointer_arguments_write_through_places_and_zero_nested_values() {
     let globals = s.send("variables", json!({ "variablesReference": globals_ref }));
     let globals = variables_map(response_body(&globals, s.last_seq()));
     assert_eq!(globals["sink"], "Primitive(U32(21))");
+}
+
+#[test]
+fn global_constants_accept_camel_case_and_snake_case() {
+    let camel: GlobalConstants = serde_json::from_value(json!({
+        "baseInstance": 3,
+        "baseVertex": -2,
+        "drawId": 9,
+        "viewIndex": 4,
+        "pointCoord": [0.25, 0.75],
+    }))
+    .unwrap();
+    assert_eq!(camel.base_instance, 3);
+    assert_eq!(camel.base_vertex, -2);
+    assert_eq!(camel.draw_id, 9);
+    assert_eq!(camel.view_index, 4);
+    assert_eq!(camel.point_coord, [0.25, 0.75]);
+
+    let snake: GlobalConstants = serde_json::from_value(json!({
+        "base_instance": 5,
+        "base_vertex": -4,
+        "draw_id": 11,
+        "view_index": 6,
+        "point_coord": [0.5, 1.0],
+    }))
+    .unwrap();
+    assert_eq!(snake.base_instance, 5);
+    assert_eq!(snake.base_vertex, -4);
+    assert_eq!(snake.draw_id, 11);
+    assert_eq!(snake.view_index, 6);
+    assert_eq!(snake.point_coord, [0.5, 1.0]);
+}
+
+#[test]
+fn naga_only_ray_queries_are_rejected_by_webgpu_validation() {
+    let source = r#"
+@compute @workgroup_size(1, 1, 1)
+fn main() {
+    var query: ray_query;
+}
+"#;
+
+    let err = match Debugger::new(
+        source,
+        0,
+        WorkgroupConfig::default(),
+        GlobalConstants::default(),
+        HashMap::new(),
+    ) {
+        Ok(_) => panic!("ray-query shader unexpectedly validated"),
+        Err(err) => err,
+    };
+
+    let message = format!("{err:?}");
+    assert!(
+        message.contains("RAY_QUERY") || message.contains("ray"),
+        "expected WebGPU validation to reject ray query capability, got {message}"
+    );
+}
+
+#[test]
+fn private_globals_are_isolated_per_workgroup_thread() {
+    let mut s = Session::new();
+    let shader = shader_path("test_private_global_isolation.wgsl");
+
+    s.send("initialize", json!({}));
+    s.send(
+        "launch",
+        json!({
+            "program": shader,
+            "workgroupConfig": { "workgroupSize": [2, 1, 1] },
+        }),
+    );
+    s.send("setBreakpoints", json!({
+        "source": { "name": PathBuf::from(&shader).file_name().unwrap().to_string_lossy(), "path": shader },
+        "breakpoints": [],
+    }));
+    let cfg = s.send("configurationDone", json!({}));
+    assert_eq!(event_body(&cfg, "terminated"), &json!({}));
+
+    let thread_1_globals = globals_for_thread(&mut s, 1);
+    let thread_2_globals = globals_for_thread(&mut s, 2);
+    assert_eq!(thread_1_globals["counter"], "Primitive(U32(10))");
+    assert_eq!(thread_2_globals["counter"], "Primitive(U32(11))");
+}
+
+#[test]
+fn workgroup_globals_are_shared_and_barrier_synchronizes_threads() {
+    let mut s = Session::new();
+    let shader = shader_path("test_workgroup_memory_barrier.wgsl");
+
+    s.send("initialize", json!({}));
+    s.send(
+        "launch",
+        json!({
+            "program": shader,
+            "workgroupConfig": { "workgroupSize": [2, 1, 1] },
+        }),
+    );
+    s.send("setBreakpoints", json!({
+        "source": { "name": PathBuf::from(&shader).file_name().unwrap().to_string_lossy(), "path": shader },
+        "breakpoints": [],
+    }));
+    let cfg = s.send("configurationDone", json!({}));
+    assert_eq!(event_body(&cfg, "terminated"), &json!({}));
+
+    let thread_1_globals = globals_for_thread(&mut s, 1);
+    let thread_2_globals = globals_for_thread(&mut s, 2);
+    assert_eq!(thread_1_globals["shared_value"], "Primitive(U32(40))");
+    assert_eq!(thread_2_globals["shared_value"], "Primitive(U32(40))");
+    assert_eq!(thread_1_globals["observed"], "Primitive(U32(40))");
+    assert_eq!(thread_2_globals["observed"], "Primitive(U32(41))");
+}
+
+#[test]
+fn workgroup_uniform_load_broadcasts_the_loaded_value() {
+    let mut s = Session::new();
+    let shader = shader_path("test_workgroup_uniform_load.wgsl");
+
+    s.send("initialize", json!({}));
+    s.send(
+        "launch",
+        json!({
+            "program": shader,
+            "workgroupConfig": { "workgroupSize": [2, 1, 1] },
+        }),
+    );
+    s.send("setBreakpoints", json!({
+        "source": { "name": PathBuf::from(&shader).file_name().unwrap().to_string_lossy(), "path": shader },
+        "breakpoints": [],
+    }));
+    let cfg = s.send("configurationDone", json!({}));
+    assert_eq!(event_body(&cfg, "terminated"), &json!({}));
+
+    let thread_1_globals = globals_for_thread(&mut s, 1);
+    let thread_2_globals = globals_for_thread(&mut s, 2);
+    assert_eq!(thread_1_globals["loaded_value"], "Primitive(U32(7))");
+    assert_eq!(thread_2_globals["loaded_value"], "Primitive(U32(7))");
+    assert_eq!(thread_1_globals["observed"], "Primitive(U32(7))");
+    assert_eq!(thread_2_globals["observed"], "Primitive(U32(8))");
+}
+
+#[test]
+fn subgroup_collectives_release_per_subgroup() {
+    let mut s = Session::new();
+    let shader = shader_path("test_subgroup_collectives.wgsl");
+
+    s.send("initialize", json!({}));
+    s.send(
+        "launch",
+        json!({
+            "program": shader,
+            "workgroupConfig": { "workgroupSize": [4, 1, 1], "subgroupSize": 4 },
+        }),
+    );
+    s.send("setBreakpoints", json!({
+        "source": { "name": PathBuf::from(&shader).file_name().unwrap().to_string_lossy(), "path": shader },
+        "breakpoints": [],
+    }));
+    let cfg = s.send("configurationDone", json!({}));
+    assert_eq!(event_body(&cfg, "terminated"), &json!({}));
+
+    let thread_1_globals = globals_for_thread(&mut s, 1);
+    let thread_4_globals = globals_for_thread(&mut s, 4);
+    assert_eq!(thread_1_globals["sum_value"], "Primitive(U32(10))");
+    assert_eq!(thread_1_globals["inclusive_value"], "Primitive(U32(1))");
+    assert_eq!(
+        thread_1_globals["from_lane_two_value"],
+        "Primitive(U32(12))"
+    );
+    assert_eq!(
+        thread_1_globals["ballot_value"],
+        "Primitive(U32x4([3, 0, 0, 0]))"
+    );
+    assert_eq!(thread_1_globals["stop_value"], "Primitive(U32(26))");
+    assert_eq!(thread_4_globals["inclusive_value"], "Primitive(U32(10))");
+    assert_eq!(thread_4_globals["stop_value"], "Primitive(U32(35))");
+}
+
+#[test]
+fn lockstep_continue_reports_breakpoint_thread_that_actually_hit() {
+    let mut s = Session::new();
+    let shader = shader_path("test_divergent_breakpoint_thread.wgsl");
+
+    s.send("initialize", json!({}));
+    s.send(
+        "launch",
+        json!({
+            "program": shader,
+            "workgroupConfig": { "workgroupSize": [2, 1, 1] },
+        }),
+    );
+    s.send("setBreakpoints", json!({
+        "source": { "name": PathBuf::from(&shader).file_name().unwrap().to_string_lossy(), "path": shader },
+        "breakpoints": [{ "line": 6 }],
+    }));
+    let cfg = s.send("configurationDone", json!({}));
+    assert_eq!(event_body(&cfg, "stopped")["reason"], "breakpoint");
+    assert_eq!(event_body(&cfg, "stopped")["threadId"], 2);
+}
+
+#[test]
+fn stack_trace_returns_all_call_frames() {
+    let mut s = Session::new();
+    let shader = shader_path("test_call_stack.wgsl");
+
+    let cfg = launch_and_configure(&mut s, &shader, &[4]);
+    assert_eq!(event_body(&cfg, "stopped")["reason"], "breakpoint");
+
+    let stack = s.send("stackTrace", json!({ "threadId": 1 }));
+    let frames = response_body(&stack, s.last_seq())["stackFrames"]
+        .as_array()
+        .unwrap();
+    assert_eq!(frames.len(), 2);
+    assert_eq!(frames[0]["name"], "helper");
+    assert_eq!(frames[1]["name"], "main");
 }

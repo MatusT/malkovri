@@ -64,6 +64,7 @@ impl Evaluator {
         entry_point_index: usize,
         global_constants: GlobalConstants,
         global_values: HashMap<naga::ResourceBinding, Rc<RefCell<Value>>>,
+        shared_global_values: HashMap<Handle<GlobalVariable>, Rc<RefCell<Value>>>,
         workgroup_config: WorkgroupConfig,
     ) -> Result<Self, EvaluatorError> {
         let statements = module.entry_points[entry_point_index].function.body.clone();
@@ -116,11 +117,15 @@ impl Evaluator {
             if global_values.contains_key(&handle) || global.binding.is_some() {
                 continue;
             }
-            let value = match global.init {
-                Some(expr) => evaluate_global_expression(&module, expr),
-                None => Value::zero(&module, global.ty),
-            };
-            global_values.insert(handle, GlobalValue::Private(value));
+            if let Some(shared) = shared_global_values.get(&handle) {
+                global_values.insert(handle, GlobalValue::Shared(shared.clone()));
+            } else {
+                let value = match global.init {
+                    Some(expr) => evaluate_global_expression(&module, expr),
+                    None => Value::zero(&module, global.ty),
+                };
+                global_values.insert(handle, GlobalValue::Private(value));
+            }
         }
 
         let evaluator = Evaluator {
@@ -356,6 +361,17 @@ impl Evaluator {
         }
     }
 
+    pub(crate) fn set_current_expression_value(
+        &mut self,
+        handle: Handle<Expression>,
+        value: Value,
+    ) -> Result<(), EvaluatorError> {
+        self.current_function_frame_mut()?
+            .evaluated_expressions
+            .insert(handle, value);
+        Ok(())
+    }
+
     /// Index of the `Function` frame below `function_index` — the caller's frame, used for `CallResult`.
     fn parent_function_frame_index(&self, function_index: usize) -> Option<usize> {
         self.stack[..function_index]
@@ -548,6 +564,28 @@ impl Evaluator {
 
         // Resolve any signals/exhaustion produced by the statement we just ran,
         // then return whatever is live next (or None if execution finished).
+        self.advance_to_live_statement()?;
+
+        Ok(self.peek_next_statement())
+    }
+
+    pub(crate) fn current_statement(&mut self) -> Result<Option<NextStatement>, EvaluatorError> {
+        if !self.advance_to_live_statement()? {
+            return Ok(None);
+        }
+
+        Ok(self.peek_next_statement())
+    }
+
+    pub(crate) fn consume_current_statement_without_running(
+        &mut self,
+    ) -> Result<Option<NextStatement>, EvaluatorError> {
+        if !self.advance_to_live_statement()? {
+            return Ok(None);
+        }
+
+        let current_frame_index = self.current_frame_index()?;
+        self.stack[current_frame_index].increment_statement_index();
         self.advance_to_live_statement()?;
 
         Ok(self.peek_next_statement())
@@ -909,11 +947,11 @@ impl Evaluator {
         pointer: Handle<Expression>,
         value: Value,
     ) -> Result<(), EvaluatorError> {
-        let place = self.resolve_store_place(pointer)?;
+        let place = self.resolve_pointer_place(pointer)?;
         self.write_place(&place, value)
     }
 
-    fn resolve_store_place(
+    pub(crate) fn resolve_pointer_place(
         &mut self,
         pointer: Handle<Expression>,
     ) -> Result<Place, EvaluatorError> {
@@ -943,7 +981,7 @@ impl Evaluator {
                 }
             }
             Expression::AccessIndex { base, index } => {
-                let place = self.resolve_store_place(base)?;
+                let place = self.resolve_pointer_place(base)?;
                 Ok(place.with_index(index as usize))
             }
             Expression::Access { base, index } => {
@@ -953,7 +991,7 @@ impl Evaluator {
                     Value::Primitive(Primitive::I32(value)) if value >= 0 => value as usize,
                     other => return Err(EvaluatorError::IndexNotU32(format!("{other:?}"))),
                 };
-                let place = self.resolve_store_place(base)?;
+                let place = self.resolve_pointer_place(base)?;
                 Ok(place.with_index(index))
             }
             _ => match self.eval_expr(pointer, func_idx) {

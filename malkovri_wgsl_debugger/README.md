@@ -11,10 +11,15 @@ Supported:
 - [x] Basic compute shaders
 - [x] Basic buffer global inputs
 - [x] Multiple compute invocations in one workgroup
+- [x] `var<workgroup>` memory shared across workgroup invocations
+- [x] Workgroup/storage/subgroup barrier scheduling
+- [x] `workgroupUniformLoad`
+- [x] Subgroup ballot, gather, and collective operations represented by Naga IR
 - [x] All expressions
 
 TODO:
-- [ ] Workgroup memory and subgroup collectives
+- [ ] Atomics (`atomic`)
+- [ ] Image stores and image atomics (`imageStore`, `imageAtomic`)
 - [ ] Image and sampler inputs
 - [ ] Support for graphics pipeline with vertex + fragment shaders
 - [ ] ... and like a million things :-)
@@ -62,7 +67,6 @@ deno task build
   },
   "bindings": {
     "0:0": {
-      "type": "f32",
       "inline": [1.0, 2.0, 3.0, 4.0]
     }
   }
@@ -83,7 +87,16 @@ deno task build
 | `workgroupConfig.subgroupSize`  | number                | `4`           | Subgroup (warp) size. Must be a power of 2 in `[4, 128]` (WGSL spec). All thread IDs are derived from this and `workgroupSize`. |
 | `workgroupConfig.numWorkgroups` | `[u32, u32, u32]`     | `[1, 1, 1]`   | Total number of workgroups in the dispatch (used for `@builtin(num_workgroups)`).  |
 | `bindings`             | object                         | `{}`          | Resource bindings keyed by `"group:binding"` (e.g. `"0:0"`).                       |
-| `bindings[].type`      | `"f32"` \| `"i32"` \| `"u32"` | `"f32"`       | Element type of the buffer.                                                        |
+| `bindings[].type`      | `"f32"` \| `"i32"` \| `"u32"` | `"f32"`       | Optional element type of the buffer.                                                |
 | `bindings[].inline`    | array                          | —             | Inline array of values. Cannot be combined with `file`.                            |
 | `bindings[].file`      | string                         | —             | Path to a data file relative to the shader. Cannot be combined with `inline`.      |
+| `bindings[].fileContent` | string                       | —             | Inline file content; currently supports RON content.                               |
 | `bindings[].format`    | `"ron"` \| `"binary"`          | `"ron"`       | File format: `"ron"` (RON array) or `"binary"` (little-endian 4-byte values).     |
+
+## Architecture note
+
+The debugger models a compute workgroup as one `Evaluator` per invocation.
+`Debugger` owns the workgroup scheduler, DAP thread focus, breakpoints, and
+shared session state. Binding-backed globals and `var<workgroup>` globals are
+shared cells; `var<private>` globals and function-local state remain isolated
+per invocation.
