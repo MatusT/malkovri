@@ -228,6 +228,12 @@ impl Debugger {
         config.validate().map_err(DebuggerError::InvalidConfig)?;
 
         let module = Arc::new(wgsl_to_module(source)?);
+        if module.entry_points.get(entry_point_index).is_none() {
+            return Err(DebuggerError::InvalidConfig(format!(
+                "entry point index {entry_point_index} is invalid; shader has {} entry points",
+                module.entry_points.len()
+            )));
+        }
         let naga_bindings: HashMap<naga::ResourceBinding, Rc<RefCell<Value>>> = bindings
             .into_iter()
             .map(|(rb, v)| {
