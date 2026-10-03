@@ -148,17 +148,15 @@ impl DebugAdapter {
             .unwrap_or(program)
             .to_string();
 
-        self.program_path = Some(program_path.clone());
-        self.program_name = Some(program_name);
-        self.stop_on_entry = arguments
+        let stop_on_entry = arguments
             .get("stopOnEntry")
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
-        self.single_thread_execution = arguments
+        let single_thread_execution = arguments
             .get("singleThreadExecution")
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
-        self.trace_enabled = arguments
+        let trace_enabled = arguments
             .get("trace")
             .or_else(|| arguments.get("debugTrace"))
             .and_then(|value| value.as_bool())
@@ -199,6 +197,11 @@ impl DebugAdapter {
             global_constants,
             bindings,
         )?);
+        self.program_path = Some(program_path);
+        self.program_name = Some(program_name);
+        self.stop_on_entry = stop_on_entry;
+        self.single_thread_execution = single_thread_execution;
+        self.trace_enabled = trace_enabled;
         self.references.clear();
 
         let mut messages = Vec::new();
