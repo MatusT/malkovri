@@ -263,14 +263,15 @@ impl Debugger {
         let shared_workgroup_globals: HashMap<_, _> = module
             .global_variables
             .iter()
-            .filter_map(|(handle, global)| {
-                (global.binding.is_none() && global.space == AddressSpace::WorkGroup).then(|| {
-                    let value = match global.init {
-                        Some(expr) => evaluate_global_expression(&module, expr),
-                        None => Value::zero(&module, global.ty),
-                    };
-                    (handle, Rc::new(RefCell::new(value)))
-                })
+            .filter(|(_, global)| {
+                global.binding.is_none() && global.space == AddressSpace::WorkGroup
+            })
+            .map(|(handle, global)| {
+                let value = match global.init {
+                    Some(expr) => evaluate_global_expression(&module, expr),
+                    None => Value::zero(&module, global.ty),
+                };
+                (handle, Rc::new(RefCell::new(value)))
             })
             .collect();
 
