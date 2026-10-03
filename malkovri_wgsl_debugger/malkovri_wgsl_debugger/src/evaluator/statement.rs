@@ -218,20 +218,34 @@ impl Evaluator {
         };
 
         // Find the matching case, fall back to Default.
-        let body = cases
+        let matched = cases
             .iter()
-            .find(|c| matches!(&c.value, naga::SwitchValue::I32(v) if *v == selector_i32))
+            .position(|c| matches!(&c.value, naga::SwitchValue::I32(v) if *v == selector_i32))
             .or_else(|| {
-                cases.iter().find(
+                cases.iter().position(
                     |c| matches!(&c.value, naga::SwitchValue::U32(v) if *v == selector_i32 as u32),
                 )
             })
             .or_else(|| {
                 cases
                     .iter()
-                    .find(|c| matches!(&c.value, naga::SwitchValue::Default))
-            })
-            .map(|c| c.body.clone());
+                    .position(|c| matches!(&c.value, naga::SwitchValue::Default))
+            });
+
+        // Naga represents multiple selectors sharing a body as empty cases
+        // that fall through to the final selector's body.
+        let body = matched.map(|start| {
+            let mut body = naga::Block::new();
+            for case in &cases[start..] {
+                for (statement, span) in case.body.span_iter() {
+                    body.push(statement.clone(), *span);
+                }
+                if !case.fall_through {
+                    break;
+                }
+            }
+            body
+        });
 
         if let Some(body) = body
             && !body.is_empty()
