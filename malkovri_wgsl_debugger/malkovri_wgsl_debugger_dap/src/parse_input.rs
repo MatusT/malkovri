@@ -78,9 +78,12 @@ pub fn parse_bindings(
     arguments: &serde_json::Map<String, serde_json::Value>,
     #[cfg(not(target_arch = "wasm32"))] program_dir: &Path,
 ) -> Result<HashMap<ResourceBinding, Value>, DebugAdapterError> {
-    let Some(bindings) = arguments.get("bindings").and_then(|v| v.as_object()) else {
+    let Some(bindings) = arguments.get("bindings") else {
         return Ok(HashMap::new());
     };
+    let bindings = bindings
+        .as_object()
+        .ok_or_else(|| DebugAdapterError::Parse("bindings must be an object".into()))?;
 
     bindings
         .iter()
@@ -151,28 +154,52 @@ fn typed_array_from_json(
     type_str: &str,
     arr: &[serde_json::Value],
 ) -> Result<Value, DebugAdapterError> {
-    Ok(match type_str {
-        "f32" => Value::Array(
-            arr.iter()
-                .map(|v| Primitive::F32(v.as_f64().unwrap_or(0.0) as f32).into())
-                .collect(),
-        ),
-        "i32" => Value::Array(
-            arr.iter()
-                .map(|v| Primitive::I32(v.as_i64().unwrap_or(0) as i32).into())
-                .collect(),
-        ),
-        "u32" => Value::Array(
-            arr.iter()
-                .map(|v| Primitive::U32(v.as_u64().unwrap_or(0) as u32).into())
-                .collect(),
-        ),
-        _ => {
-            return Err(DebugAdapterError::Parse(format!(
-                "Unknown type '{type_str}' for binding '{key}'"
-            )));
-        }
+    validate_binding_type(key, type_str)?;
+    checked_array(key, type_str, arr.iter(), |value| match type_str {
+        "f32" => value
+            .as_f64()
+            .map(|value| value as f32)
+            .filter(|value| value.is_finite())
+            .map(Primitive::F32),
+        "i32" => value
+            .as_i64()
+            .and_then(|value| i32::try_from(value).ok())
+            .map(Primitive::I32),
+        "u32" => value
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .map(Primitive::U32),
+        _ => unreachable!("binding type was validated"),
     })
+}
+
+fn checked_array<T: std::fmt::Debug>(
+    key: &str,
+    type_str: &str,
+    values: impl IntoIterator<Item = T>,
+    convert: impl Fn(&T) -> Option<Primitive>,
+) -> Result<Value, DebugAdapterError> {
+    values
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            convert(&value).map(Value::from).ok_or_else(|| {
+                DebugAdapterError::Parse(format!(
+                    "Binding '{key}' element {index}: {value:?} is not a valid {type_str}"
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Value::Array)
+}
+
+fn validate_binding_type(key: &str, type_str: &str) -> Result<(), DebugAdapterError> {
+    match type_str {
+        "f32" | "i32" | "u32" => Ok(()),
+        _ => Err(DebugAdapterError::Parse(format!(
+            "Unknown type '{type_str}' for binding '{key}'"
+        ))),
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -246,35 +273,28 @@ fn parse_file_content(
 
 fn parse_ron(key: &str, type_str: &str, content: &str) -> Result<Value, DebugAdapterError> {
     let ron_err = |e| DebugAdapterError::Parse(format!("RON parse error for binding '{key}': {e}"));
-    Ok(match type_str {
+    match type_str {
         "f32" => {
-            let vals: Vec<f64> = ron::from_str(content).map_err(ron_err)?;
-            Value::Array(
-                vals.into_iter()
-                    .map(|v| Primitive::F32(v as f32).into())
-                    .collect(),
-            )
+            let values: Vec<f64> = ron::from_str(content).map_err(ron_err)?;
+            checked_array(key, type_str, values, |value| {
+                let value = *value as f32;
+                value.is_finite().then_some(Primitive::F32(value))
+            })
         }
         "i32" => {
-            let vals: Vec<i64> = ron::from_str(content).map_err(ron_err)?;
-            Value::Array(
-                vals.into_iter()
-                    .map(|v| Primitive::I32(v as i32).into())
-                    .collect(),
-            )
+            let values: Vec<i64> = ron::from_str(content).map_err(ron_err)?;
+            checked_array(key, type_str, values, |value| {
+                i32::try_from(*value).ok().map(Primitive::I32)
+            })
         }
         "u32" => {
-            let vals: Vec<u64> = ron::from_str(content).map_err(ron_err)?;
-            Value::Array(
-                vals.into_iter()
-                    .map(|v| Primitive::U32(v as u32).into())
-                    .collect(),
-            )
+            let values: Vec<u64> = ron::from_str(content).map_err(ron_err)?;
+            checked_array(key, type_str, values, |value| {
+                u32::try_from(*value).ok().map(Primitive::U32)
+            })
         }
-        _ => {
-            return Err(DebugAdapterError::Parse(format!(
-                "Unknown type '{type_str}' for binding '{key}'"
-            )));
-        }
-    })
+        _ => Err(DebugAdapterError::Parse(format!(
+            "Unknown type '{type_str}' for binding '{key}'"
+        ))),
+    }
 }
