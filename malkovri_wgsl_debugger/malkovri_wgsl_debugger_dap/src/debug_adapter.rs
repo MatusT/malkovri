@@ -9,10 +9,12 @@ use crate::error::DebugAdapterError;
 use crate::parse_input;
 use crate::protocol::{BreakpointId, OutgoingMessage, StackFrameId, make_variable};
 use crate::references::{FrameReference, References, ScopeKind};
-use malkovri_wgsl_debugger::{DebugThreadId, Debugger, StepResult, ThreadState};
+use malkovri_wgsl_debugger::{DebugThreadId, Debugger, EvaluatorError, StepResult, ThreadState};
 
 // Defensive UI budget, not shader semantics: if catch-up cannot settle, stop anyway.
 const BREAKPOINT_CATCH_UP_STEP_BUDGET: usize = 100_000;
+// Bound synchronous requests so the host regains control even for an infinite shader.
+const EXECUTION_STEP_BUDGET: usize = 100_000;
 
 pub struct DebugAdapter {
     sequence_number: i64,
@@ -682,6 +684,11 @@ impl DebugAdapter {
                     }
                 }
             }
+            if steps >= EXECUTION_STEP_BUDGET {
+                pause_description =
+                    Some("Execution paused after reaching the step budget; continue to resume.");
+                break;
+            }
         }
 
         if let Some(description) = pause_description {
@@ -837,10 +844,15 @@ impl DebugAdapter {
         &mut self,
         error: &DebugAdapterError,
     ) -> Result<OutgoingMessage, DebugAdapterError> {
-        self.make_stopped_event_with_description(
-            dapts::StoppedEventReason::Exception,
-            Some(&error.to_string()),
-        )
+        let reason = if matches!(
+            error,
+            DebugAdapterError::Evaluator(EvaluatorError::ExecutionBudgetExceeded)
+        ) {
+            dapts::StoppedEventReason::Pause
+        } else {
+            dapts::StoppedEventReason::Exception
+        };
+        self.make_stopped_event_with_description(reason, Some(&error.to_string()))
     }
 
     fn thread_stop_description(state: ThreadState) -> &'static str {

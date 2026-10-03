@@ -32,6 +32,8 @@ pub enum EvaluatorError {
     UnsupportedVectorType(String),
     #[error("Synchronization error: {0}")]
     SynchronizationError(String),
+    #[error("Execution paused: control-flow step budget exceeded; continue to resume")]
+    ExecutionBudgetExceeded,
     #[error("Internal error: {0}")]
     InternalError(String),
 }

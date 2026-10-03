@@ -13,7 +13,9 @@ impl Evaluator {
     /// Advance past any pending control-flow signals and exhausted frames until
     /// a live statement is ready to execute (or the stack is empty).
     fn advance_to_live_statement(&mut self) -> Result<bool, EvaluatorError> {
-        loop {
+        // An empty infinite loop has no live statement to yield to the scheduler.
+        // Bound normalization as well as the outer execution loop.
+        for _ in 0..100_000 {
             if self.stack.is_empty() {
                 return Ok(false);
             }
@@ -30,6 +32,7 @@ impl Evaluator {
 
             return Ok(true);
         }
+        Err(EvaluatorError::ExecutionBudgetExceeded)
     }
 
     /// If the current function frame has a pending control-flow signal, apply it
