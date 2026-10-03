@@ -28,6 +28,15 @@ impl Value {
         }
     }
 
+    /// Read a scalar u32 or a nonnegative i32 as an unsigned integer.
+    pub(crate) fn as_u32(&self) -> Option<u32> {
+        match self {
+            Self::Primitive(Primitive::U32(value)) => Some(*value),
+            Self::Primitive(Primitive::I32(value)) => u32::try_from(*value).ok(),
+            _ => None,
+        }
+    }
+
     pub fn as_primitive(&self) -> Option<&Primitive> {
         match self {
             Value::Primitive(p) => Some(p),
@@ -308,6 +317,24 @@ impl Value {
                 "zip_map_numeric: expected two primitives, got {:?} and {:?}",
                 a, b
             ),
+        }
+    }
+
+    pub(crate) fn min(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Primitive(a), Self::Primitive(b)) => {
+                a.min(b).expect("min: incompatible numeric types").into()
+            }
+            (a, b) => panic!("min: expected two primitives, got {a:?} and {b:?}"),
+        }
+    }
+
+    pub(crate) fn max(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Primitive(a), Self::Primitive(b)) => {
+                a.max(b).expect("max: incompatible numeric types").into()
+            }
+            (a, b) => panic!("max: expected two primitives, got {a:?} and {b:?}"),
         }
     }
 

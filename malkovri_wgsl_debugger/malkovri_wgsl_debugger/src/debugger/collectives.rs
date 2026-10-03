@@ -273,20 +273,21 @@ impl Debugger {
     fn gather_target_lane(invocation: &InvocationState, lane: u32, mode: GatherMode) -> u32 {
         match mode {
             GatherMode::BroadcastFirst => lane,
-            GatherMode::Broadcast(expr) | GatherMode::Shuffle(expr) => {
-                Self::evaluate_u32(invocation, expr).unwrap_or(lane)
-            }
+            GatherMode::Broadcast(expr) | GatherMode::Shuffle(expr) => invocation
+                .evaluate_expression(expr)
+                .as_u32()
+                .unwrap_or(lane),
             GatherMode::ShuffleDown(expr) => {
-                lane.saturating_add(Self::evaluate_u32(invocation, expr).unwrap_or(0))
+                lane.saturating_add(invocation.evaluate_expression(expr).as_u32().unwrap_or(0))
             }
             GatherMode::ShuffleUp(expr) => {
-                lane.saturating_sub(Self::evaluate_u32(invocation, expr).unwrap_or(0))
+                lane.saturating_sub(invocation.evaluate_expression(expr).as_u32().unwrap_or(0))
             }
             GatherMode::ShuffleXor(expr) => {
-                lane ^ Self::evaluate_u32(invocation, expr).unwrap_or(0)
+                lane ^ invocation.evaluate_expression(expr).as_u32().unwrap_or(0)
             }
             GatherMode::QuadBroadcast(expr) => {
-                let index = Self::evaluate_u32(invocation, expr).unwrap_or(0) % 4;
+                let index = invocation.evaluate_expression(expr).as_u32().unwrap_or(0) % 4;
                 (lane / 4) * 4 + index
             }
             GatherMode::QuadSwap(direction) => {
@@ -296,14 +297,6 @@ impl Debugger {
                     naga::Direction::Diagonal => 3,
                 }
             }
-        }
-    }
-
-    fn evaluate_u32(invocation: &InvocationState, expr: Handle<Expression>) -> Option<u32> {
-        match invocation.evaluate_expression(expr) {
-            Value::Primitive(Primitive::U32(value)) => Some(value),
-            Value::Primitive(Primitive::I32(value)) if value >= 0 => Some(value as u32),
-            _ => None,
         }
     }
 
@@ -372,8 +365,12 @@ impl Debugger {
         let primitive = match op {
             SubgroupOperation::Add => left + right,
             SubgroupOperation::Mul => left * right,
-            SubgroupOperation::Min => Self::primitive_min(left, right)?,
-            SubgroupOperation::Max => Self::primitive_max(left, right)?,
+            SubgroupOperation::Min => left
+                .min(right)
+                .ok_or_else(|| EvaluatorError::UnsupportedStatement("subgroup min type".into()))?,
+            SubgroupOperation::Max => left
+                .max(right)
+                .ok_or_else(|| EvaluatorError::UnsupportedStatement("subgroup max type".into()))?,
             SubgroupOperation::And => left & right,
             SubgroupOperation::Or => left | right,
             SubgroupOperation::Xor => left ^ right,
@@ -401,12 +398,8 @@ impl Debugger {
             return Ok(Value::Uninitialized);
         };
         let primitive = match op {
-            SubgroupOperation::Add => {
-                Self::map_primitive_components(*sample, |_| 0.0, |_| 0, |_| 0)
-            }
-            SubgroupOperation::Mul => {
-                Self::map_primitive_components(*sample, |_| 1.0, |_| 1, |_| 1)
-            }
+            SubgroupOperation::Add => sample.zero_like(),
+            SubgroupOperation::Mul => sample.one_like(),
             other => {
                 return Err(EvaluatorError::UnsupportedStatement(format!(
                     "subgroup {:?} scan",
@@ -415,43 +408,5 @@ impl Debugger {
             }
         };
         Ok(Value::Primitive(primitive))
-    }
-
-    fn primitive_min(left: Primitive, right: Primitive) -> Result<Primitive, EvaluatorError> {
-        left.zip_map_numeric(right, f32::min, i32::min, u32::min)
-            .or_else(|| match (left, right) {
-                (Primitive::F64(a), Primitive::F64(b)) => Some(Primitive::F64(a.min(b))),
-                (Primitive::I64(a), Primitive::I64(b)) => Some(Primitive::I64(a.min(b))),
-                (Primitive::U64(a), Primitive::U64(b)) => Some(Primitive::U64(a.min(b))),
-                _ => None,
-            })
-            .ok_or_else(|| EvaluatorError::UnsupportedStatement("subgroup min type".to_string()))
-    }
-
-    fn primitive_max(left: Primitive, right: Primitive) -> Result<Primitive, EvaluatorError> {
-        left.zip_map_numeric(right, f32::max, i32::max, u32::max)
-            .or_else(|| match (left, right) {
-                (Primitive::F64(a), Primitive::F64(b)) => Some(Primitive::F64(a.max(b))),
-                (Primitive::I64(a), Primitive::I64(b)) => Some(Primitive::I64(a.max(b))),
-                (Primitive::U64(a), Primitive::U64(b)) => Some(Primitive::U64(a.max(b))),
-                _ => None,
-            })
-            .ok_or_else(|| EvaluatorError::UnsupportedStatement("subgroup max type".to_string()))
-    }
-
-    fn map_primitive_components(
-        primitive: Primitive,
-        ff32: impl Fn(f32) -> f32 + Copy,
-        fi32: impl Fn(i32) -> i32 + Copy,
-        fu32: impl Fn(u32) -> u32 + Copy,
-    ) -> Primitive {
-        primitive
-            .map_numeric(ff32, fi32, fu32)
-            .unwrap_or(match primitive {
-                Primitive::F64(_) => Primitive::F64(ff32(0.0) as f64),
-                Primitive::I64(_) => Primitive::I64(fi32(0) as i64),
-                Primitive::U64(_) => Primitive::U64(fu32(0) as u64),
-                other => other,
-            })
     }
 }

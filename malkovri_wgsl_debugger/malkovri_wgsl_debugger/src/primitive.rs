@@ -493,6 +493,70 @@ impl Primitive {
             .or_else(|| apply_u32(&self, &other, fu32))
     }
 
+    /// Component-wise minimum of compatible numeric primitives.
+    pub(crate) fn min(self, other: Self) -> Option<Self> {
+        self.zip_map_numeric(other, f32::min, i32::min, u32::min)
+            .or_else(|| match (self, other) {
+                (Self::F64(a), Self::F64(b)) => Some(Self::F64(a.min(b))),
+                (Self::I64(a), Self::I64(b)) => Some(Self::I64(a.min(b))),
+                (Self::U64(a), Self::U64(b)) => Some(Self::U64(a.min(b))),
+                _ => None,
+            })
+    }
+
+    /// Component-wise maximum of compatible numeric primitives.
+    pub(crate) fn max(self, other: Self) -> Option<Self> {
+        self.zip_map_numeric(other, f32::max, i32::max, u32::max)
+            .or_else(|| match (self, other) {
+                (Self::F64(a), Self::F64(b)) => Some(Self::F64(a.max(b))),
+                (Self::I64(a), Self::I64(b)) => Some(Self::I64(a.max(b))),
+                (Self::U64(a), Self::U64(b)) => Some(Self::U64(a.max(b))),
+                _ => None,
+            })
+    }
+
+    /// Zero with the same scalar kind and vector width as this primitive.
+    pub(crate) fn zero_like(self) -> Self {
+        match self {
+            Self::F32(_) => Self::F32(0.0),
+            Self::F64(_) => Self::F64(0.0),
+            Self::I32(_) => Self::I32(0),
+            Self::I64(_) => Self::I64(0),
+            Self::U32(_) => Self::U32(0),
+            Self::U64(_) => Self::U64(0),
+            Self::F32x2(_) => Self::F32x2([0.0; 2]),
+            Self::F32x3(_) => Self::F32x3([0.0; 3]),
+            Self::F32x4(_) => Self::F32x4([0.0; 4]),
+            Self::I32x2(_) => Self::I32x2([0; 2]),
+            Self::I32x3(_) => Self::I32x3([0; 3]),
+            Self::I32x4(_) => Self::I32x4([0; 4]),
+            Self::U32x2(_) => Self::U32x2([0; 2]),
+            Self::U32x3(_) => Self::U32x3([0; 3]),
+            Self::U32x4(_) => Self::U32x4([0; 4]),
+        }
+    }
+
+    /// One in every component, preserving scalar kind and vector width.
+    pub(crate) fn one_like(self) -> Self {
+        match self {
+            Self::F32(_) => Self::F32(1.0),
+            Self::F64(_) => Self::F64(1.0),
+            Self::I32(_) => Self::I32(1),
+            Self::I64(_) => Self::I64(1),
+            Self::U32(_) => Self::U32(1),
+            Self::U64(_) => Self::U64(1),
+            Self::F32x2(_) => Self::F32x2([1.0; 2]),
+            Self::F32x3(_) => Self::F32x3([1.0; 3]),
+            Self::F32x4(_) => Self::F32x4([1.0; 4]),
+            Self::I32x2(_) => Self::I32x2([1; 2]),
+            Self::I32x3(_) => Self::I32x3([1; 3]),
+            Self::I32x4(_) => Self::I32x4([1; 4]),
+            Self::U32x2(_) => Self::U32x2([1; 2]),
+            Self::U32x3(_) => Self::U32x3([1; 3]),
+            Self::U32x4(_) => Self::U32x4([1; 4]),
+        }
+    }
+
     /// Component-wise ternary over f32/i32/u32.
     pub fn zip3_map_numeric(
         self,

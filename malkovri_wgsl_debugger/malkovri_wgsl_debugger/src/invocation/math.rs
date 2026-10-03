@@ -27,22 +27,6 @@ fn math_unary_float_or_int(
     }
 }
 
-fn math_binary_float_or_int(
-    a: Value,
-    b: Value,
-    ff32: impl Fn(f32, f32) -> f32,
-    ff64: impl Fn(f64, f64) -> f64,
-    fi32: impl Fn(i32, i32) -> i32,
-    fu32: impl Fn(u32, u32) -> u32,
-) -> Value {
-    match (&a, &b) {
-        (Value::Primitive(Primitive::F64(av)), Value::Primitive(Primitive::F64(bv))) => {
-            Primitive::F64(ff64(*av, *bv)).into()
-        }
-        _ => a.zip_map_numeric(b, ff32, fi32, fu32),
-    }
-}
-
 fn math_unary_int(val: Value, fi32: impl Fn(i32) -> i32, fu32: impl Fn(u32) -> u32) -> Value {
     // Guard: integer-only functions should not silently corrupt float inputs.
     if let Some(p) = val.as_primitive()
@@ -87,22 +71,8 @@ impl InvocationState {
                 |v: i32| v.wrapping_abs(),
                 |v: u32| v,
             ),
-            MathFunction::Min => math_binary_float_or_int(
-                a,
-                b.unwrap_or(Value::Uninitialized),
-                f32::min,
-                f64::min,
-                i32::min,
-                u32::min,
-            ),
-            MathFunction::Max => math_binary_float_or_int(
-                a,
-                b.unwrap_or(Value::Uninitialized),
-                f32::max,
-                f64::max,
-                i32::max,
-                u32::max,
-            ),
+            MathFunction::Min => a.min(b.unwrap_or(Value::Uninitialized)),
+            MathFunction::Max => a.max(b.unwrap_or(Value::Uninitialized)),
             MathFunction::Clamp => {
                 let b_val = b.unwrap_or(Value::Uninitialized);
                 let c_val = c.unwrap_or(Value::Uninitialized);
