@@ -379,7 +379,9 @@ impl Evaluator {
                 match (scalar.kind, scalar.width) {
                     (ScalarKind::Float, 4) => compose_vec!(Value::collect_f32_components),
                     (ScalarKind::Sint, 4) => compose_vec!(Value::collect_i32_components),
-                    (ScalarKind::Uint, 4) => compose_vec!(Value::collect_u32_components),
+                    (ScalarKind::Uint, 4) | (ScalarKind::Bool, _) => {
+                        compose_vec!(Value::collect_u32_components)
+                    }
                     _ => Value::Uninitialized,
                 }
             }
@@ -507,16 +509,36 @@ impl Evaluator {
     ) -> Value {
         let cond = self.eval_value(condition, func_idx);
 
-        let is_true = match cond {
-            Value::Primitive(Primitive::U32(v)) => v != 0,
-            _ => false,
-        };
-
-        if is_true {
-            self.eval_value(accept, func_idx)
-        } else {
-            self.eval_value(reject, func_idx)
+        if let Value::Primitive(Primitive::U32(condition)) = cond {
+            return self.eval_value(if condition != 0 { accept } else { reject }, func_idx);
         }
+
+        let accept = self.eval_value(accept, func_idx);
+        let reject = self.eval_value(reject, func_idx);
+        let Some(condition) = cond.as_primitive().and_then(Primitive::as_u32_slice) else {
+            return Value::Uninitialized;
+        };
+        let (Some(accept), Some(reject)) = (accept.as_primitive(), reject.as_primitive()) else {
+            return Value::Uninitialized;
+        };
+        fn select<T: Copy>(accept: &[T], reject: &[T], condition: &[u32]) -> Vec<T> {
+            accept
+                .iter()
+                .zip(reject)
+                .zip(condition)
+                .map(|((&a, &r), &c)| if c != 0 { a } else { r })
+                .collect()
+        }
+        if let (Some(a), Some(r)) = (accept.as_f32_slice(), reject.as_f32_slice()) {
+            return Primitive::from(select(a, r, condition).as_slice()).into();
+        }
+        if let (Some(a), Some(r)) = (accept.as_i32_slice(), reject.as_i32_slice()) {
+            return Primitive::from(select(a, r, condition).as_slice()).into();
+        }
+        if let (Some(a), Some(r)) = (accept.as_u32_slice(), reject.as_u32_slice()) {
+            return Primitive::from(select(a, r, condition).as_slice()).into();
+        }
+        Value::Uninitialized
     }
 }
 
@@ -577,7 +599,9 @@ pub(crate) fn evaluate_global_expression(
                     match (scalar.kind, scalar.width) {
                         (ScalarKind::Float, 4) => compose_vec!(Value::collect_f32_components),
                         (ScalarKind::Sint, 4) => compose_vec!(Value::collect_i32_components),
-                        (ScalarKind::Uint, 4) => compose_vec!(Value::collect_u32_components),
+                        (ScalarKind::Uint, 4) | (ScalarKind::Bool, _) => {
+                            compose_vec!(Value::collect_u32_components)
+                        }
                         _ => Value::Uninitialized,
                     }
                 }
