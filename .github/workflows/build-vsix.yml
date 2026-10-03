@@ -18,6 +18,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
 
       - uses: denoland/setup-deno@v2
         with:
@@ -26,12 +27,24 @@ jobs:
       - name: Install wasm-pack
         run: cargo install wasm-pack
 
+      - name: Check Rust formatting and lints
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test interpreter and debug adapter
+        run: cargo test --workspace --all-targets
+
       - name: Build WASM
         run: wasm-pack build --target web malkovri_wgsl_debugger_wasm
 
       - name: Install dependencies
         working-directory: malkovri_wgsl_debugger/vscode_extension
         run: deno install
+
+      - name: Check extension types
+        working-directory: malkovri_wgsl_debugger/vscode_extension
+        run: deno check src/extension.ts build/build.ts
 
       - name: Build extension and package VSIX
         working-directory: malkovri_wgsl_debugger/vscode_extension
