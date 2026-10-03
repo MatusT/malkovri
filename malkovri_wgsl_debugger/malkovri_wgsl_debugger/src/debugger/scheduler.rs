@@ -28,7 +28,9 @@ impl Debugger {
                 continue;
             }
             self.focused_thread = gid;
-            self.step_gid(gid)?;
+            let result = self.step_gid(gid);
+            self.focused_thread = focused_thread;
+            result?;
         }
         self.focused_thread = focused_thread;
         self.release_ready_parked_threads()?;

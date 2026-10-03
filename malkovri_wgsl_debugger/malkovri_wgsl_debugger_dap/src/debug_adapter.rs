@@ -68,7 +68,15 @@ impl DebugAdapter {
     ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         match self.dispatch_request(req) {
             Ok(messages) => Ok(messages),
-            Err(error) => Ok(vec![self.make_error_response(req, &error)]),
+            Err(error) => {
+                let mut messages = vec![self.make_error_response(req, &error)];
+                if matches!(req.command.as_str(), "next" | "continue")
+                    && matches!(error, DebugAdapterError::Evaluator(_))
+                {
+                    messages.push(self.make_execution_error_event(&error)?);
+                }
+                Ok(messages)
+            }
         }
     }
 
@@ -777,7 +785,10 @@ impl DebugAdapter {
             self.make_stopped_event(dapts::StoppedEventReason::Entry)
         } else {
             let thread_id = self.debugger()?.focused_thread_id();
-            self.run_to_breakpoint(thread_id, false, &mut Vec::new())
+            match self.run_to_breakpoint(thread_id, false, &mut Vec::new()) {
+                Ok(event) => Ok(event),
+                Err(error) => self.make_execution_error_event(&error),
+            }
         }
     }
 
@@ -820,6 +831,16 @@ impl DebugAdapter {
         reason: dapts::StoppedEventReason,
     ) -> Result<OutgoingMessage, DebugAdapterError> {
         self.make_stopped_event_with_description(reason, None)
+    }
+
+    fn make_execution_error_event(
+        &mut self,
+        error: &DebugAdapterError,
+    ) -> Result<OutgoingMessage, DebugAdapterError> {
+        self.make_stopped_event_with_description(
+            dapts::StoppedEventReason::Exception,
+            Some(&error.to_string()),
+        )
     }
 
     fn thread_stop_description(state: ThreadState) -> &'static str {
