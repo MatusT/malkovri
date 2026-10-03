@@ -16,7 +16,7 @@ impl Evaluator {
         self.global_values
             .iter()
             .map(|(handle, value)| {
-                let name = self.module.global_variables[*handle].name.clone();
+                let name = self.program.module().global_variables[*handle].name.clone();
                 (name, value.read())
             })
             .collect()
@@ -33,7 +33,7 @@ impl Evaluator {
                 "unknown function frame".into(),
             ));
         };
-        let function = self.resolve_function(&frame.function_ref);
+        let function = self.resolve_function(&frame.function_id);
         Ok(function
             .arguments
             .iter()
@@ -56,10 +56,11 @@ impl Evaluator {
                 "unknown function frame".into(),
             ));
         };
-        let function = self.resolve_function(&frame.function_ref);
+        let function = self.resolve_function(&frame.function_id);
         let declaring_scopes = self
-            .declaring_scopes
-            .local_scopes(&frame.function_ref)
+            .program
+            .scopes
+            .local_scopes(&frame.function_id)
             .ok_or_else(|| {
                 EvaluatorError::InternalError("missing local declaring scopes".into())
             })?;
@@ -69,8 +70,9 @@ impl Evaluator {
         let current_scope = self.scope_range(context);
 
         // Current execution position for the "declared before" check.
-        let current_pos = current_block
-            .statements()
+        let current_pos = self
+            .program
+            .block(current_block.block())
             .span_iter()
             .nth(context.statement_index)
             .and_then(|(_, sp)| sp.to_range())
@@ -111,10 +113,11 @@ impl Evaluator {
                 "unknown function frame".into(),
             ));
         };
-        let function = self.resolve_function(&frame.function_ref);
+        let function = self.resolve_function(&frame.function_id);
         let declaring_scopes = self
-            .declaring_scopes
-            .named_expression_scopes(&frame.function_ref)
+            .program
+            .scopes
+            .named_expression_scopes(&frame.function_id)
             .ok_or_else(|| {
                 EvaluatorError::InternalError("missing named expression scopes".into())
             })?;
@@ -129,10 +132,13 @@ impl Evaluator {
             } else {
                 frame.current_statement_index()
             };
-            for (i, (stmt, _)) in frame.statements().span_iter().enumerate() {
+            for (i, (stmt, _)) in self.program.block(frame.block()).span_iter().enumerate() {
                 if i > limit {
                     break;
                 }
+                let Some(stmt) = stmt.leaf() else {
+                    continue;
+                };
                 if i < limit
                     && let Some(result) = statement_result_expression(stmt)
                 {

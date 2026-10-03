@@ -52,27 +52,29 @@ impl Debugger {
         let StackFrame::Function(frame) = &evaluator.stack[context.function_index] else {
             return None;
         };
-        let function = evaluator.resolve_function(&frame.function_ref);
+        let function = evaluator.resolve_function(&frame.function_id);
         let function_name = function.name.clone();
-        let (current_statement, span) = evaluator.stack[context.block_index]
-            .statements()
+        let (current_statement, span) = self
+            .program
+            .block(evaluator.stack[context.block_index].block())
             .span_iter()
             .nth(context.statement_index)?;
 
-        let (line, column) =
-            if matches!(current_statement, Statement::Return { .. }) && span.to_range().is_none() {
-                // For return statements, point to the line after the closing brace
-                // of the function body rather than the span of the return itself.
-                let func = function;
-                let total_span = naga::Span::total_span(func.body.span_iter().map(|(_, s)| *s));
-                let total_range = total_span.to_range()?;
-                let prefix = &self.source[..total_range.end];
-                let line_number = prefix.matches('\n').count() as u32 + 2;
-                (line_number, 0)
-            } else {
-                let loc = span.location(&self.source);
-                (loc.line_number, loc.line_position)
-            };
+        let (line, column) = if matches!(current_statement.leaf(), Some(Statement::Return { .. }))
+            && span.to_range().is_none()
+        {
+            // For return statements, point to the line after the closing brace
+            // of the function body rather than the span of the return itself.
+            let func = function;
+            let total_span = naga::Span::total_span(func.body.span_iter().map(|(_, s)| *s));
+            let total_range = total_span.to_range()?;
+            let prefix = &self.source()[..total_range.end];
+            let line_number = prefix.matches('\n').count() as u32 + 2;
+            (line_number, 0)
+        } else {
+            let loc = span.location(self.source());
+            (loc.line_number, loc.line_position)
+        };
 
         Some(SourceLocation {
             line,
@@ -107,7 +109,7 @@ impl Debugger {
                         .frame_context(index)
                         .map(|context| StackFrameInfo {
                             id: DebugFrameId(index),
-                            name: evaluator.resolve_function(&frame.function_ref).name.clone(),
+                            name: evaluator.resolve_function(&frame.function_id).name.clone(),
                             location: self.frame_location(evaluator, context),
                         }),
                 )
@@ -134,7 +136,7 @@ impl Debugger {
         let StackFrame::Function(frame) = &evaluator.stack[context.function_index] else {
             unreachable!()
         };
-        let function = evaluator.resolve_function(&frame.function_ref);
+        let function = evaluator.resolve_function(&frame.function_id);
         let in_scope = evaluator.local_variables_in_scope(context)?;
         let mut variables: Vec<_> = function
             .local_variables

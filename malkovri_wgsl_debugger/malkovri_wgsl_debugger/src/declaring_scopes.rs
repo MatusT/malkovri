@@ -2,11 +2,11 @@ use std::collections::HashMap;
 
 use naga::{Expression, Handle, LocalVariable, Module, Span, Statement};
 
-use crate::function_state::FunctionRef;
+use crate::program::FunctionId;
 
 /// Pre-computed declaring-scope maps for every function in a module.
 pub struct ModuleScopes {
-    functions: HashMap<FunctionRef, FunctionScopes>,
+    functions: HashMap<FunctionId, FunctionScopes>,
 }
 
 impl ModuleScopes {
@@ -14,11 +14,11 @@ impl ModuleScopes {
         let mut functions = HashMap::new();
 
         for (handle, function) in module.functions.iter() {
-            functions.insert(FunctionRef::Called(handle), FunctionScopes::new(function));
+            functions.insert(FunctionId::Called(handle), FunctionScopes::new(function));
         }
         for (i, entry_point) in module.entry_points.iter().enumerate() {
             functions.insert(
-                FunctionRef::EntryPoint(i),
+                FunctionId::EntryPoint(i),
                 FunctionScopes::new(&entry_point.function),
             );
         }
@@ -28,14 +28,14 @@ impl ModuleScopes {
 
     pub fn local_scopes(
         &self,
-        fref: &FunctionRef,
+        fref: &FunctionId,
     ) -> Option<&HashMap<Handle<LocalVariable>, std::ops::Range<usize>>> {
         self.functions.get(fref).map(|s| &s.locals)
     }
 
     pub fn named_expression_scopes(
         &self,
-        fref: &FunctionRef,
+        fref: &FunctionId,
     ) -> Option<&HashMap<Handle<Expression>, std::ops::Range<usize>>> {
         self.functions.get(fref).map(|s| &s.named_exprs)
     }

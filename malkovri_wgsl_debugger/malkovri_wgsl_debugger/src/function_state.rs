@@ -1,8 +1,13 @@
 use std::collections::HashMap;
 
-use naga::{Expression, Function, Handle, LocalVariable};
+use naga::{Expression, Handle, LocalVariable};
 
-use crate::{place::ArgumentValue, place::ExpressionCache, value::Value};
+use crate::{
+    place::ArgumentValue,
+    place::ExpressionCache,
+    program::{BlockId, FunctionId, ShaderProgram, StatementId},
+    value::Value,
+};
 
 /// Control-flow signal set on a [`FunctionFrame`] by `break`, `continue`, or `return`.
 /// [`Evaluator::step`] reads these signals and performs the appropriate stack
@@ -16,15 +21,6 @@ pub(crate) enum ControlFlow {
     Return(Option<Value>),
 }
 
-/// Identifies a function in the module without owning/cloning it.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum FunctionRef {
-    /// An entry-point function, looked up via `module.entry_points[index].function`.
-    EntryPoint(usize),
-    /// A regular function, looked up via `module.functions[handle]`.
-    Called(Handle<Function>),
-}
-
 /// The kind of block a [`BlockFrame`] represents, carrying the information needed to
 /// implement its control-flow semantics.
 #[derive(Clone, Debug)]
@@ -35,25 +31,28 @@ pub(crate) enum BlockKind {
     /// `other_block` holds whichever block is *not* currently executing:
     /// while running the body it holds `continuing`, and vice versa.
     Loop {
-        other_block: naga::Block,
+        other_block: BlockId,
         break_if: Option<Handle<Expression>>,
         /// `true` once we have finished the body and are executing the continuing block.
         in_continuing: bool,
     },
     /// A switch-case body.
-    Switch,
+    Switch {
+        statement: StatementId,
+        next_case: Option<usize>,
+    },
 }
 
 /// A function call frame on the unified execution stack.
 #[derive(Clone, Debug)]
 pub(crate) struct FunctionFrame {
     /// Reference to the function in the module.
-    pub(crate) function_ref: FunctionRef,
+    pub(crate) function_id: FunctionId,
     pub(crate) local_variables: HashMap<Handle<LocalVariable>, Value>,
     pub(crate) evaluated_expressions: ExpressionCache,
     pub(crate) evaluated_function_arguments: Vec<ArgumentValue>,
     /// The top-level statements of the function body.
-    pub(crate) statements: naga::Block,
+    pub(crate) block: BlockId,
     pub(crate) current_statement_index: usize,
     /// The `Expression::CallResult` handle in the *parent* frame that should receive
     /// this function's return value.  `None` for the entry-point frame and for
@@ -68,7 +67,7 @@ pub(crate) struct FunctionFrame {
 #[derive(Clone, Debug)]
 pub(crate) struct BlockFrame {
     /// The currently active statements (either the loop body or the continuing block).
-    pub(crate) statements: naga::Block,
+    pub(crate) block: BlockId,
     pub(crate) current_statement_index: usize,
     pub(crate) kind: BlockKind,
 }
@@ -82,7 +81,7 @@ impl BlockFrame {
             ..
         } = self.kind
         {
-            std::mem::swap(&mut self.statements, other_block);
+            std::mem::swap(&mut self.block, other_block);
             self.current_statement_index = 0;
             *in_continuing = true;
         }
@@ -96,7 +95,7 @@ impl BlockFrame {
             ..
         } = self.kind
         {
-            std::mem::swap(&mut self.statements, other_block);
+            std::mem::swap(&mut self.block, other_block);
             self.current_statement_index = 0;
             *in_continuing = false;
         }
@@ -121,11 +120,17 @@ pub(crate) struct FrameContext {
 }
 
 impl StackFrame {
-    /// The currently active statements for this frame.
-    pub(crate) fn statements(&self) -> &naga::Block {
+    pub(crate) fn block(&self) -> BlockId {
         match self {
-            StackFrame::Function(f) => &f.statements,
-            StackFrame::Block(b) => &b.statements,
+            StackFrame::Function(frame) => frame.block,
+            StackFrame::Block(frame) => frame.block,
+        }
+    }
+
+    pub(crate) fn position(&self) -> StatementId {
+        StatementId {
+            block: self.block(),
+            index: self.current_statement_index(),
         }
     }
 
@@ -146,13 +151,7 @@ impl StackFrame {
     }
 
     /// Whether this frame has executed all its statements.
-    pub(crate) fn is_exhausted(&self) -> bool {
-        self.current_statement_index() >= self.statements().len()
+    pub(crate) fn is_exhausted(&self, program: &ShaderProgram) -> bool {
+        self.current_statement_index() >= program.block(self.block()).len()
     }
-}
-
-/// The statement that will be executed next.
-#[derive(Clone, Debug)]
-pub(crate) struct NextStatement {
-    pub(crate) statement: naga::Statement,
 }

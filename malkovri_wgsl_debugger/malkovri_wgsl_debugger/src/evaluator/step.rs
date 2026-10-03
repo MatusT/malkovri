@@ -1,10 +1,12 @@
+use crate::program::FunctionId;
 use crate::{
     error::EvaluatorError,
-    function_state::{BlockFrame, BlockKind, ControlFlow, FunctionRef, NextStatement, StackFrame},
+    function_state::{BlockFrame, BlockKind, ControlFlow, StackFrame},
+    program::{Instruction, StatementId},
     value::Value,
 };
 
-use naga::Statement;
+use std::sync::Arc;
 
 use super::Evaluator;
 
@@ -64,7 +66,7 @@ impl Evaluator {
 
     /// If the top frame is exhausted, handle it and return `true`.
     fn pop_if_exhausted(&mut self) -> Result<bool, EvaluatorError> {
-        let is_exhausted = self.current_frame()?.is_exhausted();
+        let is_exhausted = self.current_frame()?.is_exhausted(&self.program);
         if is_exhausted {
             self.handle_exhausted_frame();
             Ok(true)
@@ -76,24 +78,16 @@ impl Evaluator {
     /// Execute the current statement and advance the program counter.
     /// Returns the *upcoming* statement that will execute on the next call,
     /// or `None` if execution has finished.
-    pub(crate) fn step(&mut self) -> Result<Option<NextStatement>, EvaluatorError> {
+    pub(crate) fn step(&mut self) -> Result<Option<StatementId>, EvaluatorError> {
         if !self.advance_to_live_statement()? {
             return Ok(None);
         }
 
         let caller_frame_index = self.current_frame_index()?;
 
-        {
-            let top = self.current_frame()?;
-            let current_statement_index = top.current_statement_index();
-            let current_statement = top
-                .statements()
-                .get(current_statement_index)
-                .cloned()
-                .ok_or_else(|| EvaluatorError::InternalError("invalid statement index".into()))?;
-
-            self.handle_statement(current_statement)?;
-        }
+        let id = self.current_frame()?.position();
+        let program = Arc::clone(&self.program);
+        self.handle_instruction(id, program.instruction(id))?;
 
         self.stack[caller_frame_index].increment_statement_index();
 
@@ -104,7 +98,7 @@ impl Evaluator {
         Ok(self.peek_next_statement())
     }
 
-    pub(crate) fn current_statement(&mut self) -> Result<Option<NextStatement>, EvaluatorError> {
+    pub(crate) fn current_statement(&mut self) -> Result<Option<StatementId>, EvaluatorError> {
         if !self.advance_to_live_statement()? {
             return Ok(None);
         }
@@ -114,7 +108,7 @@ impl Evaluator {
 
     pub(crate) fn consume_current_statement_without_running(
         &mut self,
-    ) -> Result<Option<NextStatement>, EvaluatorError> {
+    ) -> Result<Option<StatementId>, EvaluatorError> {
         if !self.advance_to_live_statement()? {
             return Ok(None);
         }
@@ -128,28 +122,18 @@ impl Evaluator {
 
     pub(crate) fn consume_current_statement_and_skip_emits(
         &mut self,
-    ) -> Result<Option<NextStatement>, EvaluatorError> {
+    ) -> Result<Option<StatementId>, EvaluatorError> {
         let mut next = self.consume_current_statement_without_running()?;
-        while matches!(
-            next,
-            Some(NextStatement {
-                statement: Statement::Emit(_),
-            })
-        ) {
+        while next.is_some_and(|id| self.program.instruction(id).is_emit()) {
             next = self.step()?;
         }
         Ok(next)
     }
 
-    fn peek_next_statement(&self) -> Option<NextStatement> {
-        let current_block = self.current_frame().ok()?;
-        let current_statement_index = current_block.current_statement_index();
-        let statement = current_block
-            .statements()
-            .get(current_statement_index)?
-            .clone();
-
-        Some(NextStatement { statement })
+    fn peek_next_statement(&self) -> Option<StatementId> {
+        let id = self.current_frame().ok()?.position();
+        self.program.block(id.block).get(id.index)?;
+        Some(id)
     }
 
     // Control-flow signal handlers
@@ -159,7 +143,7 @@ impl Evaluator {
             let is_target = matches!(
                 self.current_frame().ok(),
                 Some(StackFrame::Block(BlockFrame {
-                    kind: BlockKind::Loop { .. } | BlockKind::Switch,
+                    kind: BlockKind::Loop { .. } | BlockKind::Switch { .. },
                     ..
                 }))
             );
@@ -199,10 +183,8 @@ impl Evaluator {
     /// to remove the returning function and everything above it.
     fn apply_return(&mut self, function_index: usize, value: Option<Value>) {
         // Read the result handle from the callee before truncating the stack.
-        let (function_ref, call_result_handle) = match &self.stack[function_index] {
-            StackFrame::Function(frame) => {
-                (Some(frame.function_ref.clone()), frame.call_result_handle)
-            }
+        let (function_id, call_result_handle) = match &self.stack[function_index] {
+            StackFrame::Function(frame) => (Some(frame.function_id), frame.call_result_handle),
             StackFrame::Block(_) => (None, None),
         };
         // Store the return value in the parent frame's expression cache, keyed
@@ -215,7 +197,7 @@ impl Evaluator {
             parent_frame
                 .evaluated_expressions
                 .insert(handle, return_val.into());
-        } else if matches!(function_ref, Some(FunctionRef::EntryPoint(_))) {
+        } else if matches!(function_id, Some(FunctionId::EntryPoint(_))) {
             self.entry_point_output = value;
         }
         self.stack.truncate(function_index);
@@ -231,8 +213,33 @@ impl Evaluator {
                 self.stack.pop();
             }
             StackFrame::Block(block_frame) => match &block_frame.kind {
-                BlockKind::Plain | BlockKind::Switch => {
+                BlockKind::Plain => {
                     self.stack.pop();
+                }
+                BlockKind::Switch {
+                    statement,
+                    next_case,
+                } => {
+                    let next = next_case.map(|index| {
+                        let Instruction::Switch { cases, .. } =
+                            self.program.instruction(*statement)
+                        else {
+                            unreachable!("switch frame must refer to a switch instruction")
+                        };
+                        let case = &cases[index];
+                        BlockFrame {
+                            block: case.body,
+                            current_statement_index: 0,
+                            kind: BlockKind::Switch {
+                                statement: *statement,
+                                next_case: case.fall_through.then_some(index + 1),
+                            },
+                        }
+                    });
+                    self.stack.pop();
+                    if let Some(frame) = next {
+                        self.stack.push(StackFrame::Block(frame));
+                    }
                 }
                 BlockKind::Loop {
                     in_continuing: false,

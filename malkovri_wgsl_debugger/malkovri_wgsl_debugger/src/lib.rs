@@ -6,6 +6,7 @@ mod evaluator;
 mod function_state;
 mod place;
 mod primitive;
+mod program;
 mod thread;
 mod value;
 mod wgsl;
@@ -19,3 +20,6 @@ pub use error::EvaluatorError;
 pub use primitive::Primitive;
 pub use value::Value;
 pub use wgsl::WgslToModuleError;
+
+pub use naga::ShaderStage;
+pub use program::{EntryPointInfo, ShaderProgram};

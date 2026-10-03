@@ -47,11 +47,11 @@ impl Evaluator {
         let Some(StackFrame::Function(frame)) = self.stack.get(function_frame_index) else {
             return Value::Uninitialized;
         };
-        let function = self.resolve_function(&frame.function_ref);
+        let function = self.resolve_function(&frame.function_id);
         let local = &function.local_variables[handle];
         match local.init {
             Some(expr) => self.eval_value(expr, function_frame_index),
-            None => Value::zero(&self.module, local.ty),
+            None => Value::zero(self.program.module(), local.ty),
         }
     }
 
@@ -123,14 +123,14 @@ impl Evaluator {
             if frame.local_variables.contains_key(&handle) {
                 return Ok(());
             }
-            let function = self.resolve_function(&frame.function_ref);
+            let function = self.resolve_function(&frame.function_id);
             let local = &function.local_variables[handle];
             (local.init, local.ty)
         };
 
         let value = match init {
             Some(expr) => self.eval_value(expr, func_idx),
-            None => Value::zero(&self.module, ty),
+            None => Value::zero(self.program.module(), ty),
         };
 
         let StackFrame::Function(frame) = &mut self.stack[func_idx] else {
@@ -150,10 +150,10 @@ impl Evaluator {
             return Ok(());
         }
 
-        let global = &self.module.global_variables[handle];
+        let global = &self.program.module().global_variables[handle];
         let value = match global.init {
-            Some(expr) => evaluate_global_expression(&self.module, expr),
-            None => Value::zero(&self.module, global.ty),
+            Some(expr) => evaluate_global_expression(self.program.module(), expr),
+            None => Value::zero(self.program.module(), global.ty),
         };
         self.global_values
             .insert(handle, GlobalValue::Private(value));

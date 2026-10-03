@@ -58,7 +58,12 @@ impl Debugger {
                 return Ok(self.session_step_result());
             };
 
-            if let Some(reason) = Self::park_reason_for_statement(&next.statement) {
+            if let Some(reason) = self
+                .program
+                .instruction(next)
+                .leaf()
+                .and_then(Self::park_reason_for_statement)
+            {
                 self.thread_status.insert(gid, ThreadStatus::Parked(reason));
                 self.release_ready_parked_threads()?;
                 self.detect_deadlock()?;
@@ -72,7 +77,7 @@ impl Debugger {
                     self.detect_deadlock()?;
                     return Ok(self.session_step_result());
                 }
-                Some(next) if matches!(next.statement, Statement::Emit(_)) => continue,
+                Some(next) if self.program.instruction(next).is_emit() => continue,
                 Some(_) => return Ok(StepResult::Continue),
             }
         }

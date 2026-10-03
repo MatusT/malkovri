@@ -55,19 +55,19 @@ impl Evaluator {
         if let Some(value) = frame.evaluated_expressions.get(&expression_handle) {
             return value.clone();
         }
-        let function = self.resolve_function(&frame.function_ref);
+        let function = self.resolve_function(&frame.function_id);
         let expression = &function.expressions[expression_handle];
 
         match expression {
             Expression::Literal(literal) => self.evaluate_literal(literal).into(),
             Expression::Constant(handle) => self
-                .evaluate_global_expression(self.module.constants[*handle].init)
+                .evaluate_global_expression(self.program.module().constants[*handle].init)
                 .into(),
-            Expression::Override(handle) => match self.module.overrides[*handle].init {
+            Expression::Override(handle) => match self.program.module().overrides[*handle].init {
                 Some(init) => self.evaluate_global_expression(init).into(),
                 None => Value::Uninitialized.into(),
             },
-            Expression::ZeroValue(ty) => Value::zero(&self.module, *ty).into(),
+            Expression::ZeroValue(ty) => Value::zero(self.program.module(), *ty).into(),
             Expression::Compose { ty, components } => {
                 self.evaluate_compose(*ty, components, func_idx).into()
             }
@@ -198,7 +198,7 @@ impl Evaluator {
         let StackFrame::Function(ref frame) = self.stack[func_idx] else {
             return ArgumentValue::Value(Value::Uninitialized);
         };
-        let function = self.resolve_function(&frame.function_ref);
+        let function = self.resolve_function(&frame.function_id);
         let function_argument = &function.arguments[index];
 
         if let Some(binding) = &function_argument.binding {
@@ -343,7 +343,7 @@ impl Evaluator {
 
     /// Evaluate an expression from the module's global_expressions arena (used for constants/overrides).
     fn evaluate_global_expression(&self, expr_handle: Handle<Expression>) -> Value {
-        evaluate_global_expression(&self.module, expr_handle)
+        evaluate_global_expression(self.program.module(), expr_handle)
     }
 
     /// Assemble a composite value from evaluated components, guided by the target type.
@@ -395,7 +395,7 @@ impl Evaluator {
         components: &[Handle<Expression>],
         func_idx: usize,
     ) -> Value {
-        let ty_inner = &self.module.types[ty].inner;
+        let ty_inner = &self.program.module().types[ty].inner;
         let vals: Vec<Value> = components
             .iter()
             .map(|c| self.eval_value(*c, func_idx))

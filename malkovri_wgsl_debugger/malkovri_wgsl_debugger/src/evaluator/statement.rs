@@ -1,80 +1,94 @@
+use crate::program::FunctionId;
 use std::collections::HashMap;
 
 use naga::{Expression, Handle, LocalVariable, Statement};
 
 use crate::{
     error::EvaluatorError,
-    function_state::{BlockFrame, BlockKind, ControlFlow, FunctionFrame, FunctionRef, StackFrame},
+    function_state::{BlockFrame, BlockKind, ControlFlow, FunctionFrame, StackFrame},
     place::{ArgumentValue, EvaluatedExpression, Place, PlaceRoot},
     primitive::Primitive,
+    program::{BlockId, Instruction, StatementId, SwitchCase},
     value::Value,
 };
 
 use super::Evaluator;
 
 impl Evaluator {
-    // Statement dispatch
-    pub(super) fn handle_statement(&mut self, statement: Statement) -> Result<(), EvaluatorError> {
-        match statement {
-            Statement::Emit(range) => {
-                self.emit_expressions(range.clone())?;
-                self.initialize_local_variables_for_emit(range)?;
-            }
-            Statement::Call {
-                function: function_handle,
-                arguments,
-                result,
-            } => {
-                self.handle_call(function_handle, arguments, result)?;
-            }
-            Statement::Store { pointer, value } => {
-                self.handle_store(pointer, value)?;
-            }
-            Statement::Return { value } => {
-                let return_value = value.map(|v| self.evaluate_expression(v));
-                self.current_function_frame_mut()?.control_flow = ControlFlow::Return(return_value);
-            }
-            Statement::If {
+    pub(super) fn handle_instruction(
+        &mut self,
+        id: StatementId,
+        instruction: &Instruction,
+    ) -> Result<(), EvaluatorError> {
+        match instruction {
+            Instruction::Block(block) => self.push_block(*block, BlockKind::Plain),
+            Instruction::If {
                 condition,
                 accept,
                 reject,
             } => {
-                self.handle_if(condition, accept, reject);
+                let block = if self.evaluate_expression(*condition).is_truthy() {
+                    *accept
+                } else {
+                    *reject
+                };
+                self.push_block(block, BlockKind::Plain);
             }
-            Statement::Block(block) => {
-                self.stack.push(StackFrame::Block(BlockFrame {
-                    statements: block,
-                    current_statement_index: 0,
-                    kind: BlockKind::Plain,
-                }));
-            }
-            Statement::Loop {
+            Instruction::Loop {
                 body,
                 continuing,
                 break_if,
             } => {
-                self.stack.push(StackFrame::Block(BlockFrame {
-                    statements: body,
-                    current_statement_index: 0,
-                    kind: BlockKind::Loop {
-                        other_block: continuing,
-                        break_if,
+                self.push_block(
+                    *body,
+                    BlockKind::Loop {
+                        other_block: *continuing,
+                        break_if: *break_if,
                         in_continuing: false,
                     },
-                }));
+                );
             }
-            Statement::Switch { selector, cases } => {
-                self.handle_switch(selector, cases)?;
+            Instruction::Switch { selector, cases } => self.handle_switch(id, *selector, cases)?,
+            Instruction::Leaf(statement) => self.handle_leaf(statement)?,
+        }
+        Ok(())
+    }
+
+    fn push_block(&mut self, block: BlockId, kind: BlockKind) {
+        self.stack.push(StackFrame::Block(BlockFrame {
+            block,
+            current_statement_index: 0,
+            kind,
+        }));
+    }
+
+    fn handle_leaf(&mut self, statement: &Statement) -> Result<(), EvaluatorError> {
+        match statement {
+            Statement::Emit(range) => {
+                self.emit_expressions(range.clone())?;
+                self.initialize_local_variables_for_emit(range.clone())?;
+            }
+            Statement::Call {
+                function,
+                arguments,
+                result,
+            } => {
+                self.handle_call(*function, arguments, *result);
+            }
+            Statement::Store { pointer, value } => self.handle_store(*pointer, *value)?,
+            Statement::Return { value } => {
+                let value = value.map(|value| self.evaluate_expression(value));
+                self.current_function_frame_mut()?.control_flow = ControlFlow::Return(value);
             }
             Statement::Break => {
-                self.current_function_frame_mut()?.control_flow = ControlFlow::Break;
+                self.current_function_frame_mut()?.control_flow = ControlFlow::Break
             }
             Statement::Continue => {
-                self.current_function_frame_mut()?.control_flow = ControlFlow::Continue;
+                self.current_function_frame_mut()?.control_flow = ControlFlow::Continue
             }
             Statement::ControlBarrier(_) | Statement::MemoryBarrier(_) => {}
             Statement::Kill => {
-                self.current_function_frame_mut()?.control_flow = ControlFlow::Return(None);
+                self.current_function_frame_mut()?.control_flow = ControlFlow::Return(None)
             }
             Statement::ImageStore { .. } => {
                 return Err(EvaluatorError::UnsupportedStatement("imageStore".into()));
@@ -100,6 +114,12 @@ impl Evaluator {
                     "subgroup operation".into(),
                 ));
             }
+            Statement::Block(_)
+            | Statement::If { .. }
+            | Statement::Loop { .. }
+            | Statement::Switch { .. } => {
+                unreachable!("structured statements are indexed as block IDs")
+            }
         }
         Ok(())
     }
@@ -107,29 +127,25 @@ impl Evaluator {
     fn handle_call(
         &mut self,
         function_handle: naga::Handle<naga::Function>,
-        arguments: Vec<Handle<Expression>>,
+        arguments: &[Handle<Expression>],
         call_result_handle: Option<Handle<Expression>>,
-    ) -> Result<(), EvaluatorError> {
+    ) {
         let evaluated_function_arguments = arguments
             .iter()
             .map(|&arg| self.evaluate_argument(arg))
             .collect();
-
-        let statements = self.module.functions[function_handle].body.clone();
-
+        let function_id = FunctionId::Called(function_handle);
         self.stack
             .push(StackFrame::Function(Box::new(FunctionFrame {
-                function_ref: FunctionRef::Called(function_handle),
+                function_id,
                 local_variables: HashMap::new(),
                 evaluated_expressions: HashMap::new(),
                 evaluated_function_arguments,
-                statements,
+                block: self.program.function_body(function_id),
                 current_statement_index: 0,
                 call_result_handle,
                 control_flow: ControlFlow::None,
             })));
-
-        Ok(())
     }
 
     /// Evaluate in IR order. A loop may execute the same Emit again, so discard
@@ -176,33 +192,11 @@ impl Evaluator {
         Ok(())
     }
 
-    fn handle_if(
-        &mut self,
-        condition: Handle<Expression>,
-        accept: naga::Block,
-        reject: naga::Block,
-    ) {
-        let condition_result = self.evaluate_expression(condition);
-
-        let branch = if condition_result.is_truthy() {
-            accept
-        } else {
-            reject
-        };
-
-        if !branch.is_empty() {
-            self.stack.push(StackFrame::Block(BlockFrame {
-                statements: branch,
-                current_statement_index: 0,
-                kind: BlockKind::Plain,
-            }));
-        }
-    }
-
     fn handle_switch(
         &mut self,
+        statement: StatementId,
         selector: Handle<Expression>,
-        cases: Vec<naga::SwitchCase>,
+        cases: &[SwitchCase],
     ) -> Result<(), EvaluatorError> {
         let selector_val = self.evaluate_expression(selector);
 
@@ -232,29 +226,15 @@ impl Evaluator {
                     .position(|c| matches!(&c.value, naga::SwitchValue::Default))
             });
 
-        // Naga represents multiple selectors sharing a body as empty cases
-        // that fall through to the final selector's body.
-        let body = matched.map(|start| {
-            let mut body = naga::Block::new();
-            for case in &cases[start..] {
-                for (statement, span) in case.body.span_iter() {
-                    body.push(statement.clone(), *span);
-                }
-                if !case.fall_through {
-                    break;
-                }
-            }
-            body
-        });
-
-        if let Some(body) = body
-            && !body.is_empty()
-        {
-            self.stack.push(StackFrame::Block(BlockFrame {
-                statements: body,
-                current_statement_index: 0,
-                kind: BlockKind::Switch,
-            }));
+        if let Some(index) = matched {
+            let case = &cases[index];
+            self.push_block(
+                case.body,
+                BlockKind::Switch {
+                    statement,
+                    next_case: case.fall_through.then_some(index + 1),
+                },
+            );
         }
         Ok(())
     }
@@ -294,7 +274,7 @@ impl Evaluator {
         }
         let expression = {
             let frame = self.current_function_frame()?;
-            let function = self.resolve_function(&frame.function_ref);
+            let function = self.resolve_function(&frame.function_id);
             function.expressions[pointer].clone()
         };
 

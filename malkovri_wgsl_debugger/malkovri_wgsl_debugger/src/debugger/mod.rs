@@ -14,8 +14,9 @@ use crate::{
     entry_point_inputs::GlobalConstants,
     error::EvaluatorError,
     evaluator::{Evaluator, evaluate_global_expression},
+    program::ShaderProgram,
     value::Value,
-    wgsl::{WgslToModuleError, wgsl_to_module},
+    wgsl::WgslToModuleError,
 };
 
 /// A resource binding identifier (group and binding index).
@@ -217,7 +218,7 @@ pub struct Debugger {
     thread_order: Vec<[u32; 3]>,
     thread_ids: HashMap<DebugThreadId, [u32; 3]>,
     focused_thread: [u32; 3],
-    source: String,
+    program: Arc<ShaderProgram>,
 }
 
 fn thread_id_for_index(index: usize) -> DebugThreadId {
@@ -235,12 +236,29 @@ impl Debugger {
         source: &str,
         entry_point_index: usize,
         config: WorkgroupConfig,
+        global_constants: GlobalConstants,
+        bindings: HashMap<ResourceBinding, Value>,
+    ) -> Result<Self, DebuggerError> {
+        let program: Arc<ShaderProgram> = Arc::new(ShaderProgram::parse(source)?);
+        Self::from_program(
+            program,
+            entry_point_index,
+            config,
+            global_constants,
+            bindings,
+        )
+    }
+
+    /// Start an independent execution using an already parsed immutable program.
+    pub fn from_program(
+        program: Arc<ShaderProgram>,
+        entry_point_index: usize,
+        config: WorkgroupConfig,
         mut global_constants: GlobalConstants,
         bindings: HashMap<ResourceBinding, Value>,
     ) -> Result<Self, DebuggerError> {
         config.validate().map_err(DebuggerError::InvalidConfig)?;
-
-        let module = Arc::new(wgsl_to_module(source)?);
+        let module = program.module();
         if module.entry_points.get(entry_point_index).is_none() {
             return Err(DebuggerError::InvalidConfig(format!(
                 "entry point index {entry_point_index} is invalid; shader has {} entry points",
@@ -268,8 +286,8 @@ impl Debugger {
             })
             .map(|(handle, global)| {
                 let value = match global.init {
-                    Some(expr) => evaluate_global_expression(&module, expr),
-                    None => Value::zero(&module, global.ty),
+                    Some(expr) => evaluate_global_expression(module, expr),
+                    None => Value::zero(module, global.ty),
                 };
                 (handle, Rc::new(RefCell::new(value)))
             })
@@ -296,7 +314,7 @@ impl Debugger {
         let mut evaluators = HashMap::new();
         for gid in &thread_order {
             let mut evaluator = Evaluator::new(
-                module.clone(),
+                program.clone(),
                 entry_point_index,
                 global_constants,
                 naga_bindings.clone(),
@@ -318,13 +336,13 @@ impl Debugger {
             thread_order,
             thread_ids,
             focused_thread,
-            source: source.to_string(),
+            program,
         })
     }
 
     /// The WGSL source code for this session.
     pub fn source(&self) -> &str {
-        &self.source
+        self.program.source()
     }
 
     fn evaluator(&self) -> &Evaluator {

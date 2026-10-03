@@ -28,7 +28,9 @@ impl Debugger {
             let Statement::WorkGroupUniformLoad {
                 pointer,
                 result: found,
-            } = next.statement
+            } = *self.program.instruction(next).leaf().ok_or_else(|| {
+                EvaluatorError::InternalError("expected synchronization instruction".into())
+            })?
             else {
                 return Err(EvaluatorError::SynchronizationError(format!(
                     "thread {} is not parked at workGroupUniformLoad",
@@ -81,7 +83,9 @@ impl Debugger {
                 let Statement::SubgroupBallot {
                     result: found,
                     predicate,
-                } = next.statement
+                } = *self.program.instruction(next).leaf().ok_or_else(|| {
+                    EvaluatorError::InternalError("expected synchronization instruction".into())
+                })?
                 else {
                     return Err(EvaluatorError::SynchronizationError(format!(
                         "thread {} is not parked at subgroupBallot",
@@ -135,7 +139,9 @@ impl Debugger {
                 collective_op: found_collective_op,
                 argument,
                 result: found_result,
-            } = next.statement
+            } = *self.program.instruction(next).leaf().ok_or_else(|| {
+                EvaluatorError::InternalError("expected synchronization instruction".into())
+            })?
             else {
                 return Err(EvaluatorError::SynchronizationError(format!(
                     "thread {} is not parked at subgroup collective",
@@ -198,7 +204,9 @@ impl Debugger {
                 mode: found_mode,
                 argument,
                 result: found_result,
-            } = next.statement
+            } = *self.program.instruction(next).leaf().ok_or_else(|| {
+                EvaluatorError::InternalError("expected synchronization instruction".into())
+            })?
             else {
                 return Err(EvaluatorError::SynchronizationError(format!(
                     "thread {} is not parked at subgroup gather",

@@ -1,3 +1,4 @@
+use crate::program::FunctionId;
 mod binary;
 mod cast;
 mod expression;
@@ -11,19 +12,19 @@ pub(crate) use expression::evaluate_global_expression;
 
 use crate::{
     debugger::WorkgroupConfig,
-    declaring_scopes,
     entry_point_inputs::{
         ComputeThreadInputs, FragmentThreadInputs, GlobalConstants, VertexThreadInputs,
     },
     error::EvaluatorError,
-    function_state::{ControlFlow, FrameContext, FunctionFrame, FunctionRef, StackFrame},
+    function_state::{ControlFlow, FrameContext, FunctionFrame, StackFrame},
+    program::ShaderProgram,
     thread::EvaluatorThread,
     value::Value,
 };
 
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 
-use naga::{GlobalVariable, Handle, Module};
+use naga::{GlobalVariable, Handle};
 
 #[derive(Clone, Debug)]
 pub(crate) enum GlobalValue {
@@ -53,7 +54,7 @@ impl GlobalValue {
 }
 
 pub(crate) struct Evaluator {
-    pub(crate) module: Arc<Module>,
+    pub(crate) program: Arc<ShaderProgram>,
     pub(crate) global_constants: GlobalConstants,
     pub(crate) global_values: HashMap<naga::Handle<GlobalVariable>, GlobalValue>,
     pub(crate) entry_point_output: Option<Value>,
@@ -61,21 +62,19 @@ pub(crate) struct Evaluator {
     pub(crate) threads: HashMap<[u32; 3], EvaluatorThread>,
     /// Global invocation ID of the currently active thread.
     active_thread_gid: [u32; 3],
-    declaring_scopes: declaring_scopes::ModuleScopes,
 }
 
 impl Evaluator {
     pub(crate) fn new(
-        module: Arc<Module>,
+        program: Arc<ShaderProgram>,
         entry_point_index: usize,
         global_constants: GlobalConstants,
         global_values: HashMap<naga::ResourceBinding, Rc<RefCell<Value>>>,
         shared_global_values: HashMap<Handle<GlobalVariable>, Rc<RefCell<Value>>>,
         workgroup_config: WorkgroupConfig,
     ) -> Result<Self, EvaluatorError> {
-        let statements = module.entry_points[entry_point_index].function.body.clone();
-
-        let declaring_scopes = declaring_scopes::ModuleScopes::new(&module);
+        let module = program.module();
+        let block = program.function_body(FunctionId::EntryPoint(entry_point_index));
 
         let mut threads = HashMap::new();
         let mut first_gid = [0u32; 3];
@@ -127,8 +126,8 @@ impl Evaluator {
                 global_values.insert(handle, GlobalValue::Shared(shared.clone()));
             } else {
                 let value = match global.init {
-                    Some(expr) => evaluate_global_expression(&module, expr),
-                    None => Value::zero(&module, global.ty),
+                    Some(expr) => evaluate_global_expression(module, expr),
+                    None => Value::zero(module, global.ty),
                 };
                 global_values.insert(handle, GlobalValue::Private(value));
             }
@@ -136,20 +135,19 @@ impl Evaluator {
 
         let evaluator = Evaluator {
             global_values,
-            module,
+            program,
             global_constants,
             entry_point_output: None,
             stack: vec![StackFrame::Function(Box::new(FunctionFrame {
-                function_ref: FunctionRef::EntryPoint(entry_point_index),
+                function_id: FunctionId::EntryPoint(entry_point_index),
                 local_variables: HashMap::new(),
                 evaluated_expressions: HashMap::new(),
                 evaluated_function_arguments: Vec::new(),
-                statements,
+                block,
                 current_statement_index: 0,
                 call_result_handle: None,
                 control_flow: ControlFlow::None,
             }))],
-            declaring_scopes,
             threads,
             active_thread_gid: first_gid,
         };
@@ -172,18 +170,15 @@ impl Evaluator {
         Ok(())
     }
 
-    /// Resolve a [`FunctionRef`] to the actual `naga::Function` in the module.
-    pub(crate) fn resolve_function(&self, fref: &FunctionRef) -> &naga::Function {
-        match fref {
-            FunctionRef::EntryPoint(idx) => &self.module.entry_points[*idx].function,
-            FunctionRef::Called(handle) => &self.module.functions[*handle],
-        }
+    /// Resolve a [`FunctionId`] to the actual `naga::Function` in the module.
+    pub(crate) fn resolve_function(&self, fref: &FunctionId) -> &naga::Function {
+        self.program.function(*fref)
     }
 
     /// Return a reference to the `naga::Function` for the current call frame.
     pub(crate) fn current_function(&self) -> Result<&naga::Function, EvaluatorError> {
         let frame = self.current_function_frame()?;
-        Ok(self.resolve_function(&frame.function_ref))
+        Ok(self.resolve_function(&frame.function_id))
     }
 
     /// Index of the topmost `Function` frame, used to look up expressions and variables.
@@ -267,8 +262,8 @@ impl Evaluator {
 
     fn scope_range(&self, context: FrameContext) -> std::ops::Range<usize> {
         naga::Span::total_span(
-            self.stack[context.block_index]
-                .statements()
+            self.program
+                .block(self.stack[context.block_index].block())
                 .span_iter()
                 .map(|(_, span)| *span),
         )
