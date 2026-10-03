@@ -116,6 +116,21 @@ impl ProgramBlock {
 }
 
 impl ShaderProgram {
+    /// Parse and validate a shader once, retaining immutable data for any sessions
+    /// created from the returned shared handle.
+    ///
+    /// ```
+    /// use std::collections::HashMap;
+    /// use malkovri_wgsl_debugger::{GlobalConstants, ShaderProgram, WorkgroupConfig};
+    ///
+    /// let program = ShaderProgram::new("@compute @workgroup_size(1) fn main() {}")?;
+    /// let mut debugger = program.create_debugger(
+    ///     0, WorkgroupConfig::default(), GlobalConstants::default(), HashMap::new(),
+    /// )?;
+    /// let result = debugger.run_to_breakpoint(1, false, &[], None)?;
+    /// assert_eq!(result, malkovri_wgsl_debugger::RunResult::Finished);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn new(source: &str) -> Result<Arc<Self>, WgslToModuleError> {
         let module: Module = wgsl_to_module(source)?;
         let scopes = ModuleScopes::new(&module);

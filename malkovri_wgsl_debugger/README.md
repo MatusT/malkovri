@@ -85,6 +85,64 @@ make progress past a barrier.
 Long-running requests pause after a bounded amount of execution. Use Continue to
 resume. Frame and variable references remain valid only while execution is stopped.
 
+## Core API and code organization
+
+`ShaderProgram::new` parses and validates WGSL once and returns an
+`Arc<ShaderProgram>`. The program directly owns its source, Naga module, scope
+metadata, and indexed blocks. Create independent debugger sessions through
+`program.create_debugger(...)`; each session retains the shared program even if
+the caller drops its handle.
+
+```rust
+use std::collections::HashMap;
+use malkovri_wgsl_debugger::{GlobalConstants, ShaderProgram, WorkgroupConfig};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let program = ShaderProgram::new("@compute @workgroup_size(1) fn main() {}")?;
+    let mut debugger = program.create_debugger(
+        0, // index from program.entry_points()
+        WorkgroupConfig::default(),
+        GlobalConstants::default(),
+        HashMap::new(), // ResourceBinding { group, binding } -> Value
+    )?;
+    let outcome = debugger.run_to_breakpoint(1, false, &[], None)?;
+    println!("{outcome:?}");
+    Ok(())
+}
+```
+
+| Location | Responsibility |
+| --- | --- |
+| `malkovri_wgsl_debugger/src/program/` | Parsing, validation, scope analysis, and immutable executable blocks. |
+| `malkovri_wgsl_debugger/src/invocation/` | One invocation's frames, expression cache, stage inputs, and memory access. |
+| `malkovri_wgsl_debugger/src/debugger/` | Invocation scheduling, synchronization, inspection, and source-level execution control. |
+| `malkovri_wgsl_debugger_dap/` | Launch input, DAP messages, and client frame/scope references. |
+| `malkovri_wgsl_debugger_wasm/`, `vscode_extension/` | Browser bindings and VS Code integration. |
+
+Frames store program/block identifiers and counters. Stepping borrows indexed
+instructions; it does not clone statements or nested blocks. Function locals and
+private globals belong to each invocation. Resource bindings and workgroup
+variables share memory within a session. Reading a composite member borrows the
+path and copies the selected value.
+
+Program and execution state stay private. Simple configuration values and
+inspection snapshots expose their fields; changing a snapshot cannot change the
+running debugger. `WorkgroupConfig::new` validates its configuration, while
+`ResourceBinding` reuses Naga's plain binding record.
+
+`step_over` and `run_to_breakpoint` report a `RunResult` independently of DAP.
+`step`, `step_thread`, and `step_all` remain available for lower-level execution.
+The DAP adapter owns protocol references and invalidates them when execution
+resumes. Breakpoint catch-up still uses a bounded source-line heuristic for
+invocations on different control-flow paths.
+
+Each session selects one entry point and carries inputs for that stage only.
+Basic vertex and fragment entry points can run sequentially from the same program,
+with their return values available through `entry_point_output()`. Full graphics
+execution still needs explicit vertex/fragment inputs, `@location` value transfer,
+and rasterization/interpolation. Those can be added around successive sessions
+without combining both stages into an invocation's execution state.
+
 ## Tests
 
 ```sh
