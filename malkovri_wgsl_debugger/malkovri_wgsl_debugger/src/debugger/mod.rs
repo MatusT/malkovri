@@ -28,8 +28,8 @@ use crate::{
 /// A resource binding identifier (group and binding index).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ResourceBinding {
-    pub group: u32,
-    pub binding: u32,
+    group: u32,
+    binding: u32,
 }
 
 /// Workgroup and subgroup configuration for a debug session.
@@ -46,15 +46,15 @@ pub struct ResourceBinding {
 pub struct WorkgroupConfig {
     /// Number of threads along each dimension: [x, y, z].
     #[serde(alias = "size")]
-    pub workgroup_size: [u32; 3],
+    workgroup_size: [u32; 3],
     /// Which workgroup in the dispatch is being debugged: [x, y, z].
     #[serde(alias = "id")]
-    pub workgroup_id: [u32; 3],
+    workgroup_id: [u32; 3],
     /// Subgroup (warp) size. The final subgroup may be partial.
-    pub subgroup_size: u32,
+    subgroup_size: u32,
     /// Total number of workgroups in the dispatch: [x, y, z].
     #[serde(alias = "count")]
-    pub num_workgroups: [u32; 3],
+    num_workgroups: [u32; 3],
 }
 
 impl Default for WorkgroupConfig {
@@ -69,6 +69,35 @@ impl Default for WorkgroupConfig {
 }
 
 impl WorkgroupConfig {
+    pub fn new(
+        workgroup_size: [u32; 3],
+        workgroup_id: [u32; 3],
+        subgroup_size: u32,
+        num_workgroups: [u32; 3],
+    ) -> Result<Self, String> {
+        let config = Self {
+            workgroup_size,
+            workgroup_id,
+            subgroup_size,
+            num_workgroups,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn workgroup_size(&self) -> [u32; 3] {
+        self.workgroup_size
+    }
+    pub fn workgroup_id(&self) -> [u32; 3] {
+        self.workgroup_id
+    }
+    pub fn subgroup_size(&self) -> u32 {
+        self.subgroup_size
+    }
+    pub fn num_workgroups(&self) -> [u32; 3] {
+        self.num_workgroups
+    }
+
     /// Validate the configuration against WGSL spec constraints:
     ///
     /// - `subgroup_size` must be a power of 2 in the range [4, 128].
@@ -145,7 +174,7 @@ pub enum ThreadState {
 
 /// Identifies a call frame. Valid only until execution resumes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DebugFrameId(pub(crate) usize);
+pub struct DebugFrameId(usize);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ParkReason {
@@ -183,8 +212,8 @@ enum ThreadStatus {
 /// A named variable and its current value.
 #[derive(Debug, Clone)]
 pub struct Variable {
-    pub name: Option<String>,
-    pub value: Value,
+    name: Option<String>,
+    value: Value,
 }
 
 /// DAP-facing thread id for one debuggable shader invocation.
@@ -193,25 +222,25 @@ pub type DebugThreadId = u64;
 /// Source location of the current execution point.
 #[derive(Debug, Clone)]
 pub struct SourceLocation {
-    pub line: u32,
-    pub column: u32,
-    pub function_name: Option<String>,
+    line: u32,
+    column: u32,
+    function_name: Option<String>,
 }
 
 /// Information about a single call stack frame.
 #[derive(Debug, Clone)]
 pub struct StackFrameInfo {
-    pub id: DebugFrameId,
-    pub name: Option<String>,
-    pub location: Option<SourceLocation>,
+    id: DebugFrameId,
+    name: Option<String>,
+    location: Option<SourceLocation>,
 }
 
 /// One debuggable shader invocation exposed as a DAP thread.
 #[derive(Debug, Clone)]
 pub struct DebugThread {
-    pub id: DebugThreadId,
-    pub global_invocation_id: [u32; 3],
-    pub name: String,
+    id: DebugThreadId,
+    global_invocation_id: [u32; 3],
+    name: String,
 }
 
 /// A WGSL debugger session.
@@ -271,11 +300,11 @@ impl Debugger {
 
         // Compute-related constants are derived from the workgroup config.
         let [wx, wy, wz] = config.workgroup_size;
-        let total_threads = wx * wy * wz;
-        global_constants.workgroup_size = config.workgroup_size;
-        global_constants.num_workgroups = config.num_workgroups;
-        global_constants.subgroup_size = config.subgroup_size;
-        global_constants.num_subgroups = total_threads.div_ceil(config.subgroup_size);
+        global_constants.set_compute_configuration(
+            config.workgroup_size,
+            config.num_workgroups,
+            config.subgroup_size,
+        );
 
         let thread_order = thread_order(&config);
         let mut invocations = Vec::with_capacity(thread_order.len());
@@ -370,5 +399,65 @@ impl Debugger {
 
     pub fn focused_thread_id(&self) -> DebugThreadId {
         self.focused_thread.thread_id()
+    }
+}
+
+impl ResourceBinding {
+    pub fn new(group: u32, binding: u32) -> Self {
+        Self { group, binding }
+    }
+    pub fn group(&self) -> u32 {
+        self.group
+    }
+    pub fn binding(&self) -> u32 {
+        self.binding
+    }
+}
+
+impl Variable {
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+    pub fn value(&self) -> &Value {
+        &self.value
+    }
+    pub fn into_parts(self) -> (Option<String>, Value) {
+        (self.name, self.value)
+    }
+}
+
+impl SourceLocation {
+    pub fn line(&self) -> u32 {
+        self.line
+    }
+    pub fn column(&self) -> u32 {
+        self.column
+    }
+    pub fn function_name(&self) -> Option<&str> {
+        self.function_name.as_deref()
+    }
+}
+
+impl StackFrameInfo {
+    pub fn id(&self) -> DebugFrameId {
+        self.id
+    }
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+    pub fn location(&self) -> Option<&SourceLocation> {
+        self.location.as_ref()
+    }
+}
+
+impl DebugThread {
+    pub fn id(&self) -> DebugThreadId {
+        self.id
+    }
+    pub fn global_invocation_id(&self) -> [u32; 3] {
+        self.global_invocation_id
+    }
+    pub fn name(&self) -> &str {
+        &self.name
     }
 }

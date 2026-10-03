@@ -6,8 +6,8 @@ use crate::{error::DebugAdapterError, protocol::StackFrameId};
 
 #[derive(Clone, Copy)]
 pub(crate) struct FrameReference {
-    pub thread_id: DebugThreadId,
-    pub frame_id: DebugFrameId,
+    thread_id: DebugThreadId,
+    frame_id: DebugFrameId,
 }
 
 #[derive(Clone, Copy)]
@@ -58,5 +58,20 @@ impl References {
                 "unknown or expired variable reference {id}; request scopes again"
             ))
         })
+    }
+}
+
+impl FrameReference {
+    pub fn new(thread_id: DebugThreadId, frame_id: DebugFrameId) -> Self {
+        Self {
+            thread_id,
+            frame_id,
+        }
+    }
+    pub fn thread_id(self) -> DebugThreadId {
+        self.thread_id
+    }
+    pub fn frame_id(self) -> DebugFrameId {
+        self.frame_id
     }
 }

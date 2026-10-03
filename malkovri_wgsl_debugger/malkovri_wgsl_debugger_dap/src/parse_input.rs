@@ -28,32 +28,34 @@ struct PartialWorkgroupConfig {
 }
 
 impl PartialWorkgroupConfig {
-    fn apply_to(self, config: &mut WorkgroupConfig) {
-        if let Some(value) = self.workgroup_size {
-            config.workgroup_size = value;
-        }
-        if let Some(value) = self.workgroup_id {
-            config.workgroup_id = value;
-        }
-        if let Some(value) = self.subgroup_size {
-            config.subgroup_size = value;
-        }
-        if let Some(value) = self.num_workgroups {
-            config.num_workgroups = value;
-        }
+    fn merge(&mut self, other: Self) {
+        self.workgroup_size = other.workgroup_size.or(self.workgroup_size);
+        self.workgroup_id = other.workgroup_id.or(self.workgroup_id);
+        self.subgroup_size = other.subgroup_size.or(self.subgroup_size);
+        self.num_workgroups = other.num_workgroups.or(self.num_workgroups);
+    }
+
+    fn build(self) -> Result<WorkgroupConfig, DebugAdapterError> {
+        let defaults = WorkgroupConfig::default();
+        WorkgroupConfig::new(
+            self.workgroup_size.unwrap_or(defaults.workgroup_size()),
+            self.workgroup_id.unwrap_or(defaults.workgroup_id()),
+            self.subgroup_size.unwrap_or(defaults.subgroup_size()),
+            self.num_workgroups.unwrap_or(defaults.num_workgroups()),
+        )
+        .map_err(DebugAdapterError::Parse)
     }
 }
 
 pub fn parse_workgroup_config(
     arguments: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<WorkgroupConfig, DebugAdapterError> {
-    let mut config = WorkgroupConfig::default();
-
-    serde_json::from_value::<PartialWorkgroupConfig>(serde_json::Value::Object(arguments.clone()))?
-        .apply_to(&mut config);
+    let mut config = serde_json::from_value::<PartialWorkgroupConfig>(serde_json::Value::Object(
+        arguments.clone(),
+    ))?;
 
     if let Some(value) = arguments.get("workgroupConfig") {
-        serde_json::from_value::<PartialWorkgroupConfig>(value.clone())?.apply_to(&mut config);
+        config.merge(serde_json::from_value(value.clone())?);
     }
 
     // Backward compatibility with the old single-invocation input form.
@@ -65,13 +67,13 @@ pub fn parse_workgroup_config(
                 .get("shaderInputs")
                 .and_then(|v| v.get("globalInvocationId"))
         })
-        && config.workgroup_size == [1, 1, 1]
-        && config.workgroup_id == [0, 0, 0]
+        && config.workgroup_size.unwrap_or([1, 1, 1]) == [1, 1, 1]
+        && config.workgroup_id.unwrap_or([0, 0, 0]) == [0, 0, 0]
     {
-        config.workgroup_id = serde_json::from_value(global_id.clone())?;
+        config.workgroup_id = Some(serde_json::from_value(global_id.clone())?);
     }
 
-    Ok(config)
+    config.build()
 }
 
 pub fn parse_bindings(
@@ -133,7 +135,7 @@ pub fn parse_bindings(
                 }
             };
 
-            Ok((ResourceBinding { group, binding }, value))
+            Ok((ResourceBinding::new(group, binding), value))
         })
         .collect()
 }

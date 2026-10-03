@@ -22,12 +22,10 @@ fn finish(debugger: &mut Debugger) -> u32 {
             return debugger
                 .global_variables()
                 .into_iter()
-                .find_map(
-                    |variable| match (variable.name.as_deref(), variable.value) {
-                        (Some("result"), Value::Primitive(Primitive::U32(value))) => Some(value),
-                        _ => None,
-                    },
-                )
+                .find_map(|variable| match (variable.name(), variable.value()) {
+                    (Some("result"), Value::Primitive(Primitive::U32(value))) => Some(*value),
+                    _ => None,
+                })
                 .unwrap();
         }
     }

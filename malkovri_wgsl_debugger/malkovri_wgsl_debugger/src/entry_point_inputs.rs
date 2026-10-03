@@ -70,35 +70,35 @@ pub(crate) struct FragmentThreadInputs {
 pub struct GlobalConstants {
     // vertex
     #[serde(alias = "base_instance")]
-    pub base_instance: u32,
+    base_instance: u32,
     #[serde(alias = "base_vertex")]
-    pub base_vertex: i32,
+    base_vertex: i32,
     #[serde(alias = "clip_distance")]
-    pub clip_distance: [f32; 8],
+    clip_distance: [f32; 8],
     #[serde(alias = "cull_distance")]
-    pub cull_distance: [f32; 8],
+    cull_distance: [f32; 8],
     #[serde(alias = "point_size")]
-    pub point_size: f32,
+    point_size: f32,
     #[serde(alias = "draw_id")]
-    pub draw_id: u32,
+    draw_id: u32,
 
     // fragment
     #[serde(alias = "view_index")]
-    pub view_index: i32,
+    view_index: i32,
     #[serde(alias = "frag_depth")]
-    pub frag_depth: f32,
+    frag_depth: f32,
     #[serde(alias = "point_coord")]
-    pub point_coord: [f32; 2],
+    point_coord: [f32; 2],
 
     // compute
     #[serde(alias = "workgroup_size")]
-    pub workgroup_size: [u32; 3],
+    workgroup_size: [u32; 3],
     #[serde(alias = "num_workgroups")]
-    pub num_workgroups: [u32; 3],
+    num_workgroups: [u32; 3],
     #[serde(alias = "subgroup_size")]
-    pub subgroup_size: u32,
+    subgroup_size: u32,
     #[serde(alias = "num_subgroups")]
-    pub num_subgroups: u32,
+    num_subgroups: u32,
 }
 
 /// Inputs for exactly one invocation of the session's selected shader stage.
@@ -176,5 +176,97 @@ impl InvocationInputs {
             (_, B::SubgroupSize) => Primitive::U32(globals.subgroup_size).into(),
             _ => Value::Uninitialized,
         }
+    }
+}
+
+impl GlobalConstants {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn base_instance(&self) -> u32 {
+        self.base_instance
+    }
+    pub fn with_base_instance(mut self, value: u32) -> Self {
+        self.base_instance = value;
+        self
+    }
+    pub fn base_vertex(&self) -> i32 {
+        self.base_vertex
+    }
+    pub fn with_base_vertex(mut self, value: i32) -> Self {
+        self.base_vertex = value;
+        self
+    }
+    pub fn clip_distance(&self) -> [f32; 8] {
+        self.clip_distance
+    }
+    pub fn with_clip_distance(mut self, value: [f32; 8]) -> Self {
+        self.clip_distance = value;
+        self
+    }
+    pub fn cull_distance(&self) -> [f32; 8] {
+        self.cull_distance
+    }
+    pub fn with_cull_distance(mut self, value: [f32; 8]) -> Self {
+        self.cull_distance = value;
+        self
+    }
+    pub fn point_size(&self) -> f32 {
+        self.point_size
+    }
+    pub fn with_point_size(mut self, value: f32) -> Self {
+        self.point_size = value;
+        self
+    }
+    pub fn draw_id(&self) -> u32 {
+        self.draw_id
+    }
+    pub fn with_draw_id(mut self, value: u32) -> Self {
+        self.draw_id = value;
+        self
+    }
+    pub fn view_index(&self) -> i32 {
+        self.view_index
+    }
+    pub fn with_view_index(mut self, value: i32) -> Self {
+        self.view_index = value;
+        self
+    }
+    pub fn frag_depth(&self) -> f32 {
+        self.frag_depth
+    }
+    pub fn with_frag_depth(mut self, value: f32) -> Self {
+        self.frag_depth = value;
+        self
+    }
+    pub fn point_coord(&self) -> [f32; 2] {
+        self.point_coord
+    }
+    pub fn with_point_coord(mut self, value: [f32; 2]) -> Self {
+        self.point_coord = value;
+        self
+    }
+    pub fn workgroup_size(&self) -> [u32; 3] {
+        self.workgroup_size
+    }
+    pub fn num_workgroups(&self) -> [u32; 3] {
+        self.num_workgroups
+    }
+    pub fn subgroup_size(&self) -> u32 {
+        self.subgroup_size
+    }
+    pub fn num_subgroups(&self) -> u32 {
+        self.num_subgroups
+    }
+    pub(crate) fn set_compute_configuration(
+        &mut self,
+        size: [u32; 3],
+        count: [u32; 3],
+        subgroup_size: u32,
+    ) {
+        self.workgroup_size = size;
+        self.num_workgroups = count;
+        self.subgroup_size = subgroup_size;
+        self.num_subgroups = (size[0] * size[1] * size[2]).div_ceil(subgroup_size);
     }
 }
