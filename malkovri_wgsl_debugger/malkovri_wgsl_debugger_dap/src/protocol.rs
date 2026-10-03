@@ -22,6 +22,9 @@ pub enum OutgoingMessage {
     Response {
         seq: i64,
         request_seq: i64,
+        command: String,
+        success: bool,
+        message: Option<String>,
         body: serde_json::Value,
     },
     Event {
@@ -57,15 +60,24 @@ impl OutgoingMessage {
             OutgoingMessage::Response {
                 seq,
                 request_seq,
+                command,
+                success,
+                message,
                 body,
-            } => serde_json::json!({
+            } => {
+                let mut response = serde_json::json!({
                 "seq": seq,
                 "type": "response",
                 "request_seq": request_seq,
-                "success": true,
-                "message": null,
+                "command": command,
+                "success": success,
                 "body": body,
-            }),
+                });
+                if let Some(message) = message {
+                    response["message"] = serde_json::Value::String(message.clone());
+                }
+                response
+            }
             OutgoingMessage::Event { seq, event, body } => serde_json::json!({
                 "seq": seq,
                 "type": "event",
@@ -174,13 +186,32 @@ impl DebugAdapter {
     pub(crate) fn make_response<T: Serialize + Debug>(
         &mut self,
         request_seq: i64,
+        command: &str,
         body: &T,
     ) -> Result<OutgoingMessage, DebugAdapterError> {
         Ok(OutgoingMessage::Response {
             seq: self.next_sequence_number(),
             request_seq,
+            command: command.to_string(),
+            success: true,
+            message: None,
             body: serde_json::to_value(body)?,
         })
+    }
+
+    pub(crate) fn make_error_response(
+        &mut self,
+        request: &dapts::Request,
+        error: &DebugAdapterError,
+    ) -> OutgoingMessage {
+        OutgoingMessage::Response {
+            seq: self.next_sequence_number(),
+            request_seq: request.seq,
+            command: request.command.clone(),
+            success: false,
+            message: Some(error.to_string()),
+            body: serde_json::json!({}),
+        }
     }
 
     pub(crate) fn make_event<T: Serialize + Debug>(
