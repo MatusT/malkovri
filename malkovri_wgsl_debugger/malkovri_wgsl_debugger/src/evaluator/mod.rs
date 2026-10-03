@@ -1,4 +1,5 @@
 use crate::program::FunctionId;
+use std::sync::Arc;
 mod binary;
 mod cast;
 mod expression;
@@ -50,7 +51,7 @@ impl GlobalValue {
 }
 
 pub(crate) struct InvocationState {
-    pub(crate) program: ShaderProgram,
+    pub(crate) program: Arc<ShaderProgram>,
     pub(crate) global_constants: GlobalConstants,
     pub(crate) global_values: HashMap<naga::Handle<GlobalVariable>, GlobalValue>,
     pub(crate) entry_point_output: Option<Value>,
@@ -60,7 +61,7 @@ pub(crate) struct InvocationState {
 
 impl InvocationState {
     pub(crate) fn new(
-        program: ShaderProgram,
+        program: Arc<ShaderProgram>,
         entry_point_index: usize,
         global_constants: GlobalConstants,
         global_values: HashMap<naga::ResourceBinding, Rc<RefCell<Value>>>,

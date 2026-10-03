@@ -1,3 +1,4 @@
+use std::sync::Arc;
 mod collectives;
 mod inspect;
 mod scheduler;
@@ -220,7 +221,7 @@ pub struct Debugger {
     thread_order: Vec<[u32; 3]>,
     thread_ids: HashMap<DebugThreadId, [u32; 3]>,
     focused_thread: [u32; 3],
-    program: ShaderProgram,
+    program: Arc<ShaderProgram>,
 }
 
 fn thread_id_for_index(index: usize) -> DebugThreadId {
@@ -230,7 +231,7 @@ fn thread_id_for_index(index: usize) -> DebugThreadId {
 impl Debugger {
     /// Start an independent execution using an already parsed immutable program.
     pub(crate) fn new(
-        program: ShaderProgram,
+        program: Arc<ShaderProgram>,
         entry_point_index: usize,
         config: WorkgroupConfig,
         mut global_constants: GlobalConstants,

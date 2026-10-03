@@ -12,12 +12,7 @@ use crate::{
 
 /// Parsed shader code and derived metadata, shared by all invocations and sessions.
 /// Execution never mutates the program. One session selects one of its entry points.
-#[derive(Clone)]
 pub struct ShaderProgram {
-    data: Arc<ProgramData>,
-}
-
-struct ProgramData {
     source: String,
     module: Module,
     scopes: ModuleScopes,
@@ -116,7 +111,7 @@ impl ProgramBlock {
 }
 
 impl ShaderProgram {
-    pub fn new(source: &str) -> Result<Self, WgslToModuleError> {
+    pub fn new(source: &str) -> Result<Arc<Self>, WgslToModuleError> {
         let module: Module = wgsl_to_module(source)?;
         let scopes = ModuleScopes::new(&module);
         let mut blocks = Vec::new();
@@ -133,21 +128,19 @@ impl ShaderProgram {
                 index_block(&entry.function.body, &mut blocks),
             );
         }
-        Ok(Self {
-            data: Arc::new(ProgramData {
-                source: source.to_owned(),
-                module,
-                scopes,
-                blocks,
-                function_bodies,
-            }),
-        })
+        Ok(Arc::new(Self {
+            source: source.to_owned(),
+            module,
+            scopes,
+            blocks,
+            function_bodies,
+        }))
     }
 
     /// Create one independently mutable execution of the selected entry point.
-    /// Cloning a program or starting another debugger reuses its immutable data.
+    /// Each debugger shares this program through Arc and owns its execution state.
     pub fn create_debugger(
-        &self,
+        self: &Arc<Self>,
         entry_point_index: usize,
         config: WorkgroupConfig,
         constants: GlobalConstants,
@@ -157,16 +150,15 @@ impl ShaderProgram {
     }
 
     pub(crate) fn scopes(&self) -> &ModuleScopes {
-        &self.data.scopes
+        &self.scopes
     }
 
     pub fn source(&self) -> &str {
-        &self.data.source
+        &self.source
     }
 
     pub fn entry_points(&self) -> impl Iterator<Item = EntryPointInfo<'_>> {
-        self.data
-            .module
+        self.module
             .entry_points
             .iter()
             .enumerate()
@@ -178,26 +170,26 @@ impl ShaderProgram {
     }
 
     pub(crate) fn module(&self) -> &Module {
-        &self.data.module
+        &self.module
     }
 
     pub(crate) fn function(&self, function: FunctionId) -> &naga::Function {
         match function {
-            FunctionId::EntryPoint(index) => &self.data.module.entry_points[index].function,
-            FunctionId::Called(handle) => &self.data.module.functions[handle],
+            FunctionId::EntryPoint(index) => &self.module.entry_points[index].function,
+            FunctionId::Called(handle) => &self.module.functions[handle],
         }
     }
 
     pub(crate) fn function_body(&self, function: FunctionId) -> BlockId {
-        self.data.function_bodies[&function]
+        self.function_bodies[&function]
     }
 
     pub(crate) fn block(&self, id: BlockId) -> &ProgramBlock {
-        &self.data.blocks[id.0]
+        &self.blocks[id.0]
     }
 
     pub(crate) fn instruction(&self, id: StatementId) -> &Instruction {
-        &self.data.blocks[id.block.0].instructions[id.index].0
+        &self.blocks[id.block.0].instructions[id.index].0
     }
 }
 
