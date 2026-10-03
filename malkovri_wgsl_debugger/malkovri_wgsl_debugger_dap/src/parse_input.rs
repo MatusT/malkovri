@@ -135,7 +135,7 @@ pub fn parse_bindings(
                 }
             };
 
-            Ok((ResourceBinding::new(group, binding), value))
+            Ok((ResourceBinding { group, binding }, value))
         })
         .collect()
 }

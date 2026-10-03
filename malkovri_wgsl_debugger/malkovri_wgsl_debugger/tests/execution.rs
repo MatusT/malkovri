@@ -20,7 +20,7 @@ fn execute(source: &str) -> HashMap<String, Value> {
                 .global_variables()
                 .into_iter()
                 .map(|variable| {
-                    let (name, value) = variable.into_parts();
+                    let (name, value) = (variable.name, variable.value);
                     (name.unwrap(), value)
                 })
                 .collect();

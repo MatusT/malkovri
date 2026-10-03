@@ -244,13 +244,13 @@ impl DebugAdapter {
         for frame in &frames {
             let frame_id = self
                 .references
-                .insert_frame(FrameReference::new(thread_id, frame.id()));
-            let location = frame.location();
-            let line = location.map(|loc| loc.line()).unwrap_or(1);
-            let column = location.map(|loc| loc.column()).unwrap_or(0);
+                .insert_frame(FrameReference::new(thread_id, frame.id));
+            let location = frame.location.as_ref();
+            let line = location.map(|loc| loc.line).unwrap_or(1);
+            let column = location.map(|loc| loc.column).unwrap_or(0);
             stack_frames.push(dapts::StackFrame {
                 id: frame_id,
-                name: frame.name().unwrap_or("main").to_string(),
+                name: frame.name.as_deref().unwrap_or("main").to_string(),
                 source: Some(dapts::Source {
                     name: self.program_name.clone(),
                     path: Some(path.clone()),
@@ -491,8 +491,8 @@ impl DebugAdapter {
             .threads()
             .into_iter()
             .map(|thread| dapts::Thread {
-                id: thread.id(),
-                name: thread.name().to_owned(),
+                id: thread.id,
+                name: thread.name,
             })
             .collect();
         Ok(vec![self.make_response(
@@ -515,7 +515,7 @@ impl DebugAdapter {
         let initial_line = self
             .debugger()?
             .current_location()
-            .map(|location| location.line());
+            .map(|location| location.line);
         self.references.clear();
 
         let mut stop_reason = dapts::StoppedEventReason::Step;
@@ -543,16 +543,16 @@ impl DebugAdapter {
             let depth = debugger.thread_call_stack(thread_id)?.len();
             let current_line = debugger
                 .thread_current_location(thread_id)
-                .map(|location| location.line());
+                .map(|location| location.line);
             let hit = debugger
                 .all_thread_locations()
                 .into_iter()
                 .find(|(id, location)| {
                     (!single_thread || *id == thread_id)
                         && (*id != thread_id
-                            || Some(location.line()) != initial_line
+                            || Some(location.line) != initial_line
                             || depth > initial_depth)
-                        && Self::verified_breakpoint_line(&self.breakpoints, location.line())
+                        && Self::verified_breakpoint_line(&self.breakpoints, location.line)
                             .is_some()
                 });
             if let Some((id, _)) = hit {
@@ -639,12 +639,7 @@ impl DebugAdapter {
             ScopeKind::Globals => debugger.thread_global_variables(frame.thread_id())?,
         }
         .into_iter()
-        .map(|variable| {
-            make_variable(
-                variable.name().map(str::to_owned),
-                &format!("{:?}", variable.value()),
-            )
-        })
+        .map(|variable| make_variable(variable.name, &format!("{:?}", variable.value)))
         .collect();
 
         Ok(vec![self.make_response(
@@ -708,7 +703,7 @@ impl DebugAdapter {
                     // Single-thread continue only inspects the selected DAP thread.
                     let hit = if single_thread {
                         debugger.thread_current_location(thread_id).and_then(|loc| {
-                            Self::verified_breakpoint_line(breakpoints, loc.line())
+                            Self::verified_breakpoint_line(breakpoints, loc.line)
                                 .map(|line| (thread_id, line))
                         })
                     } else {
@@ -776,8 +771,7 @@ impl DebugAdapter {
             .all_thread_locations()
             .into_iter()
             .find_map(|(thread_id, loc)| {
-                Self::verified_breakpoint_line(breakpoints, loc.line())
-                    .map(|line| (thread_id, line))
+                Self::verified_breakpoint_line(breakpoints, loc.line).map(|line| (thread_id, line))
             })
     }
 
@@ -796,10 +790,10 @@ impl DebugAdapter {
             // Prefer reporting the earliest DAP thread already sitting on the breakpoint.
             let first_at_target = locations
                 .iter()
-                .find_map(|(thread_id, loc)| (loc.line() == target_line).then_some(*thread_id));
+                .find_map(|(thread_id, loc)| (loc.line == target_line).then_some(*thread_id));
 
             // If every live thread reports this line, VS Code will show a coherent stop.
-            if locations.iter().all(|(_, loc)| loc.line() == target_line) {
+            if locations.iter().all(|(_, loc)| loc.line == target_line) {
                 if trace_enabled {
                     trace.push(format!(
                         "catch-up complete target_line={target_line} locations={}",
@@ -812,7 +806,7 @@ impl DebugAdapter {
             // Threads beyond the line are from divergent paths, so they cannot be caught up.
             let candidates = locations
                 .iter()
-                .filter_map(|(thread_id, loc)| (loc.line() < target_line).then_some(*thread_id))
+                .filter_map(|(thread_id, loc)| (loc.line < target_line).then_some(*thread_id))
                 .collect::<Vec<_>>();
 
             if candidates.is_empty() {
@@ -861,8 +855,8 @@ impl DebugAdapter {
             .all_thread_locations()
             .into_iter()
             .map(|(thread_id, loc)| {
-                let function = loc.function_name().unwrap_or("unknown");
-                format!("{thread_id}:{function}:{}:{}", loc.line(), loc.column())
+                let function = loc.function_name.as_deref().unwrap_or("unknown");
+                format!("{thread_id}:{function}:{}:{}", loc.line, loc.column)
             })
             .collect::<Vec<_>>()
             .join(", ")

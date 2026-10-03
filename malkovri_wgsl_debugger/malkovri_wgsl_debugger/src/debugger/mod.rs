@@ -10,7 +10,8 @@ mod sync;
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use naga::{
-    AddressSpace, Barrier, CollectiveOperation, Expression, GatherMode, Handle, SubgroupOperation,
+    AddressSpace, Barrier, CollectiveOperation, Expression, GatherMode, Handle, ResourceBinding,
+    SubgroupOperation,
 };
 
 use crate::{
@@ -24,13 +25,6 @@ use crate::{
     value::Value,
     wgsl::WgslToModuleError,
 };
-
-/// A resource binding identifier (group and binding index).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct ResourceBinding {
-    group: u32,
-    binding: u32,
-}
 
 /// Workgroup and subgroup configuration for a debug session.
 ///
@@ -212,8 +206,8 @@ enum ThreadStatus {
 /// A named variable and its current value.
 #[derive(Debug, Clone)]
 pub struct Variable {
-    name: Option<String>,
-    value: Value,
+    pub name: Option<String>,
+    pub value: Value,
 }
 
 /// DAP-facing thread id for one debuggable shader invocation.
@@ -222,25 +216,25 @@ pub type DebugThreadId = u64;
 /// Source location of the current execution point.
 #[derive(Debug, Clone)]
 pub struct SourceLocation {
-    line: u32,
-    column: u32,
-    function_name: Option<String>,
+    pub line: u32,
+    pub column: u32,
+    pub function_name: Option<String>,
 }
 
 /// Information about a single call stack frame.
 #[derive(Debug, Clone)]
 pub struct StackFrameInfo {
-    id: DebugFrameId,
-    name: Option<String>,
-    location: Option<SourceLocation>,
+    pub id: DebugFrameId,
+    pub name: Option<String>,
+    pub location: Option<SourceLocation>,
 }
 
 /// One debuggable shader invocation exposed as a DAP thread.
 #[derive(Debug, Clone)]
 pub struct DebugThread {
-    id: DebugThreadId,
-    global_invocation_id: [u32; 3],
-    name: String,
+    pub id: DebugThreadId,
+    pub global_invocation_id: [u32; 3],
+    pub name: String,
 }
 
 /// A WGSL debugger session.
@@ -272,15 +266,7 @@ impl Debugger {
         }
         let naga_bindings: HashMap<naga::ResourceBinding, Rc<RefCell<Value>>> = bindings
             .into_iter()
-            .map(|(rb, v)| {
-                (
-                    naga::ResourceBinding {
-                        group: rb.group,
-                        binding: rb.binding,
-                    },
-                    Rc::new(RefCell::new(v)),
-                )
-            })
+            .map(|(binding, value)| (binding, Rc::new(RefCell::new(value))))
             .collect();
 
         let shared_workgroup_globals: HashMap<_, _> = module
@@ -399,65 +385,5 @@ impl Debugger {
 
     pub fn focused_thread_id(&self) -> DebugThreadId {
         self.focused_thread.thread_id()
-    }
-}
-
-impl ResourceBinding {
-    pub fn new(group: u32, binding: u32) -> Self {
-        Self { group, binding }
-    }
-    pub fn group(&self) -> u32 {
-        self.group
-    }
-    pub fn binding(&self) -> u32 {
-        self.binding
-    }
-}
-
-impl Variable {
-    pub fn name(&self) -> Option<&str> {
-        self.name.as_deref()
-    }
-    pub fn value(&self) -> &Value {
-        &self.value
-    }
-    pub fn into_parts(self) -> (Option<String>, Value) {
-        (self.name, self.value)
-    }
-}
-
-impl SourceLocation {
-    pub fn line(&self) -> u32 {
-        self.line
-    }
-    pub fn column(&self) -> u32 {
-        self.column
-    }
-    pub fn function_name(&self) -> Option<&str> {
-        self.function_name.as_deref()
-    }
-}
-
-impl StackFrameInfo {
-    pub fn id(&self) -> DebugFrameId {
-        self.id
-    }
-    pub fn name(&self) -> Option<&str> {
-        self.name.as_deref()
-    }
-    pub fn location(&self) -> Option<&SourceLocation> {
-        self.location.as_ref()
-    }
-}
-
-impl DebugThread {
-    pub fn id(&self) -> DebugThreadId {
-        self.id
-    }
-    pub fn global_invocation_id(&self) -> [u32; 3] {
-        self.global_invocation_id
-    }
-    pub fn name(&self) -> &str {
-        &self.name
     }
 }

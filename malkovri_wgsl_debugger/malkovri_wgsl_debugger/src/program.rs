@@ -1,9 +1,9 @@
 use std::{collections::HashMap, sync::Arc};
 
-use naga::{Expression, Function, Handle, Module, Span, Statement, SwitchValue};
+use naga::{Expression, Function, Handle, Module, ResourceBinding, Span, Statement, SwitchValue};
 
 use crate::{
-    debugger::{Debugger, DebuggerError, ResourceBinding, WorkgroupConfig},
+    debugger::{Debugger, DebuggerError, WorkgroupConfig},
     declaring_scopes::ModuleScopes,
     entry_point_inputs::GlobalConstants,
     value::Value,
@@ -23,9 +23,9 @@ pub struct ShaderProgram {
 /// An entry point available for an independent compute, vertex, or fragment run.
 #[derive(Clone, Copy, Debug)]
 pub struct EntryPointInfo<'a> {
-    index: usize,
-    name: &'a str,
-    stage: naga::ShaderStage,
+    pub index: usize,
+    pub name: &'a str,
+    pub stage: naga::ShaderStage,
 }
 
 /// Identifies a function in the module without owning/cloning it.
@@ -238,18 +238,6 @@ fn index_block(block: &naga::Block, blocks: &mut Vec<ProgramBlock>) -> BlockId {
         .collect();
     blocks[id.0] = ProgramBlock { instructions };
     id
-}
-
-impl<'a> EntryPointInfo<'a> {
-    pub fn index(&self) -> usize {
-        self.index
-    }
-    pub fn name(&self) -> &'a str {
-        self.name
-    }
-    pub fn stage(&self) -> naga::ShaderStage {
-        self.stage
-    }
 }
 
 impl StatementId {

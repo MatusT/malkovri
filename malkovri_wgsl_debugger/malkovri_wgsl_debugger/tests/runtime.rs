@@ -22,10 +22,12 @@ fn finish(debugger: &mut Debugger) -> u32 {
             return debugger
                 .global_variables()
                 .into_iter()
-                .find_map(|variable| match (variable.name(), variable.value()) {
-                    (Some("result"), Value::Primitive(Primitive::U32(value))) => Some(*value),
-                    _ => None,
-                })
+                .find_map(
+                    |variable| match (variable.name.as_deref(), &variable.value) {
+                        (Some("result"), Value::Primitive(Primitive::U32(value))) => Some(*value),
+                        _ => None,
+                    },
+                )
                 .unwrap();
         }
     }
@@ -149,9 +151,9 @@ fn shared_program_sessions_keep_their_memory_independent() {
     };
     let mut first = make_session();
     let mut second = make_session();
-    assert_eq!(program.entry_points().next().unwrap().name(), "main");
+    assert_eq!(program.entry_points().next().unwrap().name, "main");
     assert_eq!(
-        program.entry_points().next().unwrap().stage(),
+        program.entry_points().next().unwrap().stage,
         malkovri_wgsl_debugger::ShaderStage::Compute
     );
     assert_eq!(finish(&mut first), 1);

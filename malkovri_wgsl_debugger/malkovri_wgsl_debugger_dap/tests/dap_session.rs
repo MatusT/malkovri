@@ -119,8 +119,8 @@ fn globals_for_thread(session: &mut Session, thread_id: DebugThreadId) -> HashMa
         .into_iter()
         .map(|variable| {
             (
-                variable.name().unwrap().to_owned(),
-                format!("{:?}", variable.value()),
+                variable.name.as_deref().unwrap().to_owned(),
+                format!("{:?}", &variable.value),
             )
         })
         .collect()
@@ -537,11 +537,11 @@ fn global_constants_accept_camel_case_and_snake_case() {
         "pointCoord": [0.25, 0.75],
     }))
     .unwrap();
-    assert_eq!(camel.base_instance(), 3);
-    assert_eq!(camel.base_vertex(), -2);
-    assert_eq!(camel.draw_id(), 9);
-    assert_eq!(camel.view_index(), 4);
-    assert_eq!(camel.point_coord(), [0.25, 0.75]);
+    assert_eq!(camel.base_instance, 3);
+    assert_eq!(camel.base_vertex, -2);
+    assert_eq!(camel.draw_id, 9);
+    assert_eq!(camel.view_index, 4);
+    assert_eq!(camel.point_coord, [0.25, 0.75]);
 
     let snake: GlobalConstants = serde_json::from_value(json!({
         "base_instance": 5,
@@ -551,11 +551,11 @@ fn global_constants_accept_camel_case_and_snake_case() {
         "point_coord": [0.5, 1.0],
     }))
     .unwrap();
-    assert_eq!(snake.base_instance(), 5);
-    assert_eq!(snake.base_vertex(), -4);
-    assert_eq!(snake.draw_id(), 11);
-    assert_eq!(snake.view_index(), 6);
-    assert_eq!(snake.point_coord(), [0.5, 1.0]);
+    assert_eq!(snake.base_instance, 5);
+    assert_eq!(snake.base_vertex, -4);
+    assert_eq!(snake.draw_id, 11);
+    assert_eq!(snake.view_index, 6);
+    assert_eq!(snake.point_coord, [0.5, 1.0]);
 }
 
 #[test]
