@@ -18,25 +18,25 @@ impl InvocationState {
         let Ok(func_idx) = self.current_function_frame_index() else {
             return Value::Uninitialized;
         };
-        self.eval_value(expression_handle, func_idx)
+        self.evaluate_value(expression_handle, func_idx)
     }
 
     pub(crate) fn evaluate_argument(&self, expression_handle: Handle<Expression>) -> ArgumentValue {
         let Ok(func_idx) = self.current_function_frame_index() else {
             return ArgumentValue::Value(Value::Uninitialized);
         };
-        match self.eval_expr(expression_handle, func_idx) {
+        match self.evaluate_expr(expression_handle, func_idx) {
             EvaluatedExpression::Value(value) => ArgumentValue::Value(value),
             EvaluatedExpression::Place(place) => ArgumentValue::Place(place),
         }
     }
 
-    pub(crate) fn eval_value(
+    pub(crate) fn evaluate_value(
         &self,
         expression_handle: Handle<Expression>,
         func_idx: usize,
     ) -> Value {
-        match self.eval_expr(expression_handle, func_idx) {
+        match self.evaluate_expr(expression_handle, func_idx) {
             EvaluatedExpression::Value(value) => value,
             EvaluatedExpression::Place(place) => self.read_place(&place),
         }
@@ -44,7 +44,7 @@ impl InvocationState {
 
     /// Internal expression invocation that takes a pre-computed function frame index.
     /// All recursive calls use this to avoid redundant stack scans.
-    pub(crate) fn eval_expr(
+    pub(crate) fn evaluate_expr(
         &self,
         expression_handle: Handle<Expression>,
         func_idx: usize,
@@ -100,7 +100,7 @@ impl InvocationState {
                 self.evaluate_binary(*op, *left, *right, func_idx).into()
             }
             Expression::Unary { op, expr } => {
-                let val = self.eval_value(*expr, func_idx);
+                let val = self.evaluate_value(*expr, func_idx);
                 self.evaluate_unary(*op, val).into()
             }
             Expression::Select {
@@ -115,7 +115,7 @@ impl InvocationState {
                 kind,
                 convert,
             } => {
-                let val = self.eval_value(*expr, func_idx);
+                let val = self.evaluate_value(*expr, func_idx);
                 super::cast::evaluate_as(val, *kind, *convert).into()
             }
             Expression::Math {
@@ -128,11 +128,11 @@ impl InvocationState {
                 .evaluate_math(*fun, *arg, *arg1, *arg2, *arg3, func_idx)
                 .into(),
             Expression::Relational { fun, argument } => {
-                let val = self.eval_value(*argument, func_idx);
+                let val = self.evaluate_value(*argument, func_idx);
                 self.evaluate_relational(*fun, val).into()
             }
             Expression::ArrayLength(expr) => {
-                let argument = self.eval_value(*expr, func_idx);
+                let argument = self.evaluate_value(*expr, func_idx);
                 match argument {
                     Value::Array(elements) => Value::from(Primitive::U32(elements.len() as u32)),
                     _ => Value::Uninitialized,
@@ -169,7 +169,7 @@ impl InvocationState {
     }
 
     fn evaluate_load(&self, pointer: Handle<Expression>, func_idx: usize) -> Value {
-        match self.eval_expr(pointer, func_idx) {
+        match self.evaluate_expr(pointer, func_idx) {
             EvaluatedExpression::Place(place) => self.read_place(&place),
             EvaluatedExpression::Value(value) => value,
         }
@@ -181,7 +181,7 @@ impl InvocationState {
         index: u32,
         func_idx: usize,
     ) -> EvaluatedExpression {
-        match self.eval_expr(base, func_idx) {
+        match self.evaluate_expr(base, func_idx) {
             EvaluatedExpression::Place(place) => place.with_index(index as usize).into(),
             EvaluatedExpression::Value(value) => value.index_into(index as usize).into(),
         }
@@ -233,7 +233,7 @@ impl InvocationState {
         index: Handle<Expression>,
         func_idx: usize,
     ) -> EvaluatedExpression {
-        let index_value = self.eval_value(index, func_idx);
+        let index_value = self.evaluate_value(index, func_idx);
 
         let index: usize = match index_value {
             Value::Primitive(Primitive::U32(i)) => i as usize,
@@ -241,7 +241,7 @@ impl InvocationState {
             _ => return Value::Uninitialized.into(),
         };
 
-        match self.eval_expr(base, func_idx) {
+        match self.evaluate_expr(base, func_idx) {
             EvaluatedExpression::Place(place) => place.with_index(index).into(),
             EvaluatedExpression::Value(value) => value.index_into(index).into(),
         }
@@ -304,7 +304,7 @@ impl InvocationState {
         let ty_inner = &self.program.module().types[ty].inner;
         let vals: Vec<Value> = components
             .iter()
-            .map(|c| self.eval_value(*c, func_idx))
+            .map(|c| self.evaluate_value(*c, func_idx))
             .collect();
         self.assemble_compose(ty_inner, &vals)
     }
@@ -349,7 +349,7 @@ impl InvocationState {
         value: Handle<Expression>,
         func_idx: usize,
     ) -> Value {
-        let val = self.eval_value(value, func_idx);
+        let val = self.evaluate_value(value, func_idx);
         self.splat_value(size, val)
     }
 
@@ -360,7 +360,7 @@ impl InvocationState {
         pattern: [SwizzleComponent; 4],
         func_idx: usize,
     ) -> Value {
-        let vec_val = self.eval_value(vector, func_idx);
+        let vec_val = self.evaluate_value(vector, func_idx);
 
         let count = match size {
             VectorSize::Bi => 2,
@@ -413,14 +413,14 @@ impl InvocationState {
         reject: Handle<Expression>,
         func_idx: usize,
     ) -> Value {
-        let cond = self.eval_value(condition, func_idx);
+        let cond = self.evaluate_value(condition, func_idx);
 
         if let Value::Primitive(Primitive::U32(condition)) = cond {
-            return self.eval_value(if condition != 0 { accept } else { reject }, func_idx);
+            return self.evaluate_value(if condition != 0 { accept } else { reject }, func_idx);
         }
 
-        let accept = self.eval_value(accept, func_idx);
-        let reject = self.eval_value(reject, func_idx);
+        let accept = self.evaluate_value(accept, func_idx);
+        let reject = self.evaluate_value(reject, func_idx);
         let Some(condition) = cond.as_primitive().and_then(Primitive::as_u32_slice) else {
             return Value::Uninitialized;
         };

@@ -164,7 +164,7 @@ impl InvocationState {
                     && current_scope.end <= declaring_scope.end
             })
             .filter(|(handle, _)| frame.expression(**handle).is_some())
-            .map(|(handle, name)| (name.clone(), self.eval_value(*handle, function_index)))
+            .map(|(handle, name)| (name.clone(), self.evaluate_value(*handle, function_index)))
             .collect())
     }
 }

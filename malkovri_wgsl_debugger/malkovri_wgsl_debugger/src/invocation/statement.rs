@@ -150,7 +150,7 @@ impl InvocationState {
             frame.forget_expression(handle);
         }
         for handle in range {
-            let value = self.eval_expr(handle, function_index);
+            let value = self.evaluate_expr(handle, function_index);
             self.current_function_frame_mut()?
                 .set_expression(handle, value);
         }
@@ -298,7 +298,7 @@ impl InvocationState {
                 let place = self.resolve_pointer_place(base)?;
                 Ok(place.with_index(index))
             }
-            _ => match self.eval_expr(pointer, func_idx) {
+            _ => match self.evaluate_expr(pointer, func_idx) {
                 EvaluatedExpression::Place(place) => Ok(place),
                 EvaluatedExpression::Value(_) => Err(EvaluatorError::StoreToNonPointer),
             },

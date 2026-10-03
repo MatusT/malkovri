@@ -76,7 +76,7 @@ impl InvocationState {
         let function = self.resolve_function(&frame.function_id());
         let local = &function.local_variables[handle];
         match local.init {
-            Some(expr) => self.eval_value(expr, function_frame_index),
+            Some(expr) => self.evaluate_value(expr, function_frame_index),
             None => Value::zero(self.program.module(), local.ty),
         }
     }
@@ -154,7 +154,7 @@ impl InvocationState {
         };
 
         let value = match init {
-            Some(expr) => self.eval_value(expr, func_idx),
+            Some(expr) => self.evaluate_value(expr, func_idx),
             None => Value::zero(self.program.module(), ty),
         };
 
