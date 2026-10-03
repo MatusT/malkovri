@@ -246,6 +246,17 @@
 		{
 			"type": "wgsl",
 			"request": "launch",
+			"name": "Debug test_vertex_triangle.wgsl",
+			"program": "${workspaceFolder}/test_vertex_triangle.wgsl",
+			"stopOnEntry": true,
+			// Vertex inputs currently default to vertex_index = 0.
+			"workgroupConfig": {
+				"workgroupSize": [1, 1, 1]
+			}
+		},
+		{
+			"type": "wgsl",
+			"request": "launch",
 			"name": "Debug test_workgroup_memory_barrier.wgsl",
 			"program": "${workspaceFolder}/test_workgroup_memory_barrier.wgsl",
 			"workgroupConfig": {
