@@ -94,9 +94,24 @@ pub fn parse_bindings(
                 DebugAdapterError::Parse(format!("Binding '{key}' is not an object"))
             })?;
 
+            let source_count = ["inline", "fileContent", "fileBytes", "file"]
+                .iter()
+                .filter(|name| obj.contains_key(**name))
+                .count();
+            if source_count != 1 {
+                return Err(DebugAdapterError::Parse(format!(
+                    "Binding '{key}' must specify exactly one of 'inline', 'fileContent', 'fileBytes', or 'file'"
+                )));
+            }
+
             let type_str = obj.get("type").and_then(|v| v.as_str()).unwrap_or("f32");
             let value = if let Some(inline) = obj.get("inline") {
                 parse_inline(key, type_str, inline)?
+            } else if let Some(bytes) = obj.get("fileBytes") {
+                let bytes: Vec<u8> = serde_json::from_value(bytes.clone()).map_err(|error| {
+                    DebugAdapterError::Parse(format!("Binding '{key}' fileBytes: {error}"))
+                })?;
+                typed_array_from_bytes(key, type_str, &bytes)?
             } else if let Some(content) = obj.get("fileContent").and_then(|v| v.as_str()) {
                 let format = obj.get("format").and_then(|v| v.as_str()).unwrap_or("ron");
                 parse_file_content(key, type_str, format, content)?
@@ -202,12 +217,17 @@ fn validate_binding_type(key: &str, type_str: &str) -> Result<(), DebugAdapterEr
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn typed_array_from_bytes(
     key: &str,
     type_str: &str,
     bytes: &[u8],
 ) -> Result<Value, DebugAdapterError> {
+    if !bytes.len().is_multiple_of(4) {
+        return Err(DebugAdapterError::Parse(format!(
+            "Binding '{key}' binary data has {} bytes; expected a multiple of 4",
+            bytes.len()
+        )));
+    }
     Ok(match type_str {
         "f32" => Value::Array(
             bytes

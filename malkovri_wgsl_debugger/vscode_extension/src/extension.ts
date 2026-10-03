@@ -25,11 +25,12 @@ export function activate(context: vscode.ExtensionContext) {
 export function deactivate() {}
 
 interface BindingConfig {
-  type: "f32" | "i32" | "u32";
+  type?: "f32" | "i32" | "u32";
   file?: string;
   inline?: number[];
   format?: "ron" | "binary";
   fileContent?: string;
+  fileBytes?: number[];
 }
 
 class ConfigurationProvider implements vscode.DebugConfigurationProvider {
@@ -75,27 +76,26 @@ class ConfigurationProvider implements vscode.DebugConfigurationProvider {
       | undefined;
     if (bindings) {
       const programDir = vscode.Uri.joinPath(programUri, "..");
-      for (const [_key, binding] of Object.entries(bindings)) {
+      for (const [key, binding] of Object.entries(bindings)) {
+        const sources = [
+          binding.file,
+          binding.inline,
+          binding.fileContent,
+          binding.fileBytes,
+        ];
+        if (sources.filter((value) => value !== undefined).length !== 1) {
+          throw new Error(
+            `Binding '${key}' must specify exactly one input source`,
+          );
+        }
         if (binding.file && !binding.inline) {
           const fileUri = vscode.Uri.joinPath(programDir, binding.file);
           const format = binding.format ?? "ron";
 
           if (format === "binary") {
             const bytes = await vscode.workspace.fs.readFile(fileUri);
-            const view = new DataView(
-              bytes.buffer,
-              bytes.byteOffset,
-              bytes.byteLength,
-            );
-            const scalarType = binding.type ?? "f32";
-            const values: number[] = [];
-            for (let i = 0; i + 3 < bytes.byteLength; i += 4) {
-              if (scalarType === "f32") values.push(view.getFloat32(i, true));
-              else if (scalarType === "i32") {
-                values.push(view.getInt32(i, true));
-              } else values.push(view.getUint32(i, true));
-            }
-            binding.inline = values;
+            // Decode and validate in Rust, using the same path as the native adapter.
+            binding.fileBytes = Array.from(bytes);
             delete binding.file;
           } else {
             const contentBytes = await vscode.workspace.fs.readFile(fileUri);
