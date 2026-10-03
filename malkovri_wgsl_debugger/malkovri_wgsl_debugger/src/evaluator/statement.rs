@@ -214,25 +214,25 @@ impl InvocationState {
         // Find the matching case, fall back to Default.
         let matched = cases
             .iter()
-            .position(|c| matches!(&c.value, naga::SwitchValue::I32(v) if *v == selector_i32))
+            .position(|c| matches!(c.value(), naga::SwitchValue::I32(v) if v == selector_i32))
             .or_else(|| {
                 cases.iter().position(
-                    |c| matches!(&c.value, naga::SwitchValue::U32(v) if *v == selector_i32 as u32),
+                    |c| matches!(c.value(), naga::SwitchValue::U32(v) if v == selector_i32 as u32),
                 )
             })
             .or_else(|| {
                 cases
                     .iter()
-                    .position(|c| matches!(&c.value, naga::SwitchValue::Default))
+                    .position(|c| matches!(c.value(), naga::SwitchValue::Default))
             });
 
         if let Some(index) = matched {
             let case = &cases[index];
             self.push_block(
-                case.body,
+                case.body(),
                 BlockKind::Switch {
                     statement,
-                    next_case: case.fall_through.then_some(index + 1),
+                    next_case: case.falls_through().then_some(index + 1),
                 },
             );
         }

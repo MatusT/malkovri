@@ -128,10 +128,7 @@ impl StackFrame {
     }
 
     pub(crate) fn position(&self) -> StatementId {
-        StatementId {
-            block: self.block(),
-            index: self.current_statement_index(),
-        }
+        StatementId::new(self.block(), self.current_statement_index())
     }
 
     /// The current statement index for this frame.

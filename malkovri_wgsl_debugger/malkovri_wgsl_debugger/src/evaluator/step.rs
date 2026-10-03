@@ -6,8 +6,6 @@ use crate::{
     value::Value,
 };
 
-use std::sync::Arc;
-
 use super::InvocationState;
 
 impl InvocationState {
@@ -86,7 +84,7 @@ impl InvocationState {
         let caller_frame_index = self.current_frame_index()?;
 
         let id = self.current_frame()?.position();
-        let program = Arc::clone(&self.program);
+        let program = self.program.clone();
         self.handle_instruction(id, program.instruction(id))?;
 
         self.stack[caller_frame_index].increment_statement_index();
@@ -132,7 +130,7 @@ impl InvocationState {
 
     fn peek_next_statement(&self) -> Option<StatementId> {
         let id = self.current_frame().ok()?.position();
-        self.program.block(id.block).get(id.index)?;
+        self.program.block(id.block()).get(id.index())?;
         Some(id)
     }
 
@@ -228,11 +226,11 @@ impl InvocationState {
                         };
                         let case = &cases[index];
                         BlockFrame {
-                            block: case.body,
+                            block: case.body(),
                             current_statement_index: 0,
                             kind: BlockKind::Switch {
                                 statement: *statement,
-                                next_case: case.fall_through.then_some(index + 1),
+                                next_case: case.falls_through().then_some(index + 1),
                             },
                         }
                     });

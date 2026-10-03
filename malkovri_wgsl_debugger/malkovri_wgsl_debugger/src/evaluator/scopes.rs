@@ -59,7 +59,7 @@ impl InvocationState {
         let function = self.resolve_function(&frame.function_id);
         let declaring_scopes = self
             .program
-            .scopes
+            .scopes()
             .local_scopes(&frame.function_id)
             .ok_or_else(|| {
                 EvaluatorError::InternalError("missing local declaring scopes".into())
@@ -116,7 +116,7 @@ impl InvocationState {
         let function = self.resolve_function(&frame.function_id);
         let declaring_scopes = self
             .program
-            .scopes
+            .scopes()
             .named_expression_scopes(&frame.function_id)
             .ok_or_else(|| {
                 EvaluatorError::InternalError("missing named expression scopes".into())

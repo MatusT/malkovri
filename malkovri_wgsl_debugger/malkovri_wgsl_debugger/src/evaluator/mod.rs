@@ -18,7 +18,7 @@ use crate::{
     value::Value,
 };
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use naga::{GlobalVariable, Handle};
 
@@ -50,7 +50,7 @@ impl GlobalValue {
 }
 
 pub(crate) struct InvocationState {
-    pub(crate) program: Arc<ShaderProgram>,
+    pub(crate) program: ShaderProgram,
     pub(crate) global_constants: GlobalConstants,
     pub(crate) global_values: HashMap<naga::Handle<GlobalVariable>, GlobalValue>,
     pub(crate) entry_point_output: Option<Value>,
@@ -60,7 +60,7 @@ pub(crate) struct InvocationState {
 
 impl InvocationState {
     pub(crate) fn new(
-        program: Arc<ShaderProgram>,
+        program: ShaderProgram,
         entry_point_index: usize,
         global_constants: GlobalConstants,
         global_values: HashMap<naga::ResourceBinding, Rc<RefCell<Value>>>,

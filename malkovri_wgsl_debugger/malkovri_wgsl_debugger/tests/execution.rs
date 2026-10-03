@@ -1,18 +1,19 @@
 use std::collections::HashMap;
 
 use malkovri_wgsl_debugger::{
-    Debugger, GlobalConstants, Primitive, StepResult, Value, WorkgroupConfig,
+    GlobalConstants, Primitive, ShaderProgram, StepResult, Value, WorkgroupConfig,
 };
 
 fn execute(source: &str) -> HashMap<String, Value> {
-    let mut debugger = Debugger::new(
-        source,
-        0,
-        WorkgroupConfig::default(),
-        GlobalConstants::default(),
-        HashMap::new(),
-    )
-    .unwrap();
+    let mut debugger = ShaderProgram::new(source)
+        .unwrap()
+        .create_debugger(
+            0,
+            WorkgroupConfig::default(),
+            GlobalConstants::default(),
+            HashMap::new(),
+        )
+        .unwrap();
     for _ in 0..1_000 {
         if debugger.step_all().unwrap() == StepResult::Finished {
             return debugger
@@ -166,14 +167,15 @@ var<private> result: vec2f;
 fn missing_or_invalid_entry_point_is_an_error() {
     for (source, index) in [("", 0), ("@compute @workgroup_size(1) fn main() {}", 1)] {
         assert!(
-            Debugger::new(
-                source,
-                index,
-                WorkgroupConfig::default(),
-                GlobalConstants::default(),
-                HashMap::new()
-            )
-            .is_err()
+            ShaderProgram::new(source)
+                .unwrap()
+                .create_debugger(
+                    index,
+                    WorkgroupConfig::default(),
+                    GlobalConstants::default(),
+                    HashMap::new()
+                )
+                .is_err()
         );
     }
 }

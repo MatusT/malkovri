@@ -1,18 +1,26 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use naga::{Expression, Function, Handle, Module, Span, Statement, SwitchValue};
 
 use crate::{
+    debugger::{Debugger, DebuggerError, ResourceBinding, WorkgroupConfig},
     declaring_scopes::ModuleScopes,
+    entry_point_inputs::GlobalConstants,
+    value::Value,
     wgsl::{WgslToModuleError, wgsl_to_module},
 };
 
 /// Parsed shader code and derived metadata, shared by all invocations and sessions.
 /// Execution never mutates the program. One session selects one of its entry points.
+#[derive(Clone)]
 pub struct ShaderProgram {
+    data: Arc<ProgramData>,
+}
+
+struct ProgramData {
     source: String,
     module: Module,
-    pub(crate) scopes: ModuleScopes,
+    scopes: ModuleScopes,
     blocks: Vec<ProgramBlock>,
     function_bodies: HashMap<FunctionId, BlockId>,
 }
@@ -20,9 +28,9 @@ pub struct ShaderProgram {
 /// An entry point available for an independent compute, vertex, or fragment run.
 #[derive(Clone, Copy, Debug)]
 pub struct EntryPointInfo<'a> {
-    pub index: usize,
-    pub name: &'a str,
-    pub stage: naga::ShaderStage,
+    index: usize,
+    name: &'a str,
+    stage: naga::ShaderStage,
 }
 
 /// Identifies a function in the module without owning/cloning it.
@@ -40,8 +48,8 @@ pub(crate) struct BlockId(usize);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct StatementId {
-    pub block: BlockId,
-    pub index: usize,
+    block: BlockId,
+    index: usize,
 }
 
 /// Structured control flow uses block IDs. All other operations retain Naga's
@@ -79,9 +87,9 @@ impl Instruction {
 }
 
 pub(crate) struct SwitchCase {
-    pub value: SwitchValue,
-    pub body: BlockId,
-    pub fall_through: bool,
+    value: SwitchValue,
+    body: BlockId,
+    fall_through: bool,
 }
 
 #[derive(Default)]
@@ -108,7 +116,7 @@ impl ProgramBlock {
 }
 
 impl ShaderProgram {
-    pub fn parse(source: &str) -> Result<Self, WgslToModuleError> {
+    pub fn new(source: &str) -> Result<Self, WgslToModuleError> {
         let module: Module = wgsl_to_module(source)?;
         let scopes = ModuleScopes::new(&module);
         let mut blocks = Vec::new();
@@ -126,20 +134,39 @@ impl ShaderProgram {
             );
         }
         Ok(Self {
-            source: source.to_owned(),
-            module,
-            scopes,
-            blocks,
-            function_bodies,
+            data: Arc::new(ProgramData {
+                source: source.to_owned(),
+                module,
+                scopes,
+                blocks,
+                function_bodies,
+            }),
         })
     }
 
+    /// Create one independently mutable execution of the selected entry point.
+    /// Cloning a program or starting another debugger reuses its immutable data.
+    pub fn create_debugger(
+        &self,
+        entry_point_index: usize,
+        config: WorkgroupConfig,
+        constants: GlobalConstants,
+        bindings: HashMap<ResourceBinding, Value>,
+    ) -> Result<Debugger, DebuggerError> {
+        Debugger::new(self.clone(), entry_point_index, config, constants, bindings)
+    }
+
+    pub(crate) fn scopes(&self) -> &ModuleScopes {
+        &self.data.scopes
+    }
+
     pub fn source(&self) -> &str {
-        &self.source
+        &self.data.source
     }
 
     pub fn entry_points(&self) -> impl Iterator<Item = EntryPointInfo<'_>> {
-        self.module
+        self.data
+            .module
             .entry_points
             .iter()
             .enumerate()
@@ -151,26 +178,26 @@ impl ShaderProgram {
     }
 
     pub(crate) fn module(&self) -> &Module {
-        &self.module
+        &self.data.module
     }
 
     pub(crate) fn function(&self, function: FunctionId) -> &naga::Function {
         match function {
-            FunctionId::EntryPoint(index) => &self.module.entry_points[index].function,
-            FunctionId::Called(handle) => &self.module.functions[handle],
+            FunctionId::EntryPoint(index) => &self.data.module.entry_points[index].function,
+            FunctionId::Called(handle) => &self.data.module.functions[handle],
         }
     }
 
     pub(crate) fn function_body(&self, function: FunctionId) -> BlockId {
-        self.function_bodies[&function]
+        self.data.function_bodies[&function]
     }
 
     pub(crate) fn block(&self, id: BlockId) -> &ProgramBlock {
-        &self.blocks[id.0]
+        &self.data.blocks[id.0]
     }
 
     pub(crate) fn instruction(&self, id: StatementId) -> &Instruction {
-        &self.blocks[id.block.0].instructions[id.index].0
+        &self.data.blocks[id.block.0].instructions[id.index].0
     }
 }
 
@@ -219,4 +246,40 @@ fn index_block(block: &naga::Block, blocks: &mut Vec<ProgramBlock>) -> BlockId {
         .collect();
     blocks[id.0] = ProgramBlock { instructions };
     id
+}
+
+impl<'a> EntryPointInfo<'a> {
+    pub fn index(&self) -> usize {
+        self.index
+    }
+    pub fn name(&self) -> &'a str {
+        self.name
+    }
+    pub fn stage(&self) -> naga::ShaderStage {
+        self.stage
+    }
+}
+
+impl StatementId {
+    pub fn new(block: BlockId, index: usize) -> Self {
+        Self { block, index }
+    }
+    pub fn block(self) -> BlockId {
+        self.block
+    }
+    pub fn index(self) -> usize {
+        self.index
+    }
+}
+
+impl SwitchCase {
+    pub fn value(&self) -> SwitchValue {
+        self.value
+    }
+    pub fn body(&self) -> BlockId {
+        self.body
+    }
+    pub fn falls_through(&self) -> bool {
+        self.fall_through
+    }
 }

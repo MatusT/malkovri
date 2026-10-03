@@ -9,7 +9,9 @@ use crate::error::DebugAdapterError;
 use crate::parse_input;
 use crate::protocol::{BreakpointId, OutgoingMessage, StackFrameId, make_variable};
 use crate::references::{FrameReference, References, ScopeKind};
-use malkovri_wgsl_debugger::{DebugThreadId, Debugger, EvaluatorError, StepResult, ThreadState};
+use malkovri_wgsl_debugger::{
+    DebugThreadId, Debugger, DebuggerError, EvaluatorError, ShaderProgram, StepResult, ThreadState,
+};
 
 // Defensive UI budget, not shader semantics: if catch-up cannot settle, stop anyway.
 const BREAKPOINT_CATCH_UP_STEP_BUDGET: usize = 100_000;
@@ -200,13 +202,11 @@ impl DebugAdapter {
         #[cfg(target_arch = "wasm32")]
         let bindings = parse_input::parse_bindings(arguments)?;
 
-        self.debugger = Some(Debugger::new(
-            &source,
-            0,
-            workgroup_config,
-            global_constants,
-            bindings,
-        )?);
+        self.debugger = Some(
+            ShaderProgram::new(&source)
+                .map_err(DebuggerError::from)?
+                .create_debugger(0, workgroup_config, global_constants, bindings)?,
+        );
         self.program_path = Some(program_path);
         self.program_name = Some(program_name);
         self.stop_on_entry = stop_on_entry;

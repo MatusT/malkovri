@@ -3,7 +3,6 @@ mod inspect;
 mod scheduler;
 mod sync;
 
-use std::sync::Arc;
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use naga::{
@@ -112,7 +111,7 @@ fn thread_order(config: &WorkgroupConfig) -> Vec<[u32; 3]> {
     threads
 }
 
-/// Error returned by [`Debugger::new`].
+/// Error returned by [`ShaderProgram::create_debugger`].
 #[derive(Debug, thiserror::Error)]
 pub enum DebuggerError {
     #[error("WGSL error: {0}")]
@@ -213,7 +212,7 @@ pub struct DebugThread {
 
 /// A WGSL debugger session.
 ///
-/// Create with [`Debugger::new`], then call [`Debugger::step`] to advance
+/// Create with [`ShaderProgram::create_debugger`], then call [`Debugger::step`] to advance
 /// execution and the inspection methods to read program state.
 pub struct Debugger {
     evaluators: HashMap<[u32; 3], InvocationState>,
@@ -221,7 +220,7 @@ pub struct Debugger {
     thread_order: Vec<[u32; 3]>,
     thread_ids: HashMap<DebugThreadId, [u32; 3]>,
     focused_thread: [u32; 3],
-    program: Arc<ShaderProgram>,
+    program: ShaderProgram,
 }
 
 fn thread_id_for_index(index: usize) -> DebugThreadId {
@@ -229,32 +228,9 @@ fn thread_id_for_index(index: usize) -> DebugThreadId {
 }
 
 impl Debugger {
-    /// Create a new debugger session by parsing `source` and initializing the
-    /// entry-point function at `entry_point_index`.
-    ///
-    /// `global_constants` provides user-set shader constants (vertex, fragment,
-    /// etc.).  The compute-related fields (`workgroup_size`, `num_workgroups`,
-    /// `subgroup_size`, `num_subgroups`) are overwritten from `config`.
-    pub fn new(
-        source: &str,
-        entry_point_index: usize,
-        config: WorkgroupConfig,
-        global_constants: GlobalConstants,
-        bindings: HashMap<ResourceBinding, Value>,
-    ) -> Result<Self, DebuggerError> {
-        let program: Arc<ShaderProgram> = Arc::new(ShaderProgram::parse(source)?);
-        Self::from_program(
-            program,
-            entry_point_index,
-            config,
-            global_constants,
-            bindings,
-        )
-    }
-
     /// Start an independent execution using an already parsed immutable program.
-    pub fn from_program(
-        program: Arc<ShaderProgram>,
+    pub(crate) fn new(
+        program: ShaderProgram,
         entry_point_index: usize,
         config: WorkgroupConfig,
         mut global_constants: GlobalConstants,

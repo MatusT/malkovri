@@ -1,18 +1,19 @@
 use std::collections::HashMap;
 
 use malkovri_wgsl_debugger::{
-    Debugger, GlobalConstants, Primitive, StepResult, Value, WorkgroupConfig,
+    Debugger, GlobalConstants, Primitive, ShaderProgram, StepResult, Value, WorkgroupConfig,
 };
 
 fn debugger(source: &str, entry: usize) -> Debugger {
-    Debugger::new(
-        source,
-        entry,
-        WorkgroupConfig::default(),
-        GlobalConstants::default(),
-        HashMap::new(),
-    )
-    .unwrap()
+    ShaderProgram::new(source)
+        .unwrap()
+        .create_debugger(
+            entry,
+            WorkgroupConfig::default(),
+            GlobalConstants::default(),
+            HashMap::new(),
+        )
+        .unwrap()
 }
 
 fn finish(debugger: &mut Debugger) -> u32 {
@@ -131,4 +132,31 @@ fn helper(value: u32) -> u32 {
     let mut fragment = debugger(source, 1);
     assert_eq!(finish(&mut vertex), 7);
     assert_eq!(finish(&mut fragment), 9);
+}
+
+#[test]
+fn shared_program_sessions_keep_their_memory_independent() {
+    let source =
+        "var<private> result: u32; @compute @workgroup_size(1) fn main() { result += 1u; }";
+    let program = ShaderProgram::new(source).unwrap();
+    let make_session = || {
+        program
+            .create_debugger(
+                0,
+                WorkgroupConfig::default(),
+                GlobalConstants::default(),
+                HashMap::new(),
+            )
+            .unwrap()
+    };
+    let mut first = make_session();
+    let mut second = make_session();
+    assert_eq!(program.entry_points().next().unwrap().name(), "main");
+    assert_eq!(
+        program.entry_points().next().unwrap().stage(),
+        malkovri_wgsl_debugger::ShaderStage::Compute
+    );
+    assert_eq!(finish(&mut first), 1);
+    assert_eq!(finish(&mut second), 1);
+    assert_eq!(program.source(), source);
 }

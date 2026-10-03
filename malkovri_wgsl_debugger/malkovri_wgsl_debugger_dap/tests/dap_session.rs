@@ -1,6 +1,6 @@
 use std::{collections::HashMap, path::PathBuf};
 
-use malkovri_wgsl_debugger::{DebugThreadId, Debugger, GlobalConstants, WorkgroupConfig};
+use malkovri_wgsl_debugger::{DebugThreadId, GlobalConstants, ShaderProgram};
 use malkovri_wgsl_debugger_dap::{DebugAdapter, StackFrameId};
 use serde_json::{Value, json};
 
@@ -562,13 +562,7 @@ fn main() {
 }
 "#;
 
-    let err = match Debugger::new(
-        source,
-        0,
-        WorkgroupConfig::default(),
-        GlobalConstants::default(),
-        HashMap::new(),
-    ) {
+    let err = match ShaderProgram::new(source) {
         Ok(_) => panic!("ray-query shader unexpectedly validated"),
         Err(err) => err,
     };
