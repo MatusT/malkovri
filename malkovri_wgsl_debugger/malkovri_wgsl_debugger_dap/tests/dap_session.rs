@@ -264,6 +264,54 @@ fn control_flow_session_matches_vscode_request_flow() {
 }
 
 #[test]
+fn vertex_triangle_session_supports_entry_stop_inspection_and_stepping() {
+    let mut s = Session::new();
+    s.send("initialize", json!({}));
+    s.send(
+        "launch",
+        json!({
+            "program": shader_path("test_vertex_triangle.wgsl"),
+            "stopOnEntry": true,
+            "workgroupConfig": { "workgroupSize": [1, 1, 1] },
+        }),
+    );
+    let cfg = s.send("configurationDone", json!({}));
+    assert_eq!(event_body(&cfg, "stopped")["reason"], "entry");
+
+    let stack = s.send("stackTrace", json!({ "threadId": 1 }));
+    assert_eq!(
+        response_body(&stack, s.last_seq())["stackFrames"][0]["name"],
+        "vs_main"
+    );
+    let frame_id = top_frame_id(&mut s, 1);
+    let scopes = s.send("scopes", json!({ "frameId": frame_id }));
+    let arguments_ref = scope_reference(response_body(&scopes, s.last_seq()), "Function Arguments");
+    let args = s.send("variables", json!({ "variablesReference": arguments_ref }));
+    assert_eq!(
+        variables_map(response_body(&args, s.last_seq()))["in_vertex_index"],
+        "Primitive(U32(0))"
+    );
+
+    let next = s.send("next", json!({ "threadId": 1 }));
+    assert_eq!(event_body(&next, "stopped")["reason"], "step");
+    let frame_id = top_frame_id(&mut s, 1);
+    let scopes = s.send("scopes", json!({ "frameId": frame_id }));
+    let locals_ref = scope_reference(response_body(&scopes, s.last_seq()), "Locals");
+    let locals = s.send("variables", json!({ "variablesReference": locals_ref }));
+    assert_eq!(
+        variables_map(response_body(&locals, s.last_seq()))["pos"],
+        "Array([Primitive(F32x2([0.0, 0.5])), Primitive(F32x2([-0.5, -0.5])), Primitive(F32x2([0.5, -0.5]))])"
+    );
+
+    let cont = s.send("continue", json!({ "threadId": 1 }));
+    assert_eq!(event_body(&cont, "terminated"), &json!({}));
+    assert_eq!(
+        s.adapter.debugger().unwrap().entry_point_output(),
+        Some(malkovri_wgsl_debugger::Primitive::F32x4([0.0, 0.5, 0.0, 1.0]).into())
+    );
+}
+
+#[test]
 fn expression_shader_variables_include_binding_backed_values() {
     let mut s = Session::new();
     let shader = shader_path("test_expressions.wgsl");

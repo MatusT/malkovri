@@ -112,6 +112,37 @@ fn forward(first: ptr<function, u32>, second: ptr<function, u32>) {
 }
 
 #[test]
+fn vertex_triangle_returns_the_first_position_with_default_inputs() {
+    let program =
+        ShaderProgram::new(include_str!("../../test_shaders/test_vertex_triangle.wgsl")).unwrap();
+    let entry = program.entry_points().next().unwrap();
+    assert_eq!(entry.name, "vs_main");
+    assert_eq!(entry.stage, malkovri_wgsl_debugger::ShaderStage::Vertex);
+
+    // Explicit vertex inputs are not configurable yet; the default index is zero.
+    let mut debugger = program
+        .create_debugger(
+            entry.index,
+            WorkgroupConfig::default(),
+            GlobalConstants::default(),
+            HashMap::new(),
+        )
+        .unwrap();
+    assert_eq!(debugger.entry_point_output(), None);
+
+    for _ in 0..1_000 {
+        if debugger.step_all().unwrap() == StepResult::Finished {
+            assert_eq!(
+                debugger.entry_point_output(),
+                Some(Primitive::F32x4([0.0, 0.5, 0.0, 1.0]).into())
+            );
+            return;
+        }
+    }
+    panic!("vertex shader did not finish within 1,000 steps");
+}
+
+#[test]
 fn vertex_and_fragment_entry_points_can_execute_in_separate_sessions() {
     let source = r#"
 var<private> result: u32;
