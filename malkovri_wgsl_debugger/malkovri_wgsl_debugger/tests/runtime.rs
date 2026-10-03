@@ -128,10 +128,31 @@ fn helper(value: u32) -> u32 {
     return vec4f(1.0);
 }
 "#;
-    let mut vertex = debugger(source, 0);
-    let mut fragment = debugger(source, 1);
+    let program = ShaderProgram::new(source).unwrap();
+    let make_session = |entry| {
+        program
+            .create_debugger(
+                entry,
+                WorkgroupConfig::default(),
+                GlobalConstants::default(),
+                HashMap::new(),
+            )
+            .unwrap()
+    };
+    let mut vertex = make_session(0);
     assert_eq!(finish(&mut vertex), 7);
+    assert!(matches!(
+        vertex.entry_point_output(),
+        Some(Value::Primitive(Primitive::F32x4([0.0, 0.0, 0.0, 1.0])))
+    ));
+    // A later stage starts from the same program with fresh invocation memory.
+    let mut fragment = make_session(1);
     assert_eq!(finish(&mut fragment), 9);
+    assert!(matches!(
+        fragment.entry_point_output(),
+        Some(Value::Primitive(Primitive::F32x4([1.0, 1.0, 1.0, 1.0])))
+    ));
+    assert_eq!(finish(&mut vertex), 7);
 }
 
 #[test]
@@ -156,7 +177,9 @@ fn shared_program_sessions_keep_their_memory_independent() {
         program.entry_points().next().unwrap().stage,
         malkovri_wgsl_debugger::ShaderStage::Compute
     );
+    assert_eq!(program.source(), source);
+    drop(program);
+    // Sessions retain immutable program data even after the caller releases it.
     assert_eq!(finish(&mut first), 1);
     assert_eq!(finish(&mut second), 1);
-    assert_eq!(program.source(), source);
 }
