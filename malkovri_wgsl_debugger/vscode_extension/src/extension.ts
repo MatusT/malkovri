@@ -197,5 +197,6 @@ class WasmDebugAdapterImpl implements vscode.DebugAdapter {
 
   dispose(): void {
     this.adapter.free();
+    this._onDidSendMessage.dispose();
   }
 }
