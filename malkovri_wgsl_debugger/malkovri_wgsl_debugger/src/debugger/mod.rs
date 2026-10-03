@@ -2,12 +2,14 @@ mod collectives;
 mod group;
 mod inspect;
 
+mod run_control;
 mod scheduler;
 mod sync;
 
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 
 use group::{ExecutionGroup, Invocation, InvocationId};
+pub use run_control::RunResult;
 
 use naga::{
     AddressSpace, Barrier, CollectiveOperation, Expression, GatherMode, Handle, ResourceBinding,

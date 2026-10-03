@@ -10,13 +10,8 @@ use crate::parse_input;
 use crate::protocol::{BreakpointId, OutgoingMessage, StackFrameId, make_variable};
 use crate::references::{FrameReference, References, ScopeKind};
 use malkovri_wgsl_debugger::{
-    DebugThreadId, Debugger, DebuggerError, EvaluatorError, ShaderProgram, StepResult, ThreadState,
+    DebugThreadId, Debugger, DebuggerError, EvaluatorError, RunResult, ShaderProgram,
 };
-
-// Defensive UI budget, not shader semantics: if catch-up cannot settle, stop anyway.
-const BREAKPOINT_CATCH_UP_STEP_BUDGET: usize = 100_000;
-// Bound synchronous requests so the host regains control even for an infinite shader.
-const EXECUTION_STEP_BUDGET: usize = 100_000;
 
 pub struct DebugAdapter {
     sequence_number: i64,
@@ -511,71 +506,13 @@ impl DebugAdapter {
             self.single_thread_execution || arguments.single_thread.unwrap_or(false);
         let thread_id: DebugThreadId = arguments.thread_id;
         self.debugger_mut()?.focus_thread(thread_id)?;
-        let initial_depth = self.debugger()?.call_stack().len();
-        let initial_line = self
-            .debugger()?
-            .current_location()
-            .map(|location| location.line);
         self.references.clear();
-
-        let mut stop_reason = dapts::StoppedEventReason::Step;
-        let mut description = None;
-        let mut finished = false;
-        for step in 0..EXECUTION_STEP_BUDGET {
-            let debugger = self.debugger_mut()?;
-            let result = if single_thread {
-                debugger.step_thread(thread_id)?
-            } else {
-                debugger.step_all()?
-            };
-            if result == StepResult::Finished {
-                finished = true;
-                break;
-            }
-            let state = debugger.thread_state(thread_id)?;
-            if state == ThreadState::Finished || (single_thread && state == ThreadState::Waiting) {
-                stop_reason = dapts::StoppedEventReason::Pause;
-                description = Some(Self::thread_stop_description(state));
-                break;
-            }
-
-            let debugger = self.debugger()?;
-            let depth = debugger.thread_call_stack(thread_id)?.len();
-            let current_line = debugger
-                .thread_current_location(thread_id)
-                .map(|location| location.line);
-            let hit = debugger
-                .all_thread_locations()
-                .into_iter()
-                .find(|(id, location)| {
-                    (!single_thread || *id == thread_id)
-                        && (*id != thread_id
-                            || Some(location.line) != initial_line
-                            || depth > initial_depth)
-                        && Self::verified_breakpoint_line(&self.breakpoints, location.line)
-                            .is_some()
-                });
-            if let Some((id, _)) = hit {
-                self.debugger_mut()?.focus_thread(id)?;
-                stop_reason = dapts::StoppedEventReason::Breakpoint;
-                break;
-            }
-            if depth <= initial_depth && current_line != initial_line {
-                break;
-            }
-            if step + 1 == EXECUTION_STEP_BUDGET {
-                stop_reason = dapts::StoppedEventReason::Pause;
-                description =
-                    Some("Execution paused after reaching the step budget; continue to resume.");
-            }
-        }
-
+        let breakpoints = self.breakpoint_lines();
+        let result = self
+            .debugger_mut()?
+            .step_over(thread_id, single_thread, &breakpoints)?;
         let response = self.make_response(req.seq, &req.command, &serde_json::json!({}))?;
-        let event = if finished {
-            self.make_event("terminated", &serde_json::json!({}))?
-        } else {
-            self.make_stopped_event_with_description(stop_reason, description)?
-        };
+        let event = self.make_run_event(result)?;
         Ok(vec![response, event])
     }
 
@@ -649,193 +586,51 @@ impl DebugAdapter {
         )?])
     }
 
+    fn breakpoint_lines(&self) -> Vec<u32> {
+        self.breakpoints
+            .iter()
+            .filter(|bp| bp.verified)
+            .filter_map(|bp| bp.line)
+            .collect()
+    }
+
     fn run_to_breakpoint(
         &mut self,
         thread_id: DebugThreadId,
         single_thread: bool,
         trace: &mut Vec<String>,
     ) -> Result<OutgoingMessage, DebugAdapterError> {
-        let debugger = self
-            .debugger
-            .as_mut()
-            .ok_or_else(|| DebugAdapterError::InvalidProgram("debugger not initialized".into()))?;
-        debugger.focus_thread(thread_id)?;
-        let breakpoints = &self.breakpoints;
-        if self.trace_enabled {
-            let lines = breakpoints
-                .iter()
-                .filter_map(|bp| bp.line)
-                .map(|line| line.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            trace.push(format!(
-                "continue start thread={thread_id} single_thread={single_thread} breakpoints=[{lines}] locations={}",
-                Self::format_thread_locations(debugger),
-            ));
-        }
-
-        let mut has_more = false;
-        let mut pause_description = None;
-        let mut hit_thread_id = thread_id;
-        let mut steps = 0usize;
-        loop {
-            // Continue is implemented as repeated debugger steps until stop or termination.
-            let result = if single_thread {
-                debugger.step_thread(thread_id)?
-            } else {
-                debugger.step_all()?
-            };
-            steps += 1;
-            if self.trace_enabled {
-                trace.push(format!(
-                    "continue step {steps}: result={result:?} locations={}",
-                    Self::format_thread_locations(debugger),
-                ));
-            }
-            match result {
-                StepResult::Finished => break,
-                StepResult::Continue => {
-                    let state = debugger.thread_state(thread_id)?;
-                    if single_thread && state != ThreadState::Running {
-                        pause_description = Some(Self::thread_stop_description(state));
-                        break;
-                    }
-                    // Single-thread continue only inspects the selected DAP thread.
-                    let hit = if single_thread {
-                        debugger.thread_current_location(thread_id).and_then(|loc| {
-                            Self::verified_breakpoint_line(breakpoints, loc.line)
-                                .map(|line| (thread_id, line))
-                        })
-                    } else {
-                        // Lockstep continue checks every thread because any lane may hit first.
-                        Self::first_breakpoint_hit(debugger, breakpoints)
-                    };
-
-                    if let Some((candidate_thread_id, line)) = hit {
-                        if self.trace_enabled {
-                            trace.push(format!(
-                                "breakpoint candidate thread={candidate_thread_id} line={line}"
-                            ));
-                        }
-                        // Converged lines can be reached by fast lanes before slower lanes catch up.
-                        if !single_thread {
-                            hit_thread_id = Self::catch_up_threads_to_breakpoint(
-                                debugger,
-                                candidate_thread_id,
-                                line,
-                                trace,
-                                self.trace_enabled,
-                            )?;
-                        } else {
-                            hit_thread_id = candidate_thread_id;
-                        }
-                        debugger.focus_thread(hit_thread_id)?;
-                        has_more = true;
-                        break;
-                    }
-                }
-            }
-            if steps >= EXECUTION_STEP_BUDGET {
-                pause_description =
-                    Some("Execution paused after reaching the step budget; continue to resume.");
-                break;
-            }
-        }
-
-        if let Some(description) = pause_description {
-            self.make_stopped_event_with_description(
-                dapts::StoppedEventReason::Pause,
-                Some(description),
-            )
-        } else if has_more {
-            debugger.focus_thread(hit_thread_id)?;
-            self.make_stopped_event(dapts::StoppedEventReason::Breakpoint)
-        } else {
-            self.make_event("terminated", &serde_json::json!({}))
-        }
+        let breakpoints = self.breakpoint_lines();
+        let trace = self.trace_enabled.then_some(trace);
+        let result = self.debugger_mut()?.run_to_breakpoint(
+            thread_id,
+            single_thread,
+            &breakpoints,
+            trace,
+        )?;
+        self.make_run_event(result)
     }
 
-    // Return the verified breakpoint line when the current source line matches one.
-    fn verified_breakpoint_line(breakpoints: &[Breakpoint], line: u32) -> Option<u32> {
-        breakpoints
-            .iter()
-            .find_map(|bp| (bp.verified && bp.line == Some(line)).then_some(line))
-    }
-
-    // Find the first thread whose current line is a verified breakpoint.
-    fn first_breakpoint_hit(
-        debugger: &Debugger,
-        breakpoints: &[Breakpoint],
-    ) -> Option<(DebugThreadId, u32)> {
-        debugger
-            .all_thread_locations()
-            .into_iter()
-            .find_map(|(thread_id, loc)| {
-                Self::verified_breakpoint_line(breakpoints, loc.line).map(|line| (thread_id, line))
-            })
-    }
-
-    // Let lanes that are still before a hit breakpoint reach that same source line.
-    fn catch_up_threads_to_breakpoint(
-        debugger: &mut Debugger,
-        hit_thread_id: DebugThreadId,
-        target_line: u32,
-        trace: &mut Vec<String>,
-        trace_enabled: bool,
-    ) -> Result<DebugThreadId, DebugAdapterError> {
-        let mut remaining_step_budget = BREAKPOINT_CATCH_UP_STEP_BUDGET;
-
-        loop {
-            let locations = debugger.all_thread_locations();
-            // Prefer reporting the earliest DAP thread already sitting on the breakpoint.
-            let first_at_target = locations
-                .iter()
-                .find_map(|(thread_id, loc)| (loc.line == target_line).then_some(*thread_id));
-
-            // If every live thread reports this line, VS Code will show a coherent stop.
-            if locations.iter().all(|(_, loc)| loc.line == target_line) {
-                if trace_enabled {
-                    trace.push(format!(
-                        "catch-up complete target_line={target_line} locations={}",
-                        Self::format_thread_locations(debugger),
-                    ));
-                }
-                return Ok(first_at_target.unwrap_or(hit_thread_id));
-            }
-
-            // Threads beyond the line are from divergent paths, so they cannot be caught up.
-            let candidates = locations
-                .iter()
-                .filter_map(|(thread_id, loc)| (loc.line < target_line).then_some(*thread_id))
-                .collect::<Vec<_>>();
-
-            if candidates.is_empty() {
-                if trace_enabled {
-                    trace.push(format!(
-                        "catch-up stopped target_line={target_line}; no candidates locations={}",
-                        Self::format_thread_locations(debugger),
-                    ));
-                }
-                return Ok(first_at_target.unwrap_or(hit_thread_id));
-            }
-
-            // Threads already at the breakpoint stay parked there. Threads still
-            // visibly before the line may be draining divergent control flow that
-            // reconverges at this breakpoint.
-            for candidate_thread_id in candidates {
-                debugger.step_thread(candidate_thread_id)?;
-                if trace_enabled {
-                    trace.push(format!(
-                        "catch-up stepped thread={candidate_thread_id} locations={}",
-                        Self::format_thread_locations(debugger),
-                    ));
-                }
-                remaining_step_budget = remaining_step_budget.saturating_sub(1);
-                if remaining_step_budget == 0 {
-                    return Ok(first_at_target.unwrap_or(hit_thread_id));
-                }
-            }
-        }
+    fn make_run_event(&mut self, result: RunResult) -> Result<OutgoingMessage, DebugAdapterError> {
+        use dapts::StoppedEventReason as Reason;
+        let (reason, description) = match result {
+            RunResult::Finished => return self.make_event("terminated", &serde_json::json!({})),
+            RunResult::Step => (Reason::Step, None),
+            RunResult::Breakpoint => (Reason::Breakpoint, None),
+            RunResult::InvocationFinished => (
+                Reason::Pause,
+                Some("Selected invocation finished; other invocations remain paused."),
+            ),
+            RunResult::Waiting => (
+                Reason::Pause,
+                Some("Selected invocation is waiting for other invocations at synchronization."),
+            ),
+            RunResult::BudgetExhausted => (
+                Reason::Pause,
+                Some("Execution paused after reaching the step budget; continue to resume."),
+            ),
+        };
+        self.make_stopped_event_with_description(reason, description)
     }
 
     fn initial_stop_event(&mut self) -> Result<OutgoingMessage, DebugAdapterError> {
@@ -848,18 +643,6 @@ impl DebugAdapter {
                 Err(error) => self.make_execution_error_event(&error),
             }
         }
-    }
-
-    fn format_thread_locations(debugger: &Debugger) -> String {
-        debugger
-            .all_thread_locations()
-            .into_iter()
-            .map(|(thread_id, loc)| {
-                let function = loc.function_name.as_deref().unwrap_or("unknown");
-                format!("{thread_id}:{function}:{}:{}", loc.line, loc.column)
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
     }
 
     fn make_trace_events(
@@ -904,20 +687,6 @@ impl DebugAdapter {
             dapts::StoppedEventReason::Exception
         };
         self.make_stopped_event_with_description(reason, Some(&error.to_string()))
-    }
-
-    fn thread_stop_description(state: ThreadState) -> &'static str {
-        match state {
-            ThreadState::Finished => {
-                "Selected invocation finished; other invocations remain paused."
-            }
-            ThreadState::Waiting => {
-                "Selected invocation is waiting for other invocations at synchronization."
-            }
-            ThreadState::Running => {
-                unreachable!("only stopped invocations have a stop description")
-            }
-        }
     }
 
     fn make_stopped_event_with_description(
