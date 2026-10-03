@@ -200,3 +200,40 @@ var<private> result: vec2f;
         Value::Primitive(Primitive::F32x2([30.0, 20.0]))
     ));
 }
+
+#[test]
+fn min_and_max_compare_numeric_components() {
+    let globals = execute(
+        r#"
+var<private> minimum: vec3f;
+var<private> maximum: vec3f;
+var<private> signed_minimum: i32;
+var<private> unsigned_maximum: u32;
+@compute @workgroup_size(1) fn main() {
+    var a = vec3f(-2.0, 8.0, 0.0);
+    var b = vec3f(1.0, 5.0, 3.0);
+    var negative = -7i;
+    var positive = 4i;
+    var high = 4000000000u;
+    var low = 3u;
+    minimum = min(a, b);
+    maximum = max(a, b);
+    signed_minimum = min(negative, positive);
+    unsigned_maximum = max(high, low);
+}
+"#,
+    );
+    assert_eq!(
+        globals["minimum"],
+        Value::from(Primitive::F32x3([-2.0, 5.0, 0.0]))
+    );
+    assert_eq!(
+        globals["maximum"],
+        Value::from(Primitive::F32x3([1.0, 8.0, 3.0]))
+    );
+    assert_eq!(globals["signed_minimum"], Value::from(Primitive::I32(-7)));
+    assert_eq!(
+        globals["unsigned_maximum"],
+        Value::from(Primitive::U32(4_000_000_000))
+    );
+}
