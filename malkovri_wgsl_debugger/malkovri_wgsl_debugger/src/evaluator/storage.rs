@@ -1,42 +1,68 @@
+use std::{cell::RefCell, rc::Rc};
+
 use naga::{Expression, GlobalVariable, Handle, LocalVariable};
 
 use crate::{
     error::EvaluatorError,
     function_state::StackFrame,
-    place::{Place, PlaceRoot},
+    place::{Place, PlaceRoot, PlaceSegment},
     value::Value,
 };
 
-use super::{GlobalValue, InvocationState, evaluate_global_expression};
+use super::{InvocationState, evaluate_global_expression};
+
+#[derive(Clone, Debug)]
+pub(super) enum GlobalValue {
+    Private(Value),
+    Shared(Rc<RefCell<Value>>),
+}
+
+impl GlobalValue {
+    pub(super) fn read_path(&self, path: &[PlaceSegment]) -> Value {
+        match self {
+            GlobalValue::Private(value) => value.at_path(path),
+            GlobalValue::Shared(value) => value.borrow().at_path(path),
+        }
+    }
+
+    fn write_path(&mut self, path: &[PlaceSegment], value: Value) -> Result<(), EvaluatorError> {
+        match self {
+            GlobalValue::Private(slot) => slot.assign_path(path, value),
+            GlobalValue::Shared(slot) => slot.borrow_mut().assign_path(path, value),
+        }
+        .map_err(EvaluatorError::InternalError)
+    }
+}
 
 impl InvocationState {
     pub(crate) fn read_place(&self, place: &Place) -> Value {
-        let root_value = match &place.root {
+        match place.root() {
             PlaceRoot::Local {
                 function_frame_index,
                 handle,
-            } => self.read_local_value(*function_frame_index, *handle),
+            } => self.read_local_value(*function_frame_index, *handle, place.path()),
             PlaceRoot::Global { handle } => self
                 .global_values
                 .get(handle)
-                .map(GlobalValue::read)
+                .map(|value| value.read_path(place.path()))
                 .unwrap_or(Value::Uninitialized),
-        };
-        root_value.at_path(&place.path)
+        }
     }
 
     fn read_local_value(
         &self,
         function_frame_index: usize,
         handle: Handle<LocalVariable>,
+        path: &[PlaceSegment],
     ) -> Value {
         let Some(StackFrame::Function(frame)) = self.stack.get(function_frame_index) else {
             return Value::Uninitialized;
         };
         if let Some(value) = frame.local_variables.get(&handle) {
-            return value.clone();
+            return value.at_path(path);
         }
         self.local_initial_value(function_frame_index, handle)
+            .at_path(path)
     }
 
     fn local_initial_value(
@@ -60,7 +86,7 @@ impl InvocationState {
         place: &Place,
         value: Value,
     ) -> Result<(), EvaluatorError> {
-        match &place.root {
+        match place.root() {
             PlaceRoot::Local {
                 function_frame_index,
                 handle,
@@ -76,7 +102,7 @@ impl InvocationState {
                         "local variable {handle:?} was not initialized"
                     ))
                 })?;
-                slot.assign_path(&place.path, value)
+                slot.assign_path(place.path(), value)
                     .map_err(EvaluatorError::InternalError)
             }
             PlaceRoot::Global { handle } => {
@@ -86,7 +112,7 @@ impl InvocationState {
                         "global variable {handle:?} was not initialized"
                     ))
                 })?;
-                slot.write_path(&place.path, value)
+                slot.write_path(place.path(), value)
             }
         }
     }

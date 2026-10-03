@@ -20,8 +20,8 @@ pub(crate) enum PlaceSegment {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Place {
-    pub(crate) root: PlaceRoot,
-    pub(crate) path: Vec<PlaceSegment>,
+    root: PlaceRoot,
+    path: Vec<PlaceSegment>,
 }
 
 impl Place {
@@ -30,6 +30,14 @@ impl Place {
             root,
             path: Vec::new(),
         }
+    }
+
+    pub(crate) fn root(&self) -> &PlaceRoot {
+        &self.root
+    }
+
+    pub(crate) fn path(&self) -> &[PlaceSegment] {
+        &self.path
     }
 
     pub(crate) fn with_index(mut self, index: usize) -> Self {

@@ -17,7 +17,7 @@ impl InvocationState {
             .iter()
             .map(|(handle, value)| {
                 let name = self.program.module().global_variables[*handle].name.clone();
-                (name, value.read())
+                (name, value.read_path(&[]))
             })
             .collect()
     }

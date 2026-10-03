@@ -23,32 +23,7 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use naga::{GlobalVariable, Handle};
 
-#[derive(Clone, Debug)]
-pub(crate) enum GlobalValue {
-    Private(Value),
-    Shared(Rc<RefCell<Value>>),
-}
-
-impl GlobalValue {
-    fn read(&self) -> Value {
-        match self {
-            GlobalValue::Private(value) => value.clone(),
-            GlobalValue::Shared(value) => value.borrow().clone(),
-        }
-    }
-
-    fn write_path(
-        &mut self,
-        path: &[crate::place::PlaceSegment],
-        value: Value,
-    ) -> Result<(), EvaluatorError> {
-        match self {
-            GlobalValue::Private(slot) => slot.assign_path(path, value),
-            GlobalValue::Shared(slot) => slot.borrow_mut().assign_path(path, value),
-        }
-        .map_err(EvaluatorError::InternalError)
-    }
-}
+use storage::GlobalValue;
 
 pub(crate) struct InvocationState {
     program: Arc<ShaderProgram>,

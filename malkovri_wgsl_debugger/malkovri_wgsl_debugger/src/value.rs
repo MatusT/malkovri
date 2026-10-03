@@ -53,8 +53,20 @@ impl Value {
             return self.clone();
         };
 
-        match segment {
-            PlaceSegment::Index(index) => self.index_into(*index).at_path(rest),
+        let PlaceSegment::Index(index) = segment;
+        match self {
+            Value::Array(elements) => elements
+                .get(*index)
+                .map(|element| element.at_path(rest))
+                .unwrap_or(Value::Uninitialized),
+            Value::Struct(fields) => fields
+                .get(*index)
+                .map(|(_, field)| field.at_path(rest))
+                .unwrap_or(Value::Uninitialized),
+            Value::Primitive(primitive) if rest.is_empty() => {
+                primitive.extract_component(*index).into()
+            }
+            _ => Value::Uninitialized,
         }
     }
 
