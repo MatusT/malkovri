@@ -4,19 +4,22 @@ use crate::error::EvaluatorError;
 
 use super::{DebugThreadId, Debugger, ParkReason, ParkScope, ThreadStatus};
 
+struct ReadyGroup {
+    reason: ParkReason,
+    members: Vec<[u32; 3]>,
+}
+
 impl Debugger {
     pub(super) fn release_ready_parked_threads(&mut self) -> Result<(), EvaluatorError> {
         loop {
-            let Some((reason, members)) = self.find_ready_parked_group()? else {
+            let Some(ReadyGroup { reason, members }) = self.find_ready_parked_group()? else {
                 return Ok(());
             };
             self.release_parked_group(reason, members)?;
         }
     }
 
-    fn find_ready_parked_group(
-        &self,
-    ) -> Result<Option<(ParkReason, Vec<[u32; 3]>)>, EvaluatorError> {
+    fn find_ready_parked_group(&self) -> Result<Option<ReadyGroup>, EvaluatorError> {
         for gid in &self.thread_order {
             let Some(ThreadStatus::Parked(reason)) = self.thread_status.get(gid) else {
                 continue;
@@ -44,7 +47,10 @@ impl Debugger {
             });
 
             if all_compatible {
-                return Ok(Some((reason.clone(), members)));
+                return Ok(Some(ReadyGroup {
+                    reason: reason.clone(),
+                    members,
+                }));
             }
 
             return Err(self.synchronization_error("divergent synchronization point", &members));
