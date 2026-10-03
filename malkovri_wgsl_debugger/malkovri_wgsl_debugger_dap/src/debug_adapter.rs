@@ -512,22 +512,72 @@ impl DebugAdapter {
             self.single_thread_execution || arguments.single_thread.unwrap_or(false);
         let thread_id: DebugThreadId = arguments.thread_id;
         self.debugger_mut()?.focus_thread(thread_id)?;
+        let initial_depth = self.debugger()?.call_stack().len();
+        let initial_line = self
+            .debugger()?
+            .current_location()
+            .map(|location| location.line);
         self.references.clear();
-        let debugger = self.debugger_mut()?;
-        let has_more = if single_thread {
-            matches!(debugger.step_thread(thread_id)?, StepResult::Continue)
-        } else {
-            matches!(debugger.step_all()?, StepResult::Continue)
-        };
 
-        let mut messages =
-            vec![self.make_response(req.seq, &req.command, &serde_json::json!({}))?];
-        if has_more {
-            messages.push(self.make_stopped_event(dapts::StoppedEventReason::Step)?);
-        } else {
-            messages.push(self.make_event("terminated", &serde_json::json!({}))?);
+        let mut stop_reason = dapts::StoppedEventReason::Step;
+        let mut description = None;
+        let mut finished = false;
+        for step in 0..EXECUTION_STEP_BUDGET {
+            let debugger = self.debugger_mut()?;
+            let result = if single_thread {
+                debugger.step_thread(thread_id)?
+            } else {
+                debugger.step_all()?
+            };
+            if result == StepResult::Finished {
+                finished = true;
+                break;
+            }
+            let state = debugger.thread_state(thread_id)?;
+            if state == ThreadState::Finished || (single_thread && state == ThreadState::Waiting) {
+                stop_reason = dapts::StoppedEventReason::Pause;
+                description = Some(Self::thread_stop_description(state));
+                break;
+            }
+
+            let debugger = self.debugger()?;
+            let depth = debugger.thread_call_stack(thread_id)?.len();
+            let current_line = debugger
+                .thread_current_location(thread_id)
+                .map(|location| location.line);
+            let hit = debugger
+                .all_thread_locations()
+                .into_iter()
+                .find(|(id, location)| {
+                    (!single_thread || *id == thread_id)
+                        && (*id != thread_id
+                            || Some(location.line) != initial_line
+                            || depth > initial_depth)
+                        && Self::verified_breakpoint_line(&self.breakpoints, location.line)
+                            .is_some()
+                });
+            if let Some((id, _)) = hit {
+                self.debugger_mut()?.focus_thread(id)?;
+                stop_reason = dapts::StoppedEventReason::Breakpoint;
+                break;
+            }
+            if depth <= initial_depth && current_line != initial_line {
+                break;
+            }
+            if step + 1 == EXECUTION_STEP_BUDGET {
+                stop_reason = dapts::StoppedEventReason::Pause;
+                description =
+                    Some("Execution paused after reaching the step budget; continue to resume.");
+            }
         }
-        Ok(messages)
+
+        let response = self.make_response(req.seq, &req.command, &serde_json::json!({}))?;
+        let event = if finished {
+            self.make_event("terminated", &serde_json::json!({}))?
+        } else {
+            self.make_stopped_event_with_description(stop_reason, description)?
+        };
+        Ok(vec![response, event])
     }
 
     fn handle_continue(
