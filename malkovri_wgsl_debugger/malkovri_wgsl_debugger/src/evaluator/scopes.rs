@@ -2,7 +2,11 @@ use std::collections::HashSet;
 
 use naga::{Expression, Handle, LocalVariable, Statement};
 
-use crate::{error::EvaluatorError, value::Value};
+use crate::{
+    error::EvaluatorError,
+    function_state::{FrameContext, StackFrame},
+    value::Value,
+};
 
 use super::Evaluator;
 
@@ -19,11 +23,16 @@ impl Evaluator {
     }
 
     /// Evaluate the current function arguments in declaration order.
-    pub(crate) fn current_function_argument_values(
+    pub(crate) fn function_argument_values(
         &self,
+        context: FrameContext,
     ) -> Result<Vec<(Option<String>, Value)>, EvaluatorError> {
-        let func_idx = self.current_function_frame_index()?;
-        let frame = self.current_function_frame()?;
+        let func_idx = context.function_index;
+        let StackFrame::Function(frame) = &self.stack[func_idx] else {
+            return Err(EvaluatorError::InternalError(
+                "unknown function frame".into(),
+            ));
+        };
         let function = self.resolve_function(&frame.function_ref);
         Ok(function
             .arguments
@@ -38,10 +47,15 @@ impl Evaluator {
             .collect())
     }
 
-    pub(crate) fn local_variables_in_current_scope(
+    pub(crate) fn local_variables_in_scope(
         &self,
+        context: FrameContext,
     ) -> Result<HashSet<Handle<LocalVariable>>, EvaluatorError> {
-        let frame = self.current_function_frame()?;
+        let StackFrame::Function(frame) = &self.stack[context.function_index] else {
+            return Err(EvaluatorError::InternalError(
+                "unknown function frame".into(),
+            ));
+        };
         let function = self.resolve_function(&frame.function_ref);
         let declaring_scopes = self
             .declaring_scopes
@@ -50,15 +64,15 @@ impl Evaluator {
                 EvaluatorError::InternalError("missing local declaring scopes".into())
             })?;
 
-        let current_block = self.current_frame()?;
+        let current_block = &self.stack[context.block_index];
         // The span of the current (innermost) execution scope.
-        let current_scope = self.current_scope_range()?;
+        let current_scope = self.scope_range(context);
 
         // Current execution position for the "declared before" check.
         let current_pos = current_block
             .statements()
             .span_iter()
-            .nth(current_block.current_statement_index())
+            .nth(context.statement_index)
             .and_then(|(_, sp)| sp.to_range())
             .map(|r| r.start);
 
@@ -87,10 +101,17 @@ impl Evaluator {
     /// Evaluate all named expressions (WGSL `let` bindings) in the current function frame
     /// that are in scope at the current execution point.
     /// Returns `(name, value)` pairs in source order.
-    pub(crate) fn named_expression_values(&self) -> Result<Vec<(String, Value)>, EvaluatorError> {
-        let function_index = self.current_function_frame_index()?;
-        let frame = self.current_function_frame()?;
-        let function = self.current_function()?;
+    pub(crate) fn named_expression_values(
+        &self,
+        context: FrameContext,
+    ) -> Result<Vec<(String, Value)>, EvaluatorError> {
+        let function_index = context.function_index;
+        let StackFrame::Function(frame) = &self.stack[function_index] else {
+            return Err(EvaluatorError::InternalError(
+                "unknown function frame".into(),
+            ));
+        };
+        let function = self.resolve_function(&frame.function_ref);
         let declaring_scopes = self
             .declaring_scopes
             .named_expression_scopes(&frame.function_ref)
@@ -98,12 +119,16 @@ impl Evaluator {
                 EvaluatorError::InternalError("missing named expression scopes".into())
             })?;
 
-        let current_scope = self.current_scope_range()?;
+        let current_scope = self.scope_range(context);
 
         let mut emitted = HashSet::new();
-        for frame_idx in function_index..self.stack.len() {
+        for frame_idx in function_index..=context.block_index {
             let frame = &self.stack[frame_idx];
-            let limit = frame.current_statement_index();
+            let limit = if frame_idx == context.block_index {
+                context.statement_index
+            } else {
+                frame.current_statement_index()
+            };
             for (i, (stmt, _)) in frame.statements().span_iter().enumerate() {
                 if i > limit {
                     break;
@@ -132,7 +157,8 @@ impl Evaluator {
                 declaring_scope.start <= current_scope.start
                     && current_scope.end <= declaring_scope.end
             })
-            .map(|(handle, name)| (name.clone(), self.evaluate_expression(*handle)))
+            .filter(|(handle, _)| frame.evaluated_expressions.contains_key(handle))
+            .map(|(handle, name)| (name.clone(), self.eval_value(*handle, function_index)))
             .collect())
     }
 }

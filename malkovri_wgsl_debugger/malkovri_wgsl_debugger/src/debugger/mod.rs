@@ -128,6 +128,10 @@ pub enum StepResult {
     Finished,
 }
 
+/// Identifies a call frame. Valid only until execution resumes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DebugFrameId(pub(crate) usize);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ParkReason {
     Barrier(Barrier),
@@ -182,6 +186,7 @@ pub struct SourceLocation {
 /// Information about a single call stack frame.
 #[derive(Debug, Clone)]
 pub struct StackFrameInfo {
+    pub id: DebugFrameId,
     pub name: Option<String>,
     pub location: Option<SourceLocation>,
 }
@@ -321,6 +326,13 @@ impl Debugger {
         self.evaluators
             .get_mut(&self.focused_thread)
             .expect("focused thread must have an evaluator")
+    }
+
+    fn evaluator_for_thread(&self, thread_id: DebugThreadId) -> Result<&Evaluator, EvaluatorError> {
+        let gid = self.thread_ids.get(&thread_id).ok_or_else(|| {
+            EvaluatorError::InternalError(format!("unknown thread id {thread_id}"))
+        })?;
+        Ok(&self.evaluators[gid])
     }
 
     pub fn threads(&self) -> Vec<DebugThread> {

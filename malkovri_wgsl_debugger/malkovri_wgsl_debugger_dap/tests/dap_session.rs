@@ -109,11 +109,16 @@ fn variables_map(variables_body: &Value) -> HashMap<String, String> {
 }
 
 fn globals_for_thread(session: &mut Session, thread_id: DebugThreadId) -> HashMap<String, String> {
-    let variables = session.send(
-        "variables",
-        json!({ "variablesReference": (thread_id as u32) * 10 + 3 }),
-    );
-    variables_map(response_body(&variables, session.last_seq()))
+    // Assert final execution state directly; DAP variable references expire on resume.
+    session
+        .adapter
+        .debugger()
+        .unwrap()
+        .thread_global_variables(thread_id)
+        .unwrap()
+        .into_iter()
+        .map(|variable| (variable.name.unwrap(), format!("{:?}", variable.value)))
+        .collect()
 }
 
 fn launch_and_configure(session: &mut Session, shader: &str, breakpoints: &[u32]) -> Vec<Value> {
@@ -203,8 +208,7 @@ fn control_flow_session_matches_vscode_request_flow() {
         "[5, 0, 0]"
     );
 
-    // After skip_emits at entry, the first visible line is the for loop (line 9),
-    // past the let/var declarations which are Emit/init-only.
+    // Entry is before the first declaration executes.
     let stack = s.send("stackTrace", json!({ "threadId": 1 }));
     let frames = &response_body(&stack, s.last_seq())["stackFrames"];
     assert_eq!(frames[0]["source"]["path"], json!(shader));
@@ -233,10 +237,10 @@ fn control_flow_session_matches_vscode_request_flow() {
     let args = variables_map(response_body(&args, s.last_seq()));
     assert_eq!(args["global_id"], "Primitive(U32x3([5, 0, 0]))");
 
-    // At entry, named expression `idx` is visible (its Emit was skipped through).
+    // Inspection must not evaluate a let binding before its Emit executes.
     let locals = s.send("variables", json!({ "variablesReference": locals_ref }));
     let locals = variables_map(response_body(&locals, s.last_seq()));
-    assert_eq!(locals["idx"], "Primitive(U32(5))");
+    assert!(!locals.contains_key("idx"));
 
     let next = s.send("next", json!({ "threadId": 1 }));
     assert!(find_response(&next, s.last_seq()).is_some());
@@ -244,6 +248,14 @@ fn control_flow_session_matches_vscode_request_flow() {
 
     let stack2 = s.send("stackTrace", json!({ "threadId": 1 }));
     assert!(response_body(&stack2, s.last_seq())["stackFrames"][0]["line"].is_number());
+    let frame_id = top_frame_id(&mut s, 1);
+    let scopes = s.send("scopes", json!({ "frameId": frame_id }));
+    let locals_ref = scope_reference(response_body(&scopes, s.last_seq()), "Locals");
+    let locals = s.send("variables", json!({ "variablesReference": locals_ref }));
+    assert_eq!(
+        variables_map(response_body(&locals, s.last_seq()))["idx"],
+        "Primitive(U32(5))"
+    );
 }
 
 #[test]
@@ -493,7 +505,6 @@ fn pointer_arguments_write_through_places_and_zero_nested_values() {
     let scopes = s.send("scopes", json!({ "frameId": frame_id }));
     let scopes_body = response_body(&scopes, s.last_seq());
     let locals_ref = scope_reference(scopes_body, "Locals");
-    let globals_ref = scope_reference(scopes_body, "Globals");
 
     let locals = s.send("variables", json!({ "variablesReference": locals_ref }));
     let locals = variables_map(response_body(&locals, s.last_seq()));
@@ -507,8 +518,7 @@ fn pointer_arguments_write_through_places_and_zero_nested_values() {
     let cont = s.send("continue", json!({ "threadId": 1 }));
     assert_eq!(event_body(&cont, "terminated"), &json!({}));
 
-    let globals = s.send("variables", json!({ "variablesReference": globals_ref }));
-    let globals = variables_map(response_body(&globals, s.last_seq()));
+    let globals = globals_for_thread(&mut s, 1);
     assert_eq!(globals["sink"], "Primitive(U32(21))");
 }
 

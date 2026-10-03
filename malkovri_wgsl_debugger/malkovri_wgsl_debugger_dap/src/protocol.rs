@@ -5,17 +5,10 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 
 use serde::Serialize;
 
-use malkovri_wgsl_debugger::DebugThreadId;
-
 use crate::{debug_adapter::DebugAdapter, error::DebugAdapterError};
 
 pub(crate) type BreakpointId = u64;
 pub type StackFrameId = u64;
-pub(crate) type ScopeReference = u32;
-
-pub(crate) const LOCALS_SCOPE_REF: ScopeReference = 1;
-pub(crate) const ARGUMENTS_SCOPE_REF: ScopeReference = 2;
-pub(crate) const GLOBALS_SCOPE_REF: ScopeReference = 3;
 
 #[derive(Clone, Debug)]
 pub enum OutgoingMessage {
@@ -86,14 +79,6 @@ impl OutgoingMessage {
             }),
         }
     }
-}
-
-pub(crate) fn make_scope_ref(thread_id: DebugThreadId, scope: ScopeReference) -> ScopeReference {
-    (thread_id as u32) * 10 + scope
-}
-
-pub(crate) fn parse_scope_ref(reference: ScopeReference) -> (DebugThreadId, ScopeReference) {
-    ((reference / 10) as DebugThreadId, reference % 10)
 }
 
 pub(crate) fn make_variable(name: Option<String>, value: &str) -> dapts::Variable {

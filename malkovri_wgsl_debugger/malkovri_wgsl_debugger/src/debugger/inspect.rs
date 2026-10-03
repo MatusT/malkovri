@@ -1,8 +1,15 @@
 use naga::Statement;
 
-use crate::{function_state::StackFrame, value::Value};
+use crate::{
+    error::EvaluatorError,
+    evaluator::Evaluator,
+    function_state::{FrameContext, StackFrame},
+    value::Value,
+};
 
-use super::{DebugThreadId, Debugger, SourceLocation, StackFrameInfo, ThreadStatus, Variable};
+use super::{
+    DebugFrameId, DebugThreadId, Debugger, SourceLocation, StackFrameInfo, ThreadStatus, Variable,
+};
 
 impl Debugger {
     pub fn current_location(&self) -> Option<SourceLocation> {
@@ -31,23 +38,41 @@ impl Debugger {
         }
 
         let evaluator = self.evaluators.get(&gid)?;
-        let function_name = evaluator.current_function().ok()?.name.clone();
-        let (block, idx) = evaluator.current_active_block().ok()?;
-        let (current_statement, span) = block.span_iter().nth(idx)?;
+        let context = evaluator
+            .frame_context(evaluator.current_function_frame_index().ok()?)
+            .ok()?;
+        self.frame_location(evaluator, context)
+    }
 
-        let (line, column) = if matches!(current_statement, Statement::Return { .. }) {
-            // For return statements, point to the line after the closing brace
-            // of the function body rather than the span of the return itself.
-            let func = evaluator.current_function().ok()?;
-            let total_span = naga::Span::total_span(func.body.span_iter().map(|(_, s)| *s));
-            let total_range = total_span.to_range()?;
-            let prefix = &self.source[..total_range.end];
-            let line_number = prefix.matches('\n').count() as u32 + 2;
-            (line_number, 0)
-        } else {
-            let loc = span.location(&self.source);
-            (loc.line_number, loc.line_position)
+    fn frame_location(
+        &self,
+        evaluator: &Evaluator,
+        context: FrameContext,
+    ) -> Option<SourceLocation> {
+        let StackFrame::Function(frame) = &evaluator.stack[context.function_index] else {
+            return None;
         };
+        let function = evaluator.resolve_function(&frame.function_ref);
+        let function_name = function.name.clone();
+        let (current_statement, span) = evaluator.stack[context.block_index]
+            .statements()
+            .span_iter()
+            .nth(context.statement_index)?;
+
+        let (line, column) =
+            if matches!(current_statement, Statement::Return { .. }) && span.to_range().is_none() {
+                // For return statements, point to the line after the closing brace
+                // of the function body rather than the span of the return itself.
+                let func = function;
+                let total_span = naga::Span::total_span(func.body.span_iter().map(|(_, s)| *s));
+                let total_range = total_span.to_range()?;
+                let prefix = &self.source[..total_range.end];
+                let line_number = prefix.matches('\n').count() as u32 + 2;
+                (line_number, 0)
+            } else {
+                let loc = span.location(&self.source);
+                (loc.line_number, loc.line_position)
+            };
 
         Some(SourceLocation {
             line,
@@ -58,76 +83,110 @@ impl Debugger {
 
     /// Active call stack frames, from innermost (current) to outermost (entry point).
     pub fn call_stack(&self) -> Vec<StackFrameInfo> {
-        let mut frames = Vec::new();
-        let mut is_innermost = true;
+        self.thread_call_stack(self.focused_thread_id())
+            .unwrap_or_default()
+    }
 
-        let evaluator = self.evaluator();
-        for stack_frame in evaluator.stack.iter().rev() {
-            if let StackFrame::Function(func_frame) = stack_frame {
-                let func = evaluator.resolve_function(&func_frame.function_ref);
-                let location = if is_innermost {
-                    self.current_location()
-                } else {
-                    None
+    /// Inspect an invocation without changing the focused thread.
+    pub fn thread_call_stack(
+        &self,
+        thread_id: DebugThreadId,
+    ) -> Result<Vec<StackFrameInfo>, EvaluatorError> {
+        let evaluator = self.evaluator_for_thread(thread_id)?;
+        evaluator
+            .stack
+            .iter()
+            .enumerate()
+            .rev()
+            .filter_map(|(index, stack_frame)| {
+                let StackFrame::Function(frame) = stack_frame else {
+                    return None;
                 };
-                frames.push(StackFrameInfo {
-                    name: func.name.clone(),
-                    location,
-                });
-                is_innermost = false;
-            }
-        }
-
-        frames
+                Some(
+                    evaluator
+                        .frame_context(index)
+                        .map(|context| StackFrameInfo {
+                            id: DebugFrameId(index),
+                            name: evaluator.resolve_function(&frame.function_ref).name.clone(),
+                            location: self.frame_location(evaluator, context),
+                        }),
+                )
+            })
+            .collect()
     }
 
     /// All local variables and `let` bindings visible at the current execution point.
     pub fn local_variables(&self) -> Vec<Variable> {
-        let mut vars = Vec::new();
+        let Ok(index) = self.evaluator().current_function_frame_index() else {
+            return Vec::new();
+        };
+        self.frame_local_variables(self.focused_thread_id(), DebugFrameId(index))
+            .unwrap_or_default()
+    }
 
-        if let (Ok(in_scope), Ok(func), Ok(frame), Ok(func_idx)) = (
-            self.evaluator().local_variables_in_current_scope(),
-            self.evaluator().current_function(),
-            self.evaluator().current_function_frame(),
-            self.evaluator().current_function_frame_index(),
-        ) {
-            for (handle, local) in func.local_variables.iter() {
-                if in_scope.contains(&handle) {
-                    let value = frame
-                        .local_variables
-                        .get(&handle)
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            self.evaluator().evaluate_local_variable(handle, func_idx)
-                        });
-                    vars.push(Variable {
-                        name: local.name.clone(),
-                        value,
-                    });
-                }
-            }
-        }
-
-        if let Ok(named) = self.evaluator().named_expression_values() {
-            for (name, value) in named {
-                vars.push(Variable {
-                    name: Some(name),
-                    value,
-                });
-            }
-        }
-
-        vars
+    pub fn frame_local_variables(
+        &self,
+        thread_id: DebugThreadId,
+        frame_id: DebugFrameId,
+    ) -> Result<Vec<Variable>, EvaluatorError> {
+        let evaluator = self.evaluator_for_thread(thread_id)?;
+        let context = evaluator.frame_context(frame_id.0)?;
+        let StackFrame::Function(frame) = &evaluator.stack[context.function_index] else {
+            unreachable!()
+        };
+        let function = evaluator.resolve_function(&frame.function_ref);
+        let in_scope = evaluator.local_variables_in_scope(context)?;
+        let mut variables: Vec<_> = function
+            .local_variables
+            .iter()
+            .filter(|(handle, _)| in_scope.contains(handle))
+            .map(|(handle, local)| Variable {
+                name: local.name.clone(),
+                value: evaluator.evaluate_local_variable(handle, context.function_index),
+            })
+            .collect();
+        variables.extend(evaluator.named_expression_values(context)?.into_iter().map(
+            |(name, value)| Variable {
+                name: Some(name),
+                value,
+            },
+        ));
+        Ok(variables)
     }
 
     /// Current function arguments with their names and values.
     pub fn argument_variables(&self) -> Vec<Variable> {
-        self.evaluator()
-            .current_function_argument_values()
+        let Ok(index) = self.evaluator().current_function_frame_index() else {
+            return Vec::new();
+        };
+        self.frame_argument_variables(self.focused_thread_id(), DebugFrameId(index))
             .unwrap_or_default()
+    }
+
+    pub fn frame_argument_variables(
+        &self,
+        thread_id: DebugThreadId,
+        frame_id: DebugFrameId,
+    ) -> Result<Vec<Variable>, EvaluatorError> {
+        let evaluator = self.evaluator_for_thread(thread_id)?;
+        let context = evaluator.frame_context(frame_id.0)?;
+        Ok(evaluator
+            .function_argument_values(context)?
             .into_iter()
             .map(|(name, value)| Variable { name, value })
-            .collect()
+            .collect())
+    }
+
+    pub fn thread_global_variables(
+        &self,
+        thread_id: DebugThreadId,
+    ) -> Result<Vec<Variable>, EvaluatorError> {
+        Ok(self
+            .evaluator_for_thread(thread_id)?
+            .global_variable_values()
+            .into_iter()
+            .map(|(name, value)| Variable { name, value })
+            .collect())
     }
 
     /// All global variables with their names and values.

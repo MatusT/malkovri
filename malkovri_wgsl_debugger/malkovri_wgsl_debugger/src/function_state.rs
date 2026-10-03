@@ -112,6 +112,14 @@ pub(crate) enum StackFrame {
     Block(BlockFrame),
 }
 
+/// Inspection position for a function, including a caller suspended at a call.
+#[derive(Clone, Copy)]
+pub(crate) struct FrameContext {
+    pub function_index: usize,
+    pub block_index: usize,
+    pub statement_index: usize,
+}
+
 impl StackFrame {
     /// The currently active statements for this frame.
     pub(crate) fn statements(&self) -> &naga::Block {

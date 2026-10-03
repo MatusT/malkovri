@@ -16,7 +16,7 @@ use crate::{
         ComputeThreadInputs, FragmentThreadInputs, GlobalConstants, VertexThreadInputs,
     },
     error::EvaluatorError,
-    function_state::{ControlFlow, FunctionFrame, FunctionRef, StackFrame},
+    function_state::{ControlFlow, FrameContext, FunctionFrame, FunctionRef, StackFrame},
     thread::EvaluatorThread,
     value::Value,
 };
@@ -235,23 +235,44 @@ impl Evaluator {
         Ok(self.stack.len() - 1)
     }
 
-    fn current_scope_range(&self) -> Result<std::ops::Range<usize>, EvaluatorError> {
-        let current_frame = self.current_frame()?;
-        Ok(naga::Span::total_span(
-            current_frame
+    pub(crate) fn frame_context(
+        &self,
+        function_index: usize,
+    ) -> Result<FrameContext, EvaluatorError> {
+        if !matches!(
+            self.stack.get(function_index),
+            Some(StackFrame::Function(_))
+        ) {
+            return Err(EvaluatorError::InternalError(
+                "unknown function frame".into(),
+            ));
+        }
+        let callee_index = self
+            .stack
+            .iter()
+            .enumerate()
+            .skip(function_index + 1)
+            .find_map(|(index, frame)| matches!(frame, StackFrame::Function(_)).then_some(index));
+        let block_index = callee_index.unwrap_or(self.stack.len()) - 1;
+        // The caller's program counter points past the suspended call.
+        let statement_index = self.stack[block_index]
+            .current_statement_index()
+            .saturating_sub(usize::from(callee_index.is_some()));
+        Ok(FrameContext {
+            function_index,
+            block_index,
+            statement_index,
+        })
+    }
+
+    fn scope_range(&self, context: FrameContext) -> std::ops::Range<usize> {
+        naga::Span::total_span(
+            self.stack[context.block_index]
                 .statements()
                 .span_iter()
                 .map(|(_, span)| *span),
         )
         .to_range()
-        .unwrap_or(0..usize::MAX))
-    }
-
-    /// Return the statements and current index of the top-of-stack frame.
-    /// Unlike `current_function_frame`, this reflects the innermost active block,
-    /// which may be a nested `if`/`loop`/`switch` block rather than the function body.
-    pub(crate) fn current_active_block(&self) -> Result<(&naga::Block, usize), EvaluatorError> {
-        let top = self.current_frame()?;
-        Ok((top.statements(), top.current_statement_index()))
+        .unwrap_or(0..usize::MAX)
     }
 }

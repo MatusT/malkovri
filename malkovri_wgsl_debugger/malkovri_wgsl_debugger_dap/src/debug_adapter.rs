@@ -1,7 +1,4 @@
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::fs;
@@ -10,24 +7,16 @@ use dapts::Breakpoint;
 
 use crate::error::DebugAdapterError;
 use crate::parse_input;
-use crate::protocol::{
-    ARGUMENTS_SCOPE_REF, BreakpointId, GLOBALS_SCOPE_REF, LOCALS_SCOPE_REF, OutgoingMessage,
-    StackFrameId, make_scope_ref, make_variable, parse_scope_ref,
-};
+use crate::protocol::{BreakpointId, OutgoingMessage, StackFrameId, make_variable};
+use crate::references::{FrameReference, References, ScopeKind};
 use malkovri_wgsl_debugger::{DebugThreadId, Debugger, StepResult};
 
 // Defensive UI budget, not shader semantics: if catch-up cannot settle, stop anyway.
 const BREAKPOINT_CATCH_UP_STEP_BUDGET: usize = 100_000;
 
-#[derive(Clone, Copy, Debug)]
-struct FrameReference {
-    thread_id: DebugThreadId,
-}
-
 pub struct DebugAdapter {
     sequence_number: i64,
-    next_frame_id: StackFrameId,
-    frame_references: HashMap<StackFrameId, FrameReference>,
+    references: References,
     breakpoints: Vec<Breakpoint>,
     program_name: Option<String>,
     program_path: Option<PathBuf>,
@@ -49,8 +38,7 @@ impl DebugAdapter {
     pub fn new() -> Self {
         DebugAdapter {
             sequence_number: 1,
-            next_frame_id: 1,
-            frame_references: HashMap::new(),
+            references: References::default(),
             breakpoints: Vec::new(),
             debugger: None,
             program_name: None,
@@ -109,7 +97,8 @@ impl DebugAdapter {
         }
     }
 
-    fn debugger(&self) -> Result<&Debugger, DebugAdapterError> {
+    /// Read the current execution state, including final globals after termination.
+    pub fn debugger(&self) -> Result<&Debugger, DebugAdapterError> {
         self.debugger
             .as_ref()
             .ok_or_else(|| DebugAdapterError::InvalidProgram("debugger not initialized".into()))
@@ -119,25 +108,6 @@ impl DebugAdapter {
         self.debugger
             .as_mut()
             .ok_or_else(|| DebugAdapterError::InvalidProgram("debugger not initialized".into()))
-    }
-
-    fn register_frame_reference(&mut self, thread_id: DebugThreadId) -> StackFrameId {
-        let frame_id = self.next_frame_id;
-        self.next_frame_id += 1;
-        self.frame_references
-            .insert(frame_id, FrameReference { thread_id });
-        frame_id
-    }
-
-    fn frame_reference(&self, frame_id: StackFrameId) -> Result<FrameReference, DebugAdapterError> {
-        self.frame_references
-            .get(&frame_id)
-            .copied()
-            .ok_or_else(|| {
-                DebugAdapterError::InvalidProgram(format!(
-                    "unknown stack frame id {frame_id}; request stackTrace before scopes"
-                ))
-            })
     }
 
     fn handle_initialize(&mut self, seq: i64) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
@@ -229,8 +199,7 @@ impl DebugAdapter {
             global_constants,
             bindings,
         )?);
-        self.frame_references.clear();
-        self.next_frame_id = 1;
+        self.references.clear();
 
         let mut messages = Vec::new();
         if !self.configuration_done {
@@ -250,11 +219,7 @@ impl DebugAdapter {
         let arguments =
             serde_json::from_value::<dapts::StackTraceArguments>(req.arguments.clone())?;
         let thread_id: DebugThreadId = arguments.thread_id;
-        let frames = {
-            let debugger = self.debugger_mut()?;
-            debugger.focus_thread(thread_id)?;
-            debugger.call_stack()
-        };
+        let frames = self.debugger()?.thread_call_stack(thread_id)?;
         let path = self
             .program_path
             .as_ref()
@@ -264,12 +229,11 @@ impl DebugAdapter {
 
         let mut stack_frames = Vec::new();
         for frame in &frames {
-            let frame_id = self.register_frame_reference(thread_id);
-            let location = frame.location.as_ref().or_else(|| {
-                frames
-                    .first()
-                    .and_then(|innermost| innermost.location.as_ref())
+            let frame_id = self.references.insert_frame(FrameReference {
+                thread_id,
+                frame_id: frame.id,
             });
+            let location = frame.location.as_ref();
             let line = location.map(|loc| loc.line).unwrap_or(1);
             let column = location.map(|loc| loc.column).unwrap_or(0);
             stack_frames.push(dapts::StackFrame {
@@ -312,18 +276,22 @@ impl DebugAdapter {
     ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         let arguments = serde_json::from_value::<dapts::ScopesArguments>(req.arguments.clone())?;
         let frame_id: StackFrameId = arguments.frame_id;
-        let frame_reference = self.frame_reference(frame_id)?;
+        let frame_reference = self.references.frame(frame_id)?;
         let thread_id = frame_reference.thread_id;
-        let debugger = self.debugger_mut()?;
-        debugger.focus_thread(thread_id)?;
-
-        let local_count = debugger.local_variables().len();
-        let argument_count = debugger.argument_variables().len();
-        let globals = debugger.global_variables();
+        let debugger = self.debugger()?;
+        let local_count = debugger
+            .frame_local_variables(thread_id, frame_reference.frame_id)?
+            .len();
+        let argument_count = debugger
+            .frame_argument_variables(thread_id, frame_reference.frame_id)?
+            .len();
+        let globals = debugger.thread_global_variables(thread_id)?;
 
         let mut scopes = vec![dapts::Scope {
             name: "Locals".to_string(),
-            variables_reference: make_scope_ref(thread_id, LOCALS_SCOPE_REF),
+            variables_reference: self
+                .references
+                .insert_scope(frame_reference, ScopeKind::Locals),
             named_variables: Some(local_count as u32),
             indexed_variables: None,
             expensive: false,
@@ -338,7 +306,9 @@ impl DebugAdapter {
         if argument_count > 0 {
             scopes.push(dapts::Scope {
                 name: "Function Arguments".to_string(),
-                variables_reference: make_scope_ref(thread_id, ARGUMENTS_SCOPE_REF),
+                variables_reference: self
+                    .references
+                    .insert_scope(frame_reference, ScopeKind::Arguments),
                 named_variables: Some(argument_count as u32),
                 indexed_variables: None,
                 expensive: false,
@@ -354,7 +324,9 @@ impl DebugAdapter {
         if !globals.is_empty() {
             scopes.push(dapts::Scope {
                 name: "Globals".to_string(),
-                variables_reference: make_scope_ref(thread_id, GLOBALS_SCOPE_REF),
+                variables_reference: self
+                    .references
+                    .insert_scope(frame_reference, ScopeKind::Globals),
                 named_variables: Some(globals.len() as u32),
                 indexed_variables: None,
                 expensive: false,
@@ -526,8 +498,9 @@ impl DebugAdapter {
         let single_thread =
             self.single_thread_execution || arguments.single_thread.unwrap_or(false);
         let thread_id: DebugThreadId = arguments.thread_id;
+        self.debugger_mut()?.focus_thread(thread_id)?;
+        self.references.clear();
         let debugger = self.debugger_mut()?;
-        debugger.focus_thread(thread_id)?;
         let has_more = if single_thread {
             matches!(debugger.step_thread(thread_id)?, StepResult::Continue)
         } else {
@@ -553,6 +526,8 @@ impl DebugAdapter {
             self.single_thread_execution || arguments.single_thread.unwrap_or(false);
         let response = self.make_response(req.seq, &req.command, &serde_json::json!({}))?;
         let thread_id: DebugThreadId = arguments.thread_id;
+        self.debugger_mut()?.focus_thread(thread_id)?;
+        self.references.clear();
         let mut trace = Vec::new();
         let event = self.run_to_breakpoint(thread_id, single_thread, &mut trace)?;
 
@@ -564,7 +539,7 @@ impl DebugAdapter {
 
     fn handle_disconnect(&mut self, seq: i64) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         self.debugger = None;
-        self.frame_references.clear();
+        self.references.clear();
         Ok(vec![self.make_response(
             seq,
             "disconnect",
@@ -574,7 +549,7 @@ impl DebugAdapter {
 
     fn handle_terminate(&mut self, seq: i64) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         self.debugger = None;
-        self.frame_references.clear();
+        self.references.clear();
         Ok(vec![
             self.make_response(seq, "terminate", &serde_json::json!({}))?,
             self.make_event("terminated", &serde_json::json!({}))?,
@@ -586,28 +561,18 @@ impl DebugAdapter {
         req: &dapts::Request,
     ) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         let argument = serde_json::from_value::<dapts::VariablesArguments>(req.arguments.clone())?;
-        let (thread_id, scope_ref) = parse_scope_ref(argument.variables_reference);
-        let debugger = self.debugger_mut()?;
-        debugger.focus_thread(thread_id)?;
-
-        let variables = match scope_ref {
-            LOCALS_SCOPE_REF => debugger
-                .local_variables()
-                .into_iter()
-                .map(|var| make_variable(var.name, &format!("{:?}", var.value)))
-                .collect(),
-            ARGUMENTS_SCOPE_REF => debugger
-                .argument_variables()
-                .into_iter()
-                .map(|var| make_variable(var.name, &format!("{:?}", var.value)))
-                .collect(),
-            GLOBALS_SCOPE_REF => debugger
-                .global_variables()
-                .into_iter()
-                .map(|var| make_variable(var.name, &format!("{:?}", var.value)))
-                .collect(),
-            _ => vec![],
-        };
+        let (frame, kind) = self.references.scope(argument.variables_reference)?;
+        let debugger = self.debugger()?;
+        let variables = match kind {
+            ScopeKind::Locals => debugger.frame_local_variables(frame.thread_id, frame.frame_id)?,
+            ScopeKind::Arguments => {
+                debugger.frame_argument_variables(frame.thread_id, frame.frame_id)?
+            }
+            ScopeKind::Globals => debugger.thread_global_variables(frame.thread_id)?,
+        }
+        .into_iter()
+        .map(|variable| make_variable(variable.name, &format!("{:?}", variable.value)))
+        .collect();
 
         Ok(vec![self.make_response(
             req.seq,
