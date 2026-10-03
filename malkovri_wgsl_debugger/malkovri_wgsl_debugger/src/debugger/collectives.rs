@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use naga::{CollectiveOperation, Expression, GatherMode, Handle, Statement, SubgroupOperation};
 
 use crate::{
-    error::EvaluatorError, evaluator::InvocationState, primitive::Primitive, value::Value,
+    error::EvaluatorError, invocation::InvocationState, primitive::Primitive, value::Value,
 };
 
 use super::{Debugger, InvocationId, ThreadStatus};
@@ -18,8 +18,8 @@ impl Debugger {
         let mut loaded_value = None;
 
         for gid in &members {
-            let evaluator = self.group.get_mut(*gid).state_mut();
-            let Some(next) = evaluator.current_statement()? else {
+            let invocation = self.group.get_mut(*gid).state_mut();
+            let Some(next) = invocation.current_statement()? else {
                 return Err(EvaluatorError::SynchronizationError(format!(
                     "thread {} finished while parked at workGroupUniformLoad",
                     gid.thread_id()
@@ -44,7 +44,7 @@ impl Debugger {
                 )));
             }
 
-            let place = evaluator.resolve_pointer_place(pointer)?;
+            let place = invocation.resolve_pointer_place(pointer)?;
             if let Some(expected) = &agreed_place {
                 if expected != &place {
                     return Err(EvaluatorError::SynchronizationError(format!(
@@ -53,7 +53,7 @@ impl Debugger {
                     )));
                 }
             } else {
-                loaded_value = Some(evaluator.read_place(&place));
+                loaded_value = Some(invocation.read_place(&place));
                 agreed_place = Some(place);
             }
         }
@@ -71,8 +71,8 @@ impl Debugger {
         for gid in &members {
             let lane = self.subgroup_lane(*gid);
             let predicate = {
-                let evaluator = self.group.get_mut(*gid).state_mut();
-                let Some(next) = evaluator.current_statement()? else {
+                let invocation = self.group.get_mut(*gid).state_mut();
+                let Some(next) = invocation.current_statement()? else {
                     return Err(EvaluatorError::SynchronizationError(format!(
                         "thread {} finished while parked at subgroupBallot",
                         gid.thread_id()
@@ -97,7 +97,7 @@ impl Debugger {
                     )));
                 }
                 predicate
-                    .map(|expr| evaluator.evaluate_expression(expr).is_truthy())
+                    .map(|expr| invocation.evaluate_expression(expr).is_truthy())
                     .unwrap_or(true)
             };
             if predicate {
@@ -123,8 +123,8 @@ impl Debugger {
 
         let mut lane_values = Vec::new();
         for gid in &members {
-            let evaluator = self.group.get_mut(*gid).state_mut();
-            let Some(next) = evaluator.current_statement()? else {
+            let invocation = self.group.get_mut(*gid).state_mut();
+            let Some(next) = invocation.current_statement()? else {
                 return Err(EvaluatorError::SynchronizationError(format!(
                     "thread {} finished while parked at subgroup collective",
                     gid.thread_id()
@@ -150,7 +150,7 @@ impl Debugger {
                     gid.thread_id()
                 )));
             }
-            lane_values.push((*gid, evaluator.evaluate_expression(argument)));
+            lane_values.push((*gid, invocation.evaluate_expression(argument)));
         }
 
         let results = match collective_op {
@@ -187,8 +187,8 @@ impl Debugger {
         let mut target_lanes = HashMap::new();
         for gid in &members {
             let lane = self.subgroup_lane(*gid);
-            let evaluator = self.group.get_mut(*gid).state_mut();
-            let Some(next) = evaluator.current_statement()? else {
+            let invocation = self.group.get_mut(*gid).state_mut();
+            let Some(next) = invocation.current_statement()? else {
                 return Err(EvaluatorError::SynchronizationError(format!(
                     "thread {} finished while parked at subgroup gather",
                     gid.thread_id()
@@ -213,8 +213,8 @@ impl Debugger {
                     gid.thread_id()
                 )));
             }
-            lane_values.insert(lane, evaluator.evaluate_expression(argument));
-            target_lanes.insert(lane, Self::gather_target_lane(evaluator, lane, mode));
+            lane_values.insert(lane, invocation.evaluate_expression(argument));
+            target_lanes.insert(lane, Self::gather_target_lane(invocation, lane, mode));
         }
 
         let first_lane = lane_values.keys().min().copied().unwrap_or(0);
@@ -257,9 +257,9 @@ impl Debugger {
     ) -> Result<(), EvaluatorError> {
         for (gid, value) in results {
             let next = {
-                let evaluator = self.group.get_mut(gid).state_mut();
-                evaluator.set_current_expression_value(result, value)?;
-                evaluator.consume_current_statement_and_skip_emits()?
+                let invocation = self.group.get_mut(gid).state_mut();
+                invocation.set_current_expression_value(result, value)?;
+                invocation.consume_current_statement_and_skip_emits()?
             };
             self.group.get_mut(gid).set_status(if next.is_some() {
                 ThreadStatus::Running
@@ -270,21 +270,23 @@ impl Debugger {
         Ok(())
     }
 
-    fn gather_target_lane(evaluator: &InvocationState, lane: u32, mode: GatherMode) -> u32 {
+    fn gather_target_lane(invocation: &InvocationState, lane: u32, mode: GatherMode) -> u32 {
         match mode {
             GatherMode::BroadcastFirst => lane,
             GatherMode::Broadcast(expr) | GatherMode::Shuffle(expr) => {
-                Self::evaluate_u32(evaluator, expr).unwrap_or(lane)
+                Self::evaluate_u32(invocation, expr).unwrap_or(lane)
             }
             GatherMode::ShuffleDown(expr) => {
-                lane.saturating_add(Self::evaluate_u32(evaluator, expr).unwrap_or(0))
+                lane.saturating_add(Self::evaluate_u32(invocation, expr).unwrap_or(0))
             }
             GatherMode::ShuffleUp(expr) => {
-                lane.saturating_sub(Self::evaluate_u32(evaluator, expr).unwrap_or(0))
+                lane.saturating_sub(Self::evaluate_u32(invocation, expr).unwrap_or(0))
             }
-            GatherMode::ShuffleXor(expr) => lane ^ Self::evaluate_u32(evaluator, expr).unwrap_or(0),
+            GatherMode::ShuffleXor(expr) => {
+                lane ^ Self::evaluate_u32(invocation, expr).unwrap_or(0)
+            }
             GatherMode::QuadBroadcast(expr) => {
-                let index = Self::evaluate_u32(evaluator, expr).unwrap_or(0) % 4;
+                let index = Self::evaluate_u32(invocation, expr).unwrap_or(0) % 4;
                 (lane / 4) * 4 + index
             }
             GatherMode::QuadSwap(direction) => {
@@ -297,8 +299,8 @@ impl Debugger {
         }
     }
 
-    fn evaluate_u32(evaluator: &InvocationState, expr: Handle<Expression>) -> Option<u32> {
-        match evaluator.evaluate_expression(expr) {
+    fn evaluate_u32(invocation: &InvocationState, expr: Handle<Expression>) -> Option<u32> {
+        match invocation.evaluate_expression(expr) {
             Value::Primitive(Primitive::U32(value)) => Some(value),
             Value::Primitive(Primitive::I32(value)) if value >= 0 => Some(value as u32),
             _ => None,

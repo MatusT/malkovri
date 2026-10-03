@@ -1,13 +1,18 @@
+mod parse;
+mod scopes;
+
+pub use parse::WgslToModuleError;
+use parse::wgsl_to_module;
+use scopes::ModuleScopes;
+
 use std::{collections::HashMap, sync::Arc};
 
 use naga::{Expression, Function, Handle, Module, ResourceBinding, Span, Statement, SwitchValue};
 
 use crate::{
     debugger::{Debugger, DebuggerError, WorkgroupConfig},
-    declaring_scopes::ModuleScopes,
-    entry_point_inputs::GlobalConstants,
+    invocation::inputs::GlobalConstants,
     value::Value,
-    wgsl::{WgslToModuleError, wgsl_to_module},
 };
 
 /// Parsed shader code and derived metadata, shared by all invocations and sessions.

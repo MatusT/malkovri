@@ -1,6 +1,6 @@
 use crate::{
-    function_state::StackFrame,
-    place::{ArgumentValue, EvaluatedExpression, Place, PlaceRoot},
+    invocation::frame::StackFrame,
+    invocation::place::{ArgumentValue, EvaluatedExpression, Place, PlaceRoot},
     primitive::Primitive,
     value::Value,
 };
@@ -42,7 +42,7 @@ impl InvocationState {
         }
     }
 
-    /// Internal expression evaluator that takes a pre-computed function frame index.
+    /// Internal expression invocation that takes a pre-computed function frame index.
     /// All recursive calls use this to avoid redundant stack scans.
     pub(crate) fn eval_expr(
         &self,

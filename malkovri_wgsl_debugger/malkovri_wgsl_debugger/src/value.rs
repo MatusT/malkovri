@@ -1,7 +1,7 @@
 use naga::{ArraySize, Module, Scalar, ScalarKind, TypeInner, VectorSize};
 use std::ops::{Add, BitAnd, BitOr, BitXor, Div, Mul, Rem, Shl, Shr, Sub};
 
-use crate::place::PlaceSegment;
+use crate::invocation::place::PlaceSegment;
 use crate::primitive::Primitive;
 
 #[derive(Clone, Debug, Default)]
@@ -173,7 +173,7 @@ fn zero_scalar(scalar: Scalar) -> Option<Primitive> {
     }
 }
 
-// ── Delegation to Primitive — keeps the evaluator's helper call-sites unchanged ─
+// ── Delegation to Primitive — keeps the invocation's helper call-sites unchanged ─
 
 impl Value {
     pub fn component_count(&self) -> usize {

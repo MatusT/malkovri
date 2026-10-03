@@ -159,8 +159,8 @@ impl Debugger {
     fn release_barrier(&mut self, members: Vec<InvocationId>) -> Result<(), EvaluatorError> {
         for gid in members {
             let next = {
-                let evaluator = self.group.get_mut(gid).state_mut();
-                evaluator.consume_current_statement_and_skip_emits()?
+                let invocation = self.group.get_mut(gid).state_mut();
+                invocation.consume_current_statement_and_skip_emits()?
             };
             self.group.get_mut(gid).set_status(if next.is_some() {
                 ThreadStatus::Running

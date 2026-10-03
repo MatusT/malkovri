@@ -1,9 +1,10 @@
-use crate::program::FunctionId;
-use std::sync::Arc;
 mod binary;
 mod cast;
 mod expression;
+pub(crate) mod frame;
+pub(crate) mod inputs;
 mod math;
+pub(crate) mod place;
 mod scopes;
 mod statement;
 mod step;
@@ -12,14 +13,14 @@ mod storage;
 pub(crate) use expression::evaluate_global_expression;
 
 use crate::{
-    entry_point_inputs::{GlobalConstants, InvocationInputs},
     error::EvaluatorError,
-    function_state::{FrameContext, FunctionFrame, StackFrame},
-    program::ShaderProgram,
+    invocation::frame::{FrameContext, FunctionFrame, StackFrame},
+    invocation::inputs::{GlobalConstants, InvocationInputs},
+    program::{FunctionId, ShaderProgram},
     value::Value,
 };
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 
 use naga::{GlobalVariable, Handle};
 
@@ -77,7 +78,7 @@ impl InvocationState {
             }
         }
 
-        let evaluator = InvocationState {
+        let invocation = InvocationState {
             global_values,
             program,
             global_constants,
@@ -91,7 +92,7 @@ impl InvocationState {
             inputs,
         };
 
-        Ok(evaluator)
+        Ok(invocation)
     }
 
     pub(crate) fn entry_point_output(&self) -> Option<&Value> {

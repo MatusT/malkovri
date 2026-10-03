@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use naga::{Expression, Handle, LocalVariable};
 
 use crate::{
-    place::ExpressionCache,
-    place::{ArgumentValue, EvaluatedExpression},
+    invocation::place::ExpressionCache,
+    invocation::place::{ArgumentValue, EvaluatedExpression},
     program::{BlockId, FunctionId, ShaderProgram, StatementId},
     value::Value,
 };
@@ -114,7 +114,7 @@ impl BlockFrame {
     }
 }
 
-/// A single entry on the evaluator's unified execution stack.
+/// A single entry on the invocation's unified execution stack.
 /// Function calls push a [`StackFrame::Function`]; entering any nested block
 /// (`if`, `loop`, `switch`, bare block) pushes a [`StackFrame::Block`].
 #[derive(Clone, Debug)]

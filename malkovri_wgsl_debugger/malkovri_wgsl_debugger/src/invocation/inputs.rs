@@ -1,6 +1,6 @@
 use crate::{Primitive, Value};
 
-/// Per-thread compute built-in inputs, computed by the evaluator from the
+/// Per-thread compute built-in inputs, computed by the invocation from the
 /// thread's position within the workgroup.
 #[derive(Clone, Debug)]
 pub(crate) struct ComputeThreadInputs {
@@ -45,7 +45,7 @@ impl ComputeThreadInputs {
     }
 }
 
-/// Per-thread vertex built-in inputs, computed by the evaluator from the
+/// Per-thread vertex built-in inputs, computed by the invocation from the
 /// vertex/instance invocation index.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct VertexThreadInputs {
@@ -53,7 +53,7 @@ pub(crate) struct VertexThreadInputs {
     instance_index: u32,
 }
 
-/// Per-thread fragment built-in inputs, computed by the evaluator from the
+/// Per-thread fragment built-in inputs, computed by the invocation from the
 /// fragment's position in the render target.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FragmentThreadInputs {

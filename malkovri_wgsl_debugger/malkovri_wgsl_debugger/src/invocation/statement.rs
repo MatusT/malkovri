@@ -4,8 +4,8 @@ use naga::{Expression, Handle, LocalVariable, Statement};
 
 use crate::{
     error::EvaluatorError,
-    function_state::{BlockFrame, BlockKind, ControlFlow, FunctionFrame, StackFrame},
-    place::{ArgumentValue, EvaluatedExpression, Place, PlaceRoot},
+    invocation::frame::{BlockFrame, BlockKind, ControlFlow, FunctionFrame, StackFrame},
+    invocation::place::{ArgumentValue, EvaluatedExpression, Place, PlaceRoot},
     primitive::Primitive,
     program::{BlockId, Instruction, StatementId, SwitchCase},
     value::Value,

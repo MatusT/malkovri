@@ -4,7 +4,7 @@ use naga::{Expression, Handle, LocalVariable, Statement};
 
 use crate::{
     error::EvaluatorError,
-    function_state::{FrameContext, StackFrame},
+    invocation::frame::{FrameContext, StackFrame},
     value::Value,
 };
 

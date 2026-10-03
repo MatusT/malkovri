@@ -1,4 +1,4 @@
-use crate::{error::EvaluatorError, evaluator::InvocationState};
+use crate::{error::EvaluatorError, invocation::InvocationState};
 
 use super::{DebugThreadId, ThreadStatus};
 

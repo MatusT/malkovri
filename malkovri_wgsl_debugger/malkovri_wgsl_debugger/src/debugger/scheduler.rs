@@ -50,7 +50,7 @@ impl Debugger {
         self.focused_thread = gid;
 
         loop {
-            let Some(next) = self.evaluator_mut().current_statement()? else {
+            let Some(next) = self.invocation_mut().current_statement()? else {
                 self.group.get_mut(gid).set_status(ThreadStatus::Finished);
                 self.release_ready_parked_threads()?;
                 self.detect_deadlock()?;
@@ -71,7 +71,7 @@ impl Debugger {
                 return Ok(self.session_step_result());
             }
 
-            match self.evaluator_mut().step()? {
+            match self.invocation_mut().step()? {
                 None => {
                     self.group.get_mut(gid).set_status(ThreadStatus::Finished);
                     self.release_ready_parked_threads()?;

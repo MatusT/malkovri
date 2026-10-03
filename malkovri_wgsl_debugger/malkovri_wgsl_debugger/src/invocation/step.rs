@@ -1,7 +1,7 @@
 use crate::program::FunctionId;
 use crate::{
     error::EvaluatorError,
-    function_state::{BlockFrame, BlockKind, ControlFlow, StackFrame},
+    invocation::frame::{BlockFrame, BlockKind, ControlFlow, StackFrame},
     program::{Instruction, StatementId},
     value::Value,
 };

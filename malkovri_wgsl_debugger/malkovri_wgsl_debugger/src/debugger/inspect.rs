@@ -2,8 +2,8 @@ use naga::Statement;
 
 use crate::{
     error::EvaluatorError,
-    evaluator::InvocationState,
-    function_state::{FrameContext, StackFrame},
+    invocation::InvocationState,
+    invocation::frame::{FrameContext, StackFrame},
     value::Value,
 };
 
@@ -37,26 +37,26 @@ impl Debugger {
         if matches!(invocation.status(), ThreadStatus::Finished) {
             return None;
         }
-        let evaluator = invocation.state();
-        let context = evaluator
-            .frame_context(evaluator.current_function_frame_index().ok()?)
+        let invocation = invocation.state();
+        let context = invocation
+            .frame_context(invocation.current_function_frame_index().ok()?)
             .ok()?;
-        self.frame_location(evaluator, context)
+        self.frame_location(invocation, context)
     }
 
     fn frame_location(
         &self,
-        evaluator: &InvocationState,
+        invocation: &InvocationState,
         context: FrameContext,
     ) -> Option<SourceLocation> {
-        let StackFrame::Function(frame) = &evaluator.stack()[context.function_index()] else {
+        let StackFrame::Function(frame) = &invocation.stack()[context.function_index()] else {
             return None;
         };
-        let function = evaluator.resolve_function(&frame.function_id());
+        let function = invocation.resolve_function(&frame.function_id());
         let function_name = function.name.clone();
         let (current_statement, span) = self
             .program
-            .block(evaluator.stack()[context.block_index()].block())
+            .block(invocation.stack()[context.block_index()].block())
             .span_iter()
             .nth(context.statement_index())?;
 
@@ -94,8 +94,8 @@ impl Debugger {
         &self,
         thread_id: DebugThreadId,
     ) -> Result<Vec<StackFrameInfo>, EvaluatorError> {
-        let evaluator = self.evaluator_for_thread(thread_id)?;
-        evaluator
+        let invocation = self.invocation_for_thread(thread_id)?;
+        invocation
             .stack()
             .iter()
             .enumerate()
@@ -104,14 +104,14 @@ impl Debugger {
                 let StackFrame::Function(frame) = stack_frame else {
                     return None;
                 };
-                Some(evaluator.frame_context(index).map(|context| {
+                Some(invocation.frame_context(index).map(|context| {
                     StackFrameInfo {
                         id: DebugFrameId(index),
-                        name: evaluator
+                        name: invocation
                             .resolve_function(&frame.function_id())
                             .name
                             .clone(),
-                        location: self.frame_location(evaluator, context),
+                        location: self.frame_location(invocation, context),
                     }
                 }))
             })
@@ -120,7 +120,7 @@ impl Debugger {
 
     /// All local variables and `let` bindings visible at the current execution point.
     pub fn local_variables(&self) -> Vec<Variable> {
-        let Ok(index) = self.evaluator().current_function_frame_index() else {
+        let Ok(index) = self.invocation().current_function_frame_index() else {
             return Vec::new();
         };
         self.frame_local_variables(self.focused_thread_id(), DebugFrameId(index))
@@ -132,34 +132,37 @@ impl Debugger {
         thread_id: DebugThreadId,
         frame_id: DebugFrameId,
     ) -> Result<Vec<Variable>, EvaluatorError> {
-        let evaluator = self.evaluator_for_thread(thread_id)?;
-        let context = evaluator.frame_context(frame_id.0)?;
-        let StackFrame::Function(frame) = &evaluator.stack()[context.function_index()] else {
+        let invocation = self.invocation_for_thread(thread_id)?;
+        let context = invocation.frame_context(frame_id.0)?;
+        let StackFrame::Function(frame) = &invocation.stack()[context.function_index()] else {
             unreachable!()
         };
-        let function = evaluator.resolve_function(&frame.function_id());
-        let in_scope = evaluator.local_variables_in_scope(context)?;
+        let function = invocation.resolve_function(&frame.function_id());
+        let in_scope = invocation.local_variables_in_scope(context)?;
         let mut variables: Vec<_> = function
             .local_variables
             .iter()
             .filter(|(handle, _)| in_scope.contains(handle))
             .map(|(handle, local)| Variable {
                 name: local.name.clone(),
-                value: evaluator.evaluate_local_variable(handle, context.function_index()),
+                value: invocation.evaluate_local_variable(handle, context.function_index()),
             })
             .collect();
-        variables.extend(evaluator.named_expression_values(context)?.into_iter().map(
-            |(name, value)| Variable {
-                name: Some(name),
-                value,
-            },
-        ));
+        variables.extend(
+            invocation
+                .named_expression_values(context)?
+                .into_iter()
+                .map(|(name, value)| Variable {
+                    name: Some(name),
+                    value,
+                }),
+        );
         Ok(variables)
     }
 
     /// Current function arguments with their names and values.
     pub fn argument_variables(&self) -> Vec<Variable> {
-        let Ok(index) = self.evaluator().current_function_frame_index() else {
+        let Ok(index) = self.invocation().current_function_frame_index() else {
             return Vec::new();
         };
         self.frame_argument_variables(self.focused_thread_id(), DebugFrameId(index))
@@ -171,9 +174,9 @@ impl Debugger {
         thread_id: DebugThreadId,
         frame_id: DebugFrameId,
     ) -> Result<Vec<Variable>, EvaluatorError> {
-        let evaluator = self.evaluator_for_thread(thread_id)?;
-        let context = evaluator.frame_context(frame_id.0)?;
-        Ok(evaluator
+        let invocation = self.invocation_for_thread(thread_id)?;
+        let context = invocation.frame_context(frame_id.0)?;
+        Ok(invocation
             .function_argument_values(context)?
             .into_iter()
             .map(|(name, value)| Variable { name, value })
@@ -185,7 +188,7 @@ impl Debugger {
         thread_id: DebugThreadId,
     ) -> Result<Vec<Variable>, EvaluatorError> {
         Ok(self
-            .evaluator_for_thread(thread_id)?
+            .invocation_for_thread(thread_id)?
             .global_variable_values()
             .into_iter()
             .map(|(name, value)| Variable { name, value })
@@ -194,7 +197,7 @@ impl Debugger {
 
     /// All global variables with their names and values.
     pub fn global_variables(&self) -> Vec<Variable> {
-        self.evaluator()
+        self.invocation()
             .global_variable_values()
             .into_iter()
             .map(|(name, value)| Variable { name, value })
@@ -202,6 +205,6 @@ impl Debugger {
     }
 
     pub fn entry_point_output(&self) -> Option<Value> {
-        self.evaluator().entry_point_output().cloned()
+        self.invocation().entry_point_output().cloned()
     }
 }

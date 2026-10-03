@@ -1,13 +1,13 @@
-use std::sync::Arc;
 mod collectives;
 mod group;
 mod inspect;
 
-use group::{ExecutionGroup, Invocation, InvocationId};
 mod scheduler;
 mod sync;
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
+
+use group::{ExecutionGroup, Invocation, InvocationId};
 
 use naga::{
     AddressSpace, Barrier, CollectiveOperation, Expression, GatherMode, Handle, ResourceBinding,
@@ -15,15 +15,15 @@ use naga::{
 };
 
 use crate::{
-    entry_point_inputs::{
+    error::EvaluatorError,
+    invocation::inputs::{
         ComputeThreadInputs, FragmentThreadInputs, GlobalConstants, InvocationInputs,
         VertexThreadInputs,
     },
-    error::EvaluatorError,
-    evaluator::{InvocationState, evaluate_global_expression},
+    invocation::{InvocationState, evaluate_global_expression},
     program::ShaderProgram,
+    program::WgslToModuleError,
     value::Value,
-    wgsl::WgslToModuleError,
 };
 
 /// Workgroup and subgroup configuration for a debug session.
@@ -143,7 +143,7 @@ fn thread_order(config: &WorkgroupConfig) -> Vec<[u32; 3]> {
 pub enum DebuggerError {
     #[error("WGSL error: {0}")]
     Wgsl(#[from] WgslToModuleError),
-    #[error("InvocationState error: {0}")]
+    #[error("Execution error: {0}")]
     Evaluator(#[from] EvaluatorError),
     #[error("Invalid WorkgroupConfig: {0}")]
     InvalidConfig(String),
@@ -314,7 +314,7 @@ impl Debugger {
                     ));
                 }
             };
-            let evaluator = InvocationState::new(
+            let invocation = InvocationState::new(
                 program.clone(),
                 entry_point_index,
                 global_constants,
@@ -322,7 +322,7 @@ impl Debugger {
                 shared_workgroup_globals.clone(),
                 inputs,
             )?;
-            invocations.push(Invocation::new(*gid, evaluator));
+            invocations.push(Invocation::new(*gid, invocation));
         }
 
         let group = ExecutionGroup::new(invocations);
@@ -339,15 +339,15 @@ impl Debugger {
         self.program.source()
     }
 
-    fn evaluator(&self) -> &InvocationState {
+    fn invocation(&self) -> &InvocationState {
         self.group.get(self.focused_thread).state()
     }
 
-    fn evaluator_mut(&mut self) -> &mut InvocationState {
+    fn invocation_mut(&mut self) -> &mut InvocationState {
         self.group.get_mut(self.focused_thread).state_mut()
     }
 
-    fn evaluator_for_thread(
+    fn invocation_for_thread(
         &self,
         thread_id: DebugThreadId,
     ) -> Result<&InvocationState, EvaluatorError> {
