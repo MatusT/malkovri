@@ -52,6 +52,9 @@ impl Evaluator {
         let StackFrame::Function(ref frame) = self.stack[func_idx] else {
             return Value::Uninitialized.into();
         };
+        if let Some(value) = frame.evaluated_expressions.get(&expression_handle) {
+            return value.clone();
+        }
         let function = self.resolve_function(&frame.function_ref);
         let expression = &function.expressions[expression_handle];
 
@@ -144,14 +147,9 @@ impl Evaluator {
             | Expression::WorkGroupUniformLoadResult { .. }
             | Expression::SubgroupBallotResult
             | Expression::SubgroupOperationResult { .. } => {
-                // Statement results are stored in evaluated_expressions by the
-                // statement or collective scheduler, keyed by this expression handle.
-                frame
-                    .evaluated_expressions
-                    .get(&expression_handle)
-                    .cloned()
-                    .unwrap_or(Value::Uninitialized)
-                    .into()
+                // Completed statement results were returned from the cache above.
+                // A missing result is not available until its statement executes.
+                Value::Uninitialized.into()
             }
             _ => Value::Uninitialized.into(),
         }
@@ -171,14 +169,6 @@ impl Evaluator {
     }
 
     fn evaluate_load(&self, pointer: Handle<Expression>, func_idx: usize) -> Value {
-        // Check expression cache first.
-        let cached = match &self.stack[func_idx] {
-            StackFrame::Function(frame) => frame.evaluated_expressions.get(&pointer).cloned(),
-            StackFrame::Block(_) => None,
-        };
-        if let Some(value) = cached {
-            return value;
-        }
         match self.eval_expr(pointer, func_idx) {
             EvaluatedExpression::Place(place) => self.read_place(&place),
             EvaluatedExpression::Value(value) => value,

@@ -211,7 +211,7 @@ impl Evaluator {
         {
             parent_frame
                 .evaluated_expressions
-                .insert(handle, return_val);
+                .insert(handle, return_val.into());
         } else if matches!(function_ref, Some(FunctionRef::EntryPoint(_))) {
             self.entry_point_output = value;
         }

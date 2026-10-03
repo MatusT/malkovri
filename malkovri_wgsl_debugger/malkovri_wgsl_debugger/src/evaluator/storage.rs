@@ -98,7 +98,7 @@ impl Evaluator {
     ) -> Result<(), EvaluatorError> {
         self.current_function_frame_mut()?
             .evaluated_expressions
-            .insert(handle, value);
+            .insert(handle, value.into());
         Ok(())
     }
 

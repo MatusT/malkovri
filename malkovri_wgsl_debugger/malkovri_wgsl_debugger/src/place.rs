@@ -62,4 +62,6 @@ impl From<Place> for EvaluatedExpression {
     }
 }
 
-pub(crate) type ExpressionCache = std::collections::HashMap<Handle<Expression>, Value>;
+// Emitted pointers retain their resolved access path, just as loads retain their value.
+pub(crate) type ExpressionCache =
+    std::collections::HashMap<Handle<Expression>, EvaluatedExpression>;

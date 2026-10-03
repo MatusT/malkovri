@@ -17,6 +17,7 @@ impl Evaluator {
     pub(super) fn handle_statement(&mut self, statement: Statement) -> Result<(), EvaluatorError> {
         match statement {
             Statement::Emit(range) => {
+                self.emit_expressions(range.clone())?;
                 self.initialize_local_variables_for_emit(range)?;
             }
             Statement::Call {
@@ -128,6 +129,23 @@ impl Evaluator {
                 control_flow: ControlFlow::None,
             })));
 
+        Ok(())
+    }
+
+    /// Evaluate in IR order. A loop may execute the same Emit again, so discard
+    /// its previous results before computing this iteration's values and places.
+    fn emit_expressions(&mut self, range: naga::Range<Expression>) -> Result<(), EvaluatorError> {
+        let function_index = self.current_function_frame_index()?;
+        let frame = self.current_function_frame_mut()?;
+        for handle in range.clone() {
+            frame.evaluated_expressions.remove(&handle);
+        }
+        for handle in range {
+            let value = self.eval_expr(handle, function_index);
+            self.current_function_frame_mut()?
+                .evaluated_expressions
+                .insert(handle, value);
+        }
         Ok(())
     }
 
@@ -250,6 +268,16 @@ impl Evaluator {
         pointer: Handle<Expression>,
     ) -> Result<Place, EvaluatorError> {
         let func_idx = self.current_function_frame_index()?;
+        if let Some(value) = self
+            .current_function_frame()?
+            .evaluated_expressions
+            .get(&pointer)
+        {
+            return match value {
+                EvaluatedExpression::Place(place) => Ok(place.clone()),
+                EvaluatedExpression::Value(_) => Err(EvaluatorError::StoreToNonPointer),
+            };
+        }
         let expression = {
             let frame = self.current_function_frame()?;
             let function = self.resolve_function(&frame.function_ref);
