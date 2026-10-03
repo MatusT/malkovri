@@ -27,13 +27,13 @@ impl InvocationState {
         &self,
         context: FrameContext,
     ) -> Result<Vec<(Option<String>, Value)>, EvaluatorError> {
-        let func_idx = context.function_index;
+        let func_idx = context.function_index();
         let StackFrame::Function(frame) = &self.stack[func_idx] else {
             return Err(EvaluatorError::InternalError(
                 "unknown function frame".into(),
             ));
         };
-        let function = self.resolve_function(&frame.function_id);
+        let function = self.resolve_function(&frame.function_id());
         Ok(function
             .arguments
             .iter()
@@ -51,21 +51,21 @@ impl InvocationState {
         &self,
         context: FrameContext,
     ) -> Result<HashSet<Handle<LocalVariable>>, EvaluatorError> {
-        let StackFrame::Function(frame) = &self.stack[context.function_index] else {
+        let StackFrame::Function(frame) = &self.stack[context.function_index()] else {
             return Err(EvaluatorError::InternalError(
                 "unknown function frame".into(),
             ));
         };
-        let function = self.resolve_function(&frame.function_id);
+        let function = self.resolve_function(&frame.function_id());
         let declaring_scopes = self
             .program
             .scopes()
-            .local_scopes(&frame.function_id)
+            .local_scopes(&frame.function_id())
             .ok_or_else(|| {
                 EvaluatorError::InternalError("missing local declaring scopes".into())
             })?;
 
-        let current_block = &self.stack[context.block_index];
+        let current_block = &self.stack[context.block_index()];
         // The span of the current (innermost) execution scope.
         let current_scope = self.scope_range(context);
 
@@ -74,7 +74,7 @@ impl InvocationState {
             .program
             .block(current_block.block())
             .span_iter()
-            .nth(context.statement_index)
+            .nth(context.statement_index())
             .and_then(|(_, sp)| sp.to_range())
             .map(|r| r.start);
 
@@ -107,17 +107,17 @@ impl InvocationState {
         &self,
         context: FrameContext,
     ) -> Result<Vec<(String, Value)>, EvaluatorError> {
-        let function_index = context.function_index;
+        let function_index = context.function_index();
         let StackFrame::Function(frame) = &self.stack[function_index] else {
             return Err(EvaluatorError::InternalError(
                 "unknown function frame".into(),
             ));
         };
-        let function = self.resolve_function(&frame.function_id);
+        let function = self.resolve_function(&frame.function_id());
         let declaring_scopes = self
             .program
             .scopes()
-            .named_expression_scopes(&frame.function_id)
+            .named_expression_scopes(&frame.function_id())
             .ok_or_else(|| {
                 EvaluatorError::InternalError("missing named expression scopes".into())
             })?;
@@ -125,10 +125,10 @@ impl InvocationState {
         let current_scope = self.scope_range(context);
 
         let mut emitted = HashSet::new();
-        for frame_idx in function_index..=context.block_index {
+        for frame_idx in function_index..=context.block_index() {
             let frame = &self.stack[frame_idx];
-            let limit = if frame_idx == context.block_index {
-                context.statement_index
+            let limit = if frame_idx == context.block_index() {
+                context.statement_index()
             } else {
                 frame.current_statement_index()
             };
@@ -163,7 +163,7 @@ impl InvocationState {
                 declaring_scope.start <= current_scope.start
                     && current_scope.end <= declaring_scope.end
             })
-            .filter(|(handle, _)| frame.evaluated_expressions.contains_key(handle))
+            .filter(|(handle, _)| frame.expression(**handle).is_some())
             .map(|(handle, name)| (name.clone(), self.eval_value(*handle, function_index)))
             .collect())
     }

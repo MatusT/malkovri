@@ -14,7 +14,7 @@ pub(crate) use expression::evaluate_global_expression;
 use crate::{
     entry_point_inputs::{GlobalConstants, InvocationInputs},
     error::EvaluatorError,
-    function_state::{ControlFlow, FrameContext, FunctionFrame, StackFrame},
+    function_state::{FrameContext, FunctionFrame, StackFrame},
     program::ShaderProgram,
     value::Value,
 };
@@ -82,16 +82,12 @@ impl InvocationState {
             program,
             global_constants,
             entry_point_output: None,
-            stack: vec![StackFrame::Function(Box::new(FunctionFrame {
-                function_id: FunctionId::EntryPoint(entry_point_index),
-                local_variables: HashMap::new(),
-                evaluated_expressions: HashMap::new(),
-                evaluated_function_arguments: Vec::new(),
+            stack: vec![StackFrame::Function(Box::new(FunctionFrame::new(
+                FunctionId::EntryPoint(entry_point_index),
                 block,
-                current_statement_index: 0,
-                call_result_handle: None,
-                control_flow: ControlFlow::None,
-            }))],
+                Vec::new(),
+                None,
+            )))],
             inputs,
         };
 
@@ -126,7 +122,7 @@ impl InvocationState {
     /// Return a reference to the `naga::Function` for the current call frame.
     pub(crate) fn current_function(&self) -> Result<&naga::Function, EvaluatorError> {
         let frame = self.current_function_frame()?;
-        Ok(self.resolve_function(&frame.function_id))
+        Ok(self.resolve_function(&frame.function_id()))
     }
 
     /// Index of the topmost `Function` frame, used to look up expressions and variables.
@@ -201,17 +197,17 @@ impl InvocationState {
         let statement_index = self.stack[block_index]
             .current_statement_index()
             .saturating_sub(usize::from(callee_index.is_some()));
-        Ok(FrameContext {
+        Ok(FrameContext::new(
             function_index,
             block_index,
             statement_index,
-        })
+        ))
     }
 
     fn scope_range(&self, context: FrameContext) -> std::ops::Range<usize> {
         naga::Span::total_span(
             self.program
-                .block(self.stack[context.block_index].block())
+                .block(self.stack[context.block_index()].block())
                 .span_iter()
                 .map(|(_, span)| *span),
         )

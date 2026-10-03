@@ -49,16 +49,16 @@ impl Debugger {
         evaluator: &InvocationState,
         context: FrameContext,
     ) -> Option<SourceLocation> {
-        let StackFrame::Function(frame) = &evaluator.stack()[context.function_index] else {
+        let StackFrame::Function(frame) = &evaluator.stack()[context.function_index()] else {
             return None;
         };
-        let function = evaluator.resolve_function(&frame.function_id);
+        let function = evaluator.resolve_function(&frame.function_id());
         let function_name = function.name.clone();
         let (current_statement, span) = self
             .program
-            .block(evaluator.stack()[context.block_index].block())
+            .block(evaluator.stack()[context.block_index()].block())
             .span_iter()
-            .nth(context.statement_index)?;
+            .nth(context.statement_index())?;
 
         let (line, column) = if matches!(current_statement.leaf(), Some(Statement::Return { .. }))
             && span.to_range().is_none()
@@ -104,15 +104,16 @@ impl Debugger {
                 let StackFrame::Function(frame) = stack_frame else {
                     return None;
                 };
-                Some(
-                    evaluator
-                        .frame_context(index)
-                        .map(|context| StackFrameInfo {
-                            id: DebugFrameId(index),
-                            name: evaluator.resolve_function(&frame.function_id).name.clone(),
-                            location: self.frame_location(evaluator, context),
-                        }),
-                )
+                Some(evaluator.frame_context(index).map(|context| {
+                    StackFrameInfo {
+                        id: DebugFrameId(index),
+                        name: evaluator
+                            .resolve_function(&frame.function_id())
+                            .name
+                            .clone(),
+                        location: self.frame_location(evaluator, context),
+                    }
+                }))
             })
             .collect()
     }
@@ -133,10 +134,10 @@ impl Debugger {
     ) -> Result<Vec<Variable>, EvaluatorError> {
         let evaluator = self.evaluator_for_thread(thread_id)?;
         let context = evaluator.frame_context(frame_id.0)?;
-        let StackFrame::Function(frame) = &evaluator.stack()[context.function_index] else {
+        let StackFrame::Function(frame) = &evaluator.stack()[context.function_index()] else {
             unreachable!()
         };
-        let function = evaluator.resolve_function(&frame.function_id);
+        let function = evaluator.resolve_function(&frame.function_id());
         let in_scope = evaluator.local_variables_in_scope(context)?;
         let mut variables: Vec<_> = function
             .local_variables
@@ -144,7 +145,7 @@ impl Debugger {
             .filter(|(handle, _)| in_scope.contains(handle))
             .map(|(handle, local)| Variable {
                 name: local.name.clone(),
-                value: evaluator.evaluate_local_variable(handle, context.function_index),
+                value: evaluator.evaluate_local_variable(handle, context.function_index()),
             })
             .collect();
         variables.extend(evaluator.named_expression_values(context)?.into_iter().map(

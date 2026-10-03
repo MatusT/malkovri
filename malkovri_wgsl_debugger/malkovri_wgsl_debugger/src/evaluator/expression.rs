@@ -52,10 +52,10 @@ impl InvocationState {
         let StackFrame::Function(ref frame) = self.stack[func_idx] else {
             return Value::Uninitialized.into();
         };
-        if let Some(value) = frame.evaluated_expressions.get(&expression_handle) {
+        if let Some(value) = frame.expression(expression_handle) {
             return value.clone();
         }
-        let function = self.resolve_function(&frame.function_id);
+        let function = self.resolve_function(&frame.function_id());
         let expression = &function.expressions[expression_handle];
 
         match expression {
@@ -198,7 +198,7 @@ impl InvocationState {
         let StackFrame::Function(ref frame) = self.stack[func_idx] else {
             return ArgumentValue::Value(Value::Uninitialized);
         };
-        let function = self.resolve_function(&frame.function_id);
+        let function = self.resolve_function(&frame.function_id());
         let function_argument = &function.arguments[index];
 
         if let Some(binding) = &function_argument.binding {
@@ -210,8 +210,7 @@ impl InvocationState {
             })
         } else {
             frame
-                .evaluated_function_arguments
-                .get(index)
+                .argument(index)
                 .cloned()
                 .unwrap_or(ArgumentValue::Value(Value::Uninitialized))
         }

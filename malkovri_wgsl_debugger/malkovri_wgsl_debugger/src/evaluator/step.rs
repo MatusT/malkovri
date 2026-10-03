@@ -44,7 +44,7 @@ impl InvocationState {
                 "expected function frame at function_index".into(),
             ));
         };
-        let signal = std::mem::take(&mut frame.control_flow);
+        let signal = frame.take_control_flow();
         match signal {
             ControlFlow::None => Ok(false),
             ControlFlow::Break => {
@@ -140,10 +140,7 @@ impl InvocationState {
         while self.stack.len() > function_index + 1 {
             let is_target = matches!(
                 self.current_frame().ok(),
-                Some(StackFrame::Block(BlockFrame {
-                    kind: BlockKind::Loop { .. } | BlockKind::Switch { .. },
-                    ..
-                }))
+                Some(StackFrame::Block(frame)) if matches!(frame.kind(), BlockKind::Loop { .. } | BlockKind::Switch { .. })
             );
             self.stack.pop();
             if is_target {
@@ -158,10 +155,7 @@ impl InvocationState {
         while self.stack.len() > function_index + 1 {
             if matches!(
                 self.current_frame().ok(),
-                Some(StackFrame::Block(BlockFrame {
-                    kind: BlockKind::Loop { .. },
-                    ..
-                }))
+                Some(StackFrame::Block(frame)) if matches!(frame.kind(), BlockKind::Loop { .. })
             ) {
                 break;
             }
@@ -182,7 +176,7 @@ impl InvocationState {
     fn apply_return(&mut self, function_index: usize, value: Option<Value>) {
         // Read the result handle from the callee before truncating the stack.
         let (function_id, call_result_handle) = match &self.stack[function_index] {
-            StackFrame::Function(frame) => (Some(frame.function_id), frame.call_result_handle),
+            StackFrame::Function(frame) => (Some(frame.function_id()), frame.call_result_handle()),
             StackFrame::Block(_) => (None, None),
         };
         // Store the return value in the parent frame's expression cache, keyed
@@ -192,9 +186,7 @@ impl InvocationState {
             && let Some(parent_function_index) = self.parent_function_frame_index(function_index)
             && let StackFrame::Function(ref mut parent_frame) = self.stack[parent_function_index]
         {
-            parent_frame
-                .evaluated_expressions
-                .insert(handle, return_val.into());
+            parent_frame.set_expression(handle, return_val.into());
         } else if matches!(function_id, Some(FunctionId::EntryPoint(_))) {
             self.entry_point_output = value;
         }
@@ -210,7 +202,7 @@ impl InvocationState {
             StackFrame::Function(_) => {
                 self.stack.pop();
             }
-            StackFrame::Block(block_frame) => match &block_frame.kind {
+            StackFrame::Block(block_frame) => match block_frame.kind() {
                 BlockKind::Plain => {
                     self.stack.pop();
                 }
@@ -225,14 +217,13 @@ impl InvocationState {
                             unreachable!("switch frame must refer to a switch instruction")
                         };
                         let case = &cases[index];
-                        BlockFrame {
-                            block: case.body(),
-                            current_statement_index: 0,
-                            kind: BlockKind::Switch {
+                        BlockFrame::new(
+                            case.body(),
+                            BlockKind::Switch {
                                 statement: *statement,
                                 next_case: case.falls_through().then_some(index + 1),
                             },
-                        }
+                        )
                     });
                     self.stack.pop();
                     if let Some(frame) = next {

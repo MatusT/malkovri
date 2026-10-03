@@ -58,7 +58,7 @@ impl InvocationState {
         let Some(StackFrame::Function(frame)) = self.stack.get(function_frame_index) else {
             return Value::Uninitialized;
         };
-        if let Some(value) = frame.local_variables.get(&handle) {
+        if let Some(value) = frame.local(handle) {
             return value.at_path(path);
         }
         self.local_initial_value(function_frame_index, handle)
@@ -73,7 +73,7 @@ impl InvocationState {
         let Some(StackFrame::Function(frame)) = self.stack.get(function_frame_index) else {
             return Value::Uninitialized;
         };
-        let function = self.resolve_function(&frame.function_id);
+        let function = self.resolve_function(&frame.function_id());
         let local = &function.local_variables[handle];
         match local.init {
             Some(expr) => self.eval_value(expr, function_frame_index),
@@ -97,7 +97,7 @@ impl InvocationState {
                         "expected function frame".into(),
                     ));
                 };
-                let slot = frame.local_variables.get_mut(handle).ok_or_else(|| {
+                let slot = frame.local_mut(*handle).ok_or_else(|| {
                     EvaluatorError::InternalError(format!(
                         "local variable {handle:?} was not initialized"
                     ))
@@ -123,8 +123,7 @@ impl InvocationState {
         value: Value,
     ) -> Result<(), EvaluatorError> {
         self.current_function_frame_mut()?
-            .evaluated_expressions
-            .insert(handle, value.into());
+            .set_expression(handle, value.into());
         Ok(())
     }
 
@@ -146,10 +145,10 @@ impl InvocationState {
                     "expected function frame".into(),
                 ));
             };
-            if frame.local_variables.contains_key(&handle) {
+            if frame.local(handle).is_some() {
                 return Ok(());
             }
-            let function = self.resolve_function(&frame.function_id);
+            let function = self.resolve_function(&frame.function_id());
             let local = &function.local_variables[handle];
             (local.init, local.ty)
         };
@@ -164,7 +163,7 @@ impl InvocationState {
                 "expected function frame".into(),
             ));
         };
-        frame.local_variables.insert(handle, value);
+        frame.set_local(handle, value);
         Ok(())
     }
 

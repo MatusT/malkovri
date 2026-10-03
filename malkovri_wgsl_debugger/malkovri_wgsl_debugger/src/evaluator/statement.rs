@@ -1,5 +1,4 @@
 use crate::program::FunctionId;
-use std::collections::HashMap;
 
 use naga::{Expression, Handle, LocalVariable, Statement};
 
@@ -55,11 +54,8 @@ impl InvocationState {
     }
 
     fn push_block(&mut self, block: BlockId, kind: BlockKind) {
-        self.stack.push(StackFrame::Block(BlockFrame {
-            block,
-            current_statement_index: 0,
-            kind,
-        }));
+        self.stack
+            .push(StackFrame::Block(BlockFrame::new(block, kind)));
     }
 
     fn handle_leaf(&mut self, statement: &Statement) -> Result<(), EvaluatorError> {
@@ -78,18 +74,19 @@ impl InvocationState {
             Statement::Store { pointer, value } => self.handle_store(*pointer, *value)?,
             Statement::Return { value } => {
                 let value = value.map(|value| self.evaluate_expression(value));
-                self.current_function_frame_mut()?.control_flow = ControlFlow::Return(value);
+                self.current_function_frame_mut()?
+                    .set_control_flow(ControlFlow::Return(value));
             }
-            Statement::Break => {
-                self.current_function_frame_mut()?.control_flow = ControlFlow::Break
-            }
-            Statement::Continue => {
-                self.current_function_frame_mut()?.control_flow = ControlFlow::Continue
-            }
+            Statement::Break => self
+                .current_function_frame_mut()?
+                .set_control_flow(ControlFlow::Break),
+            Statement::Continue => self
+                .current_function_frame_mut()?
+                .set_control_flow(ControlFlow::Continue),
             Statement::ControlBarrier(_) | Statement::MemoryBarrier(_) => {}
-            Statement::Kill => {
-                self.current_function_frame_mut()?.control_flow = ControlFlow::Return(None)
-            }
+            Statement::Kill => self
+                .current_function_frame_mut()?
+                .set_control_flow(ControlFlow::Return(None)),
             Statement::ImageStore { .. } => {
                 return Err(EvaluatorError::UnsupportedStatement("imageStore".into()));
             }
@@ -136,16 +133,12 @@ impl InvocationState {
             .collect();
         let function_id = FunctionId::Called(function_handle);
         self.stack
-            .push(StackFrame::Function(Box::new(FunctionFrame {
+            .push(StackFrame::Function(Box::new(FunctionFrame::new(
                 function_id,
-                local_variables: HashMap::new(),
-                evaluated_expressions: HashMap::new(),
+                self.program.function_body(function_id),
                 evaluated_function_arguments,
-                block: self.program.function_body(function_id),
-                current_statement_index: 0,
                 call_result_handle,
-                control_flow: ControlFlow::None,
-            })));
+            ))));
     }
 
     /// Evaluate in IR order. A loop may execute the same Emit again, so discard
@@ -154,13 +147,12 @@ impl InvocationState {
         let function_index = self.current_function_frame_index()?;
         let frame = self.current_function_frame_mut()?;
         for handle in range.clone() {
-            frame.evaluated_expressions.remove(&handle);
+            frame.forget_expression(handle);
         }
         for handle in range {
             let value = self.eval_expr(handle, function_index);
             self.current_function_frame_mut()?
-                .evaluated_expressions
-                .insert(handle, value);
+                .set_expression(handle, value);
         }
         Ok(())
     }
@@ -187,7 +179,7 @@ impl InvocationState {
 
         let frame = self.current_function_frame_mut()?;
         for (handle, value) in insert_variables {
-            frame.local_variables.insert(handle, value);
+            frame.set_local(handle, value);
         }
         Ok(())
     }
@@ -262,11 +254,7 @@ impl InvocationState {
         pointer: Handle<Expression>,
     ) -> Result<Place, EvaluatorError> {
         let func_idx = self.current_function_frame_index()?;
-        if let Some(value) = self
-            .current_function_frame()?
-            .evaluated_expressions
-            .get(&pointer)
-        {
+        if let Some(value) = self.current_function_frame()?.expression(pointer) {
             return match value {
                 EvaluatedExpression::Place(place) => Ok(place.clone()),
                 EvaluatedExpression::Value(_) => Err(EvaluatorError::StoreToNonPointer),
@@ -274,7 +262,7 @@ impl InvocationState {
         }
         let expression = {
             let frame = self.current_function_frame()?;
-            let function = self.resolve_function(&frame.function_id);
+            let function = self.resolve_function(&frame.function_id());
             function.expressions[pointer].clone()
         };
 

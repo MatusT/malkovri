@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use naga::{Expression, Handle, LocalVariable};
 
 use crate::{
-    place::ArgumentValue,
     place::ExpressionCache,
+    place::{ArgumentValue, EvaluatedExpression},
     program::{BlockId, FunctionId, ShaderProgram, StatementId},
     value::Value,
 };
@@ -47,32 +47,44 @@ pub(crate) enum BlockKind {
 #[derive(Clone, Debug)]
 pub(crate) struct FunctionFrame {
     /// Reference to the function in the module.
-    pub(crate) function_id: FunctionId,
-    pub(crate) local_variables: HashMap<Handle<LocalVariable>, Value>,
-    pub(crate) evaluated_expressions: ExpressionCache,
-    pub(crate) evaluated_function_arguments: Vec<ArgumentValue>,
+    function_id: FunctionId,
+    local_variables: HashMap<Handle<LocalVariable>, Value>,
+    evaluated_expressions: ExpressionCache,
+    evaluated_function_arguments: Vec<ArgumentValue>,
     /// The top-level statements of the function body.
-    pub(crate) block: BlockId,
-    pub(crate) current_statement_index: usize,
+    block: BlockId,
+    current_statement_index: usize,
     /// The `Expression::CallResult` handle in the *parent* frame that should receive
     /// this function's return value.  `None` for the entry-point frame and for
     /// calls whose result is discarded.
-    pub(crate) call_result_handle: Option<Handle<Expression>>,
+    call_result_handle: Option<Handle<Expression>>,
     /// Control-flow signal written by `break`/`continue`/`return` handlers and consumed
     /// by [`InvocationState::next_statement`].
-    pub(crate) control_flow: ControlFlow,
+    control_flow: ControlFlow,
 }
 
 /// A block frame (if-body, loop-body, switch-case, plain block) on the unified stack.
 #[derive(Clone, Debug)]
 pub(crate) struct BlockFrame {
     /// The currently active statements (either the loop body or the continuing block).
-    pub(crate) block: BlockId,
-    pub(crate) current_statement_index: usize,
-    pub(crate) kind: BlockKind,
+    block: BlockId,
+    current_statement_index: usize,
+    kind: BlockKind,
 }
 
 impl BlockFrame {
+    pub(crate) fn new(block: BlockId, kind: BlockKind) -> Self {
+        Self {
+            block,
+            kind,
+            current_statement_index: 0,
+        }
+    }
+
+    pub(crate) fn kind(&self) -> &BlockKind {
+        &self.kind
+    }
+
     /// Switch this loop frame to its continuing block. No-op if not a Loop.
     pub(crate) fn switch_to_continuing(&mut self) {
         if let BlockKind::Loop {
@@ -114,9 +126,9 @@ pub(crate) enum StackFrame {
 /// Inspection position for a function, including a caller suspended at a call.
 #[derive(Clone, Copy)]
 pub(crate) struct FrameContext {
-    pub function_index: usize,
-    pub block_index: usize,
-    pub statement_index: usize,
+    function_index: usize,
+    block_index: usize,
+    statement_index: usize,
 }
 
 impl StackFrame {
@@ -150,5 +162,82 @@ impl StackFrame {
     /// Whether this frame has executed all its statements.
     pub(crate) fn is_exhausted(&self, program: &ShaderProgram) -> bool {
         self.current_statement_index() >= program.block(self.block()).len()
+    }
+}
+
+impl FunctionFrame {
+    pub(crate) fn new(
+        function_id: FunctionId,
+        block: BlockId,
+        arguments: Vec<ArgumentValue>,
+        call_result_handle: Option<Handle<Expression>>,
+    ) -> Self {
+        Self {
+            function_id,
+            block,
+            local_variables: HashMap::new(),
+            evaluated_expressions: HashMap::new(),
+            evaluated_function_arguments: arguments,
+            current_statement_index: 0,
+            call_result_handle,
+            control_flow: ControlFlow::None,
+        }
+    }
+
+    pub(crate) fn function_id(&self) -> FunctionId {
+        self.function_id
+    }
+    pub(crate) fn call_result_handle(&self) -> Option<Handle<Expression>> {
+        self.call_result_handle
+    }
+    pub(crate) fn argument(&self, index: usize) -> Option<&ArgumentValue> {
+        self.evaluated_function_arguments.get(index)
+    }
+    pub(crate) fn local(&self, handle: Handle<LocalVariable>) -> Option<&Value> {
+        self.local_variables.get(&handle)
+    }
+    pub(crate) fn local_mut(&mut self, handle: Handle<LocalVariable>) -> Option<&mut Value> {
+        self.local_variables.get_mut(&handle)
+    }
+    pub(crate) fn set_local(&mut self, handle: Handle<LocalVariable>, value: Value) {
+        self.local_variables.insert(handle, value);
+    }
+    pub(crate) fn expression(&self, handle: Handle<Expression>) -> Option<&EvaluatedExpression> {
+        self.evaluated_expressions.get(&handle)
+    }
+    pub(crate) fn set_expression(
+        &mut self,
+        handle: Handle<Expression>,
+        value: EvaluatedExpression,
+    ) {
+        self.evaluated_expressions.insert(handle, value);
+    }
+    pub(crate) fn forget_expression(&mut self, handle: Handle<Expression>) {
+        self.evaluated_expressions.remove(&handle);
+    }
+    pub(crate) fn set_control_flow(&mut self, signal: ControlFlow) {
+        self.control_flow = signal;
+    }
+    pub(crate) fn take_control_flow(&mut self) -> ControlFlow {
+        std::mem::take(&mut self.control_flow)
+    }
+}
+
+impl FrameContext {
+    pub(crate) fn new(function_index: usize, block_index: usize, statement_index: usize) -> Self {
+        Self {
+            function_index,
+            block_index,
+            statement_index,
+        }
+    }
+    pub(crate) fn function_index(self) -> usize {
+        self.function_index
+    }
+    pub(crate) fn block_index(self) -> usize {
+        self.block_index
+    }
+    pub(crate) fn statement_index(self) -> usize {
+        self.statement_index
     }
 }
