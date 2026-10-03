@@ -1,6 +1,6 @@
 use crate::{primitive::Primitive, value::Value};
 
-use super::Evaluator;
+use super::InvocationState;
 
 use naga::{Expression, Handle, MathFunction, RelationalFunction, UnaryOperator};
 
@@ -63,7 +63,7 @@ fn math_clamp(val: Value, min_val: Value, max_val: Value) -> Value {
     )
 }
 
-impl Evaluator {
+impl InvocationState {
     pub(crate) fn evaluate_math(
         &self,
         fun: MathFunction,

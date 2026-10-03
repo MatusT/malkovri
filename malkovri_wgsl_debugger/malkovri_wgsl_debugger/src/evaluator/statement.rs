@@ -12,9 +12,9 @@ use crate::{
     value::Value,
 };
 
-use super::Evaluator;
+use super::InvocationState;
 
-impl Evaluator {
+impl InvocationState {
     pub(super) fn handle_instruction(
         &mut self,
         id: StatementId,

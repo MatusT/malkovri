@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use naga::{CollectiveOperation, Expression, GatherMode, Handle, Statement, SubgroupOperation};
 
-use crate::{error::EvaluatorError, evaluator::Evaluator, primitive::Primitive, value::Value};
+use crate::{
+    error::EvaluatorError, evaluator::InvocationState, primitive::Primitive, value::Value,
+};
 
 use super::{Debugger, ThreadStatus};
 
@@ -281,7 +283,7 @@ impl Debugger {
         Ok(())
     }
 
-    fn gather_target_lane(evaluator: &Evaluator, lane: u32, mode: GatherMode) -> u32 {
+    fn gather_target_lane(evaluator: &InvocationState, lane: u32, mode: GatherMode) -> u32 {
         match mode {
             GatherMode::BroadcastFirst => lane,
             GatherMode::Broadcast(expr) | GatherMode::Shuffle(expr) => {
@@ -308,7 +310,7 @@ impl Debugger {
         }
     }
 
-    fn evaluate_u32(evaluator: &Evaluator, expr: Handle<Expression>) -> Option<u32> {
+    fn evaluate_u32(evaluator: &InvocationState, expr: Handle<Expression>) -> Option<u32> {
         match evaluator.evaluate_expression(expr) {
             Value::Primitive(Primitive::U32(value)) => Some(value),
             Value::Primitive(Primitive::I32(value)) if value >= 0 => Some(value as u32),

@@ -2,7 +2,7 @@ use naga::Statement;
 
 use crate::{
     error::EvaluatorError,
-    evaluator::Evaluator,
+    evaluator::InvocationState,
     function_state::{FrameContext, StackFrame},
     value::Value,
 };
@@ -46,7 +46,7 @@ impl Debugger {
 
     fn frame_location(
         &self,
-        evaluator: &Evaluator,
+        evaluator: &InvocationState,
         context: FrameContext,
     ) -> Option<SourceLocation> {
         let StackFrame::Function(frame) = &evaluator.stack[context.function_index] else {

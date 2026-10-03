@@ -1,9 +1,9 @@
-use super::Evaluator;
+use super::InvocationState;
 use crate::primitive::Primitive;
 use crate::value::Value;
 use naga::{Expression, Handle};
 
-impl Evaluator {
+impl InvocationState {
     pub(crate) fn evaluate_binary(
         &self,
         op: naga::BinaryOperator,

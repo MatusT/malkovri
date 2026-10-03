@@ -8,9 +8,9 @@ use crate::{
 
 use std::sync::Arc;
 
-use super::Evaluator;
+use super::InvocationState;
 
-impl Evaluator {
+impl InvocationState {
     // Core execution loop
     /// Advance past any pending control-flow signals and exhausted frames until
     /// a live statement is ready to execute (or the stack is empty).

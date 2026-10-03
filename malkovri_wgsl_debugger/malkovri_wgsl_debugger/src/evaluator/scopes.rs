@@ -8,9 +8,9 @@ use crate::{
     value::Value,
 };
 
-use super::Evaluator;
+use super::InvocationState;
 
-impl Evaluator {
+impl InvocationState {
     /// Return all global variables with their names and current values.
     pub(crate) fn global_variable_values(&self) -> Vec<(Option<String>, Value)> {
         self.global_values

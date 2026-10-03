@@ -10,7 +10,7 @@ use crate::{
 };
 
 /// Control-flow signal set on a [`FunctionFrame`] by `break`, `continue`, or `return`.
-/// [`Evaluator::step`] reads these signals and performs the appropriate stack
+/// [`InvocationState::step`] reads these signals and performs the appropriate stack
 /// manipulation before continuing execution.
 #[derive(Clone, Debug, Default)]
 pub(crate) enum ControlFlow {
@@ -59,7 +59,7 @@ pub(crate) struct FunctionFrame {
     /// calls whose result is discarded.
     pub(crate) call_result_handle: Option<Handle<Expression>>,
     /// Control-flow signal written by `break`/`continue`/`return` handlers and consumed
-    /// by [`Evaluator::next_statement`].
+    /// by [`InvocationState::next_statement`].
     pub(crate) control_flow: ControlFlow,
 }
 

@@ -11,9 +11,12 @@ use naga::{
 };
 
 use crate::{
-    entry_point_inputs::GlobalConstants,
+    entry_point_inputs::{
+        ComputeThreadInputs, FragmentThreadInputs, GlobalConstants, InvocationInputs,
+        VertexThreadInputs,
+    },
     error::EvaluatorError,
-    evaluator::{Evaluator, evaluate_global_expression},
+    evaluator::{InvocationState, evaluate_global_expression},
     program::ShaderProgram,
     value::Value,
     wgsl::WgslToModuleError,
@@ -114,7 +117,7 @@ fn thread_order(config: &WorkgroupConfig) -> Vec<[u32; 3]> {
 pub enum DebuggerError {
     #[error("WGSL error: {0}")]
     Wgsl(#[from] WgslToModuleError),
-    #[error("Evaluator error: {0}")]
+    #[error("InvocationState error: {0}")]
     Evaluator(#[from] EvaluatorError),
     #[error("Invalid WorkgroupConfig: {0}")]
     InvalidConfig(String),
@@ -213,7 +216,7 @@ pub struct DebugThread {
 /// Create with [`Debugger::new`], then call [`Debugger::step`] to advance
 /// execution and the inspection methods to read program state.
 pub struct Debugger {
-    evaluators: HashMap<[u32; 3], Evaluator>,
+    evaluators: HashMap<[u32; 3], InvocationState>,
     thread_status: HashMap<[u32; 3], ThreadStatus>,
     thread_order: Vec<[u32; 3]>,
     thread_ids: HashMap<DebugThreadId, [u32; 3]>,
@@ -313,15 +316,33 @@ impl Debugger {
 
         let mut evaluators = HashMap::new();
         for gid in &thread_order {
-            let mut evaluator = Evaluator::new(
+            let inputs = match module.entry_points[entry_point_index].stage {
+                naga::ShaderStage::Compute => InvocationInputs::Compute(ComputeThreadInputs::new(
+                    [gid[0] % wx, gid[1] % wy, gid[2] % wz],
+                    config.workgroup_size,
+                    config.workgroup_id,
+                    config.subgroup_size,
+                )),
+                naga::ShaderStage::Vertex => {
+                    InvocationInputs::Vertex(VertexThreadInputs::default())
+                }
+                naga::ShaderStage::Fragment => {
+                    InvocationInputs::Fragment(FragmentThreadInputs::default())
+                }
+                _ => {
+                    return Err(DebuggerError::InvalidConfig(
+                        "unsupported shader stage".into(),
+                    ));
+                }
+            };
+            let evaluator = InvocationState::new(
                 program.clone(),
                 entry_point_index,
                 global_constants,
                 naga_bindings.clone(),
                 shared_workgroup_globals.clone(),
-                config.clone(),
+                inputs,
             )?;
-            evaluator.set_active_thread_gid(*gid)?;
             evaluators.insert(*gid, evaluator);
         }
 
@@ -345,17 +366,20 @@ impl Debugger {
         self.program.source()
     }
 
-    fn evaluator(&self) -> &Evaluator {
+    fn evaluator(&self) -> &InvocationState {
         &self.evaluators[&self.focused_thread]
     }
 
-    fn evaluator_mut(&mut self) -> &mut Evaluator {
+    fn evaluator_mut(&mut self) -> &mut InvocationState {
         self.evaluators
             .get_mut(&self.focused_thread)
             .expect("focused thread must have an evaluator")
     }
 
-    fn evaluator_for_thread(&self, thread_id: DebugThreadId) -> Result<&Evaluator, EvaluatorError> {
+    fn evaluator_for_thread(
+        &self,
+        thread_id: DebugThreadId,
+    ) -> Result<&InvocationState, EvaluatorError> {
         let gid = self.thread_ids.get(&thread_id).ok_or_else(|| {
             EvaluatorError::InternalError(format!("unknown thread id {thread_id}"))
         })?;

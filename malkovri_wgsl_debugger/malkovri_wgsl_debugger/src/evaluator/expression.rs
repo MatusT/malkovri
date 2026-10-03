@@ -5,14 +5,14 @@ use crate::{
     value::Value,
 };
 
-use super::Evaluator;
+use super::InvocationState;
 
 use naga::{
     Expression, Handle, Literal, LocalVariable, SwizzleComponent, Type, TypeInner, UnaryOperator,
     VectorSize,
 };
 
-impl Evaluator {
+impl InvocationState {
     /// Evaluate an expression in the context of the current function frame.
     pub(crate) fn evaluate_expression(&self, expression_handle: Handle<Expression>) -> Value {
         let Ok(func_idx) = self.current_function_frame_index() else {
@@ -202,105 +202,12 @@ impl Evaluator {
         let function_argument = &function.arguments[index];
 
         if let Some(binding) = &function_argument.binding {
-            let thread = self.active_thread();
-            let gc = &self.global_constants;
-            match binding {
-                naga::ir::Binding::BuiltIn(built_in) => match built_in {
-                    // vertex — per-thread
-                    naga::ir::BuiltIn::VertexIndex => ArgumentValue::Value(
-                        Primitive::U32(thread.vertex_inputs.vertex_index).into(),
-                    ),
-                    naga::ir::BuiltIn::InstanceIndex => ArgumentValue::Value(
-                        Primitive::U32(thread.vertex_inputs.instance_index).into(),
-                    ),
-                    // vertex — global constants
-                    naga::ir::BuiltIn::BaseInstance => {
-                        ArgumentValue::Value(Primitive::U32(gc.base_instance).into())
-                    }
-                    naga::ir::BuiltIn::BaseVertex => {
-                        ArgumentValue::Value(Primitive::I32(gc.base_vertex).into())
-                    }
-                    naga::ir::BuiltIn::ClipDistance => ArgumentValue::Value(Value::Array(
-                        gc.clip_distance
-                            .iter()
-                            .map(|&v| Primitive::F32(v).into())
-                            .collect(),
-                    )),
-                    naga::ir::BuiltIn::CullDistance => ArgumentValue::Value(Value::Array(
-                        gc.cull_distance
-                            .iter()
-                            .map(|&v| Primitive::F32(v).into())
-                            .collect(),
-                    )),
-                    naga::ir::BuiltIn::PointSize => {
-                        ArgumentValue::Value(Primitive::F32(gc.point_size).into())
-                    }
-                    naga::ir::BuiltIn::DrawID => {
-                        ArgumentValue::Value(Primitive::U32(gc.draw_id).into())
-                    }
-                    // fragment — per-thread
-                    naga::ir::BuiltIn::Position { .. } => ArgumentValue::Value(
-                        Primitive::F32x4(thread.fragment_inputs.position).into(),
-                    ),
-                    naga::ir::BuiltIn::FrontFacing => ArgumentValue::Value(
-                        Primitive::U32(thread.fragment_inputs.front_facing as u32).into(),
-                    ),
-                    naga::ir::BuiltIn::SampleIndex => ArgumentValue::Value(
-                        Primitive::U32(thread.fragment_inputs.sample_index).into(),
-                    ),
-                    naga::ir::BuiltIn::SampleMask => ArgumentValue::Value(
-                        Primitive::U32(thread.fragment_inputs.sample_mask).into(),
-                    ),
-                    naga::ir::BuiltIn::PrimitiveIndex => ArgumentValue::Value(
-                        Primitive::U32(thread.fragment_inputs.primitive_index).into(),
-                    ),
-                    // fragment — global constants
-                    naga::ir::BuiltIn::ViewIndex => {
-                        ArgumentValue::Value(Primitive::I32(gc.view_index).into())
-                    }
-                    naga::ir::BuiltIn::FragDepth => {
-                        ArgumentValue::Value(Primitive::F32(gc.frag_depth).into())
-                    }
-                    naga::ir::BuiltIn::PointCoord => {
-                        ArgumentValue::Value(Primitive::F32x2(gc.point_coord).into())
-                    }
-                    // compute — per-thread
-                    naga::ir::BuiltIn::GlobalInvocationId => ArgumentValue::Value(
-                        Primitive::U32x3(thread.compute_inputs.global_invocation_id).into(),
-                    ),
-                    naga::ir::BuiltIn::LocalInvocationId => ArgumentValue::Value(
-                        Primitive::U32x3(thread.compute_inputs.local_invocation_id).into(),
-                    ),
-                    naga::ir::BuiltIn::LocalInvocationIndex => ArgumentValue::Value(
-                        Primitive::U32(thread.compute_inputs.local_invocation_index).into(),
-                    ),
-                    naga::ir::BuiltIn::WorkGroupId => ArgumentValue::Value(
-                        Primitive::U32x3(thread.compute_inputs.workgroup_id).into(),
-                    ),
-                    // compute — global constants
-                    naga::ir::BuiltIn::WorkGroupSize => {
-                        ArgumentValue::Value(Primitive::U32x3(gc.workgroup_size).into())
-                    }
-                    naga::ir::BuiltIn::NumWorkGroups => {
-                        ArgumentValue::Value(Primitive::U32x3(gc.num_workgroups).into())
-                    }
-                    // subgroup — per-thread
-                    naga::ir::BuiltIn::SubgroupId => ArgumentValue::Value(
-                        Primitive::U32(thread.compute_inputs.subgroup_id).into(),
-                    ),
-                    naga::ir::BuiltIn::SubgroupInvocationId => ArgumentValue::Value(
-                        Primitive::U32(thread.compute_inputs.subgroup_invocation_id).into(),
-                    ),
-                    // subgroup — global constants
-                    naga::ir::BuiltIn::NumSubgroups => {
-                        ArgumentValue::Value(Primitive::U32(gc.num_subgroups).into())
-                    }
-                    naga::ir::BuiltIn::SubgroupSize => {
-                        ArgumentValue::Value(Primitive::U32(gc.subgroup_size).into())
-                    }
-                },
-                naga::ir::Binding::Location { .. } => ArgumentValue::Value(Value::Uninitialized),
-            }
+            ArgumentValue::Value(match binding {
+                naga::Binding::BuiltIn(builtin) => {
+                    self.inputs.builtin(*builtin, &self.global_constants)
+                }
+                naga::Binding::Location { .. } => Value::Uninitialized,
+            })
         } else {
             frame
                 .evaluated_function_arguments
@@ -542,7 +449,7 @@ impl Evaluator {
     }
 }
 
-/// Evaluate a global expression given only a module reference (no `Evaluator` instance needed).
+/// Evaluate a global expression given only a module reference (no `InvocationState` instance needed).
 pub(crate) fn evaluate_global_expression(
     module: &naga::Module,
     expr_handle: Handle<Expression>,

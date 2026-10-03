@@ -7,9 +7,9 @@ use crate::{
     value::Value,
 };
 
-use super::{Evaluator, GlobalValue, evaluate_global_expression};
+use super::{GlobalValue, InvocationState, evaluate_global_expression};
 
-impl Evaluator {
+impl InvocationState {
     pub(crate) fn read_place(&self, place: &Place) -> Value {
         let root_value = match &place.root {
             PlaceRoot::Local {

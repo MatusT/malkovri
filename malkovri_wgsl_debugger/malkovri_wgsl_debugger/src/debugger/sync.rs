@@ -143,16 +143,16 @@ impl Debugger {
 
     fn subgroup_id(&self, gid: [u32; 3]) -> u32 {
         self.evaluators[&gid]
-            .active_thread()
-            .compute_inputs
-            .subgroup_id
+            .inputs
+            .compute()
+            .map_or(0, |inputs| inputs.subgroup_id)
     }
 
     pub(super) fn subgroup_lane(&self, gid: [u32; 3]) -> u32 {
         self.evaluators[&gid]
-            .active_thread()
-            .compute_inputs
-            .subgroup_invocation_id
+            .inputs
+            .compute()
+            .map_or(0, |inputs| inputs.subgroup_invocation_id)
     }
 
     fn release_parked_group(

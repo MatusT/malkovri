@@ -7,7 +7,6 @@ mod function_state;
 mod place;
 mod primitive;
 mod program;
-mod thread;
 mod value;
 mod wgsl;
 
