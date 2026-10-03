@@ -4,15 +4,22 @@ use crate::{Primitive, Value};
 /// thread's position within the workgroup.
 #[derive(Clone, Debug)]
 pub(crate) struct ComputeThreadInputs {
-    pub local_invocation_id: [u32; 3],
-    pub local_invocation_index: u32,
-    pub global_invocation_id: [u32; 3],
-    pub workgroup_id: [u32; 3],
-    pub subgroup_id: u32,
-    pub subgroup_invocation_id: u32,
+    local_invocation_id: [u32; 3],
+    local_invocation_index: u32,
+    global_invocation_id: [u32; 3],
+    workgroup_id: [u32; 3],
+    subgroup_id: u32,
+    subgroup_invocation_id: u32,
 }
 
 impl ComputeThreadInputs {
+    pub(crate) fn subgroup_id(&self) -> u32 {
+        self.subgroup_id
+    }
+    pub(crate) fn subgroup_invocation_id(&self) -> u32 {
+        self.subgroup_invocation_id
+    }
+
     /// Derive all compute built-in IDs from minimal inputs.
     pub(crate) fn new(
         local_invocation_id: [u32; 3],
@@ -42,19 +49,19 @@ impl ComputeThreadInputs {
 /// vertex/instance invocation index.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct VertexThreadInputs {
-    pub vertex_index: u32,
-    pub instance_index: u32,
+    vertex_index: u32,
+    instance_index: u32,
 }
 
 /// Per-thread fragment built-in inputs, computed by the evaluator from the
 /// fragment's position in the render target.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FragmentThreadInputs {
-    pub position: [f32; 4],
-    pub front_facing: bool,
-    pub sample_index: u32,
-    pub sample_mask: u32,
-    pub primitive_index: u32,
+    position: [f32; 4],
+    front_facing: bool,
+    sample_index: u32,
+    sample_mask: u32,
+    primitive_index: u32,
 }
 
 /// Constant globals that are the same across all threads, set by the user.

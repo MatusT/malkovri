@@ -51,12 +51,12 @@ impl GlobalValue {
 }
 
 pub(crate) struct InvocationState {
-    pub(crate) program: Arc<ShaderProgram>,
-    pub(crate) global_constants: GlobalConstants,
-    pub(crate) global_values: HashMap<naga::Handle<GlobalVariable>, GlobalValue>,
-    pub(crate) entry_point_output: Option<Value>,
-    pub(crate) stack: Vec<StackFrame>,
-    pub(crate) inputs: InvocationInputs,
+    program: Arc<ShaderProgram>,
+    global_constants: GlobalConstants,
+    global_values: HashMap<naga::Handle<GlobalVariable>, GlobalValue>,
+    entry_point_output: Option<Value>,
+    stack: Vec<StackFrame>,
+    inputs: InvocationInputs,
 }
 
 impl InvocationState {
@@ -121,6 +121,26 @@ impl InvocationState {
         };
 
         Ok(evaluator)
+    }
+
+    pub(crate) fn entry_point_output(&self) -> Option<&Value> {
+        self.entry_point_output.as_ref()
+    }
+
+    pub(crate) fn stack(&self) -> &[StackFrame] {
+        &self.stack
+    }
+
+    pub(crate) fn subgroup_id(&self) -> u32 {
+        self.inputs
+            .compute()
+            .map_or(0, |inputs| inputs.subgroup_id())
+    }
+
+    pub(crate) fn subgroup_lane(&self) -> u32 {
+        self.inputs
+            .compute()
+            .map_or(0, |inputs| inputs.subgroup_invocation_id())
     }
 
     /// Resolve a [`FunctionId`] to the actual `naga::Function` in the module.

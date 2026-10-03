@@ -2,11 +2,11 @@ use naga::Barrier;
 
 use crate::error::EvaluatorError;
 
-use super::{DebugThreadId, Debugger, ParkReason, ParkScope, ThreadStatus};
+use super::{Debugger, InvocationId, ParkReason, ParkScope, ThreadStatus};
 
 struct ReadyGroup {
     reason: ParkReason,
-    members: Vec<[u32; 3]>,
+    members: Vec<InvocationId>,
 }
 
 impl Debugger {
@@ -20,29 +20,26 @@ impl Debugger {
     }
 
     fn find_ready_parked_group(&self) -> Result<Option<ReadyGroup>, EvaluatorError> {
-        for gid in &self.thread_order {
-            let Some(ThreadStatus::Parked(reason)) = self.thread_status.get(gid) else {
+        for gid in self.group.ids() {
+            let ThreadStatus::Parked(reason) = self.group.get(gid).status() else {
                 continue;
             };
-            let members = self.live_members_for_reason(*gid, reason);
+            let members = self.live_members_for_reason(gid, reason);
             if members.is_empty() {
                 continue;
             }
 
-            let all_parked = members.iter().all(|member| {
-                matches!(
-                    self.thread_status.get(member),
-                    Some(ThreadStatus::Parked(_))
-                )
-            });
+            let all_parked = members
+                .iter()
+                .all(|member| matches!(self.group.get(*member).status(), ThreadStatus::Parked(_)));
             if !all_parked {
                 continue;
             }
 
             let all_compatible = members.iter().all(|member| {
                 matches!(
-                    self.thread_status.get(member),
-                    Some(ThreadStatus::Parked(member_reason)) if member_reason == reason
+                    self.group.get(*member).status(),
+                    ThreadStatus::Parked(member_reason) if member_reason == reason
                 )
             });
 
@@ -61,10 +58,9 @@ impl Debugger {
 
     pub(super) fn detect_deadlock(&self) -> Result<(), EvaluatorError> {
         let live: Vec<_> = self
-            .thread_order
-            .iter()
-            .copied()
-            .filter(|gid| !matches!(self.thread_status.get(gid), Some(ThreadStatus::Finished)))
+            .group
+            .ids()
+            .filter(|gid| !matches!(self.group.get(*gid).status(), ThreadStatus::Finished))
             .collect();
 
         if live.is_empty() {
@@ -73,7 +69,7 @@ impl Debugger {
 
         if live
             .iter()
-            .all(|gid| matches!(self.thread_status.get(gid), Some(ThreadStatus::Parked(_))))
+            .all(|gid| matches!(self.group.get(*gid).status(), ThreadStatus::Parked(_)))
         {
             return Err(self.synchronization_error("deadlocked synchronization", &live));
         }
@@ -81,12 +77,12 @@ impl Debugger {
         Ok(())
     }
 
-    fn synchronization_error(&self, label: &str, gids: &[[u32; 3]]) -> EvaluatorError {
+    fn synchronization_error(&self, label: &str, gids: &[InvocationId]) -> EvaluatorError {
         let threads = gids
             .iter()
             .map(|gid| {
-                let thread_id = self.thread_id_for_gid(*gid);
-                let status = self.thread_status.get(gid);
+                let thread_id = gid.thread_id();
+                let status = self.group.get(*gid).status();
                 format!("{thread_id}:{gid:?}={status:?}")
             })
             .collect::<Vec<_>>()
@@ -94,24 +90,14 @@ impl Debugger {
         EvaluatorError::SynchronizationError(format!("{label}: {threads}"))
     }
 
-    pub(super) fn thread_id_for_gid(&self, gid: [u32; 3]) -> DebugThreadId {
-        self.thread_order
-            .iter()
-            .position(|candidate| *candidate == gid)
-            .map(super::thread_id_for_index)
-            .unwrap_or(1)
-    }
-
-    fn live_members_for_reason(&self, gid: [u32; 3], reason: &ParkReason) -> Vec<[u32; 3]> {
+    fn live_members_for_reason(&self, gid: InvocationId, reason: &ParkReason) -> Vec<InvocationId> {
         self.members_for_scope(self.scope_for_reason(gid, reason))
             .into_iter()
-            .filter(|member| {
-                !matches!(self.thread_status.get(member), Some(ThreadStatus::Finished))
-            })
+            .filter(|member| !matches!(self.group.get(*member).status(), ThreadStatus::Finished))
             .collect()
     }
 
-    fn scope_for_reason(&self, gid: [u32; 3], reason: &ParkReason) -> ParkScope {
+    fn scope_for_reason(&self, gid: InvocationId, reason: &ParkReason) -> ParkScope {
         match reason {
             ParkReason::Barrier(barrier)
                 if barrier.contains(Barrier::SUB_GROUP)
@@ -129,36 +115,29 @@ impl Debugger {
         }
     }
 
-    fn members_for_scope(&self, scope: ParkScope) -> Vec<[u32; 3]> {
+    fn members_for_scope(&self, scope: ParkScope) -> Vec<InvocationId> {
         match scope {
-            ParkScope::Workgroup => self.thread_order.clone(),
+            ParkScope::Workgroup => self.group.ids().collect(),
             ParkScope::Subgroup(subgroup_id) => self
-                .thread_order
-                .iter()
-                .copied()
+                .group
+                .ids()
                 .filter(|gid| self.subgroup_id(*gid) == subgroup_id)
                 .collect(),
         }
     }
 
-    fn subgroup_id(&self, gid: [u32; 3]) -> u32 {
-        self.evaluators[&gid]
-            .inputs
-            .compute()
-            .map_or(0, |inputs| inputs.subgroup_id)
+    fn subgroup_id(&self, id: InvocationId) -> u32 {
+        self.group.get(id).state().subgroup_id()
     }
 
-    pub(super) fn subgroup_lane(&self, gid: [u32; 3]) -> u32 {
-        self.evaluators[&gid]
-            .inputs
-            .compute()
-            .map_or(0, |inputs| inputs.subgroup_invocation_id)
+    pub(super) fn subgroup_lane(&self, id: InvocationId) -> u32 {
+        self.group.get(id).state().subgroup_lane()
     }
 
     fn release_parked_group(
         &mut self,
         reason: ParkReason,
-        members: Vec<[u32; 3]>,
+        members: Vec<InvocationId>,
     ) -> Result<(), EvaluatorError> {
         match reason {
             ParkReason::Barrier(_) => self.release_barrier(members),
@@ -177,22 +156,17 @@ impl Debugger {
         }
     }
 
-    fn release_barrier(&mut self, members: Vec<[u32; 3]>) -> Result<(), EvaluatorError> {
+    fn release_barrier(&mut self, members: Vec<InvocationId>) -> Result<(), EvaluatorError> {
         for gid in members {
             let next = {
-                let evaluator = self.evaluators.get_mut(&gid).ok_or_else(|| {
-                    EvaluatorError::InternalError(format!("missing evaluator for {gid:?}"))
-                })?;
+                let evaluator = self.group.get_mut(gid).state_mut();
                 evaluator.consume_current_statement_and_skip_emits()?
             };
-            self.thread_status.insert(
-                gid,
-                if next.is_some() {
-                    ThreadStatus::Running
-                } else {
-                    ThreadStatus::Finished
-                },
-            );
+            self.group.get_mut(gid).set_status(if next.is_some() {
+                ThreadStatus::Running
+            } else {
+                ThreadStatus::Finished
+            });
         }
         Ok(())
     }

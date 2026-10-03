@@ -6,25 +6,23 @@ use crate::{
     error::EvaluatorError, evaluator::InvocationState, primitive::Primitive, value::Value,
 };
 
-use super::{Debugger, ThreadStatus};
+use super::{Debugger, InvocationId, ThreadStatus};
 
 impl Debugger {
     pub(super) fn release_workgroup_uniform_load(
         &mut self,
-        members: Vec<[u32; 3]>,
+        members: Vec<InvocationId>,
         result: Handle<Expression>,
     ) -> Result<(), EvaluatorError> {
         let mut agreed_place = None;
         let mut loaded_value = None;
 
         for gid in &members {
-            let evaluator = self.evaluators.get_mut(gid).ok_or_else(|| {
-                EvaluatorError::InternalError(format!("missing evaluator for {gid:?}"))
-            })?;
+            let evaluator = self.group.get_mut(*gid).state_mut();
             let Some(next) = evaluator.current_statement()? else {
                 return Err(EvaluatorError::SynchronizationError(format!(
                     "thread {} finished while parked at workGroupUniformLoad",
-                    self.thread_id_for_gid(*gid)
+                    gid.thread_id()
                 )));
             };
             let Statement::WorkGroupUniformLoad {
@@ -36,13 +34,13 @@ impl Debugger {
             else {
                 return Err(EvaluatorError::SynchronizationError(format!(
                     "thread {} is not parked at workGroupUniformLoad",
-                    self.thread_id_for_gid(*gid)
+                    gid.thread_id()
                 )));
             };
             if found != result {
                 return Err(EvaluatorError::SynchronizationError(format!(
                     "thread {} reached a different workGroupUniformLoad site",
-                    self.thread_id_for_gid(*gid)
+                    gid.thread_id()
                 )));
             }
 
@@ -51,7 +49,7 @@ impl Debugger {
                 if expected != &place {
                     return Err(EvaluatorError::SynchronizationError(format!(
                         "workGroupUniformLoad pointer mismatch at thread {}",
-                        self.thread_id_for_gid(*gid)
+                        gid.thread_id()
                     )));
                 }
             } else {
@@ -66,20 +64,18 @@ impl Debugger {
 
     pub(super) fn release_subgroup_ballot(
         &mut self,
-        members: Vec<[u32; 3]>,
+        members: Vec<InvocationId>,
         result: Handle<Expression>,
     ) -> Result<(), EvaluatorError> {
         let mut ballot = [0u32; 4];
         for gid in &members {
             let lane = self.subgroup_lane(*gid);
             let predicate = {
-                let evaluator = self.evaluators.get_mut(gid).ok_or_else(|| {
-                    EvaluatorError::InternalError(format!("missing evaluator for {gid:?}"))
-                })?;
+                let evaluator = self.group.get_mut(*gid).state_mut();
                 let Some(next) = evaluator.current_statement()? else {
                     return Err(EvaluatorError::SynchronizationError(format!(
                         "thread {} finished while parked at subgroupBallot",
-                        self.thread_id_for_gid(*gid)
+                        gid.thread_id()
                     )));
                 };
                 let Statement::SubgroupBallot {
@@ -91,13 +87,13 @@ impl Debugger {
                 else {
                     return Err(EvaluatorError::SynchronizationError(format!(
                         "thread {} is not parked at subgroupBallot",
-                        self.thread_id_for_gid(*gid)
+                        gid.thread_id()
                     )));
                 };
                 if found != result {
                     return Err(EvaluatorError::SynchronizationError(format!(
                         "thread {} reached a different subgroupBallot site",
-                        self.thread_id_for_gid(*gid)
+                        gid.thread_id()
                     )));
                 }
                 predicate
@@ -118,7 +114,7 @@ impl Debugger {
 
     pub(super) fn release_subgroup_collective(
         &mut self,
-        mut members: Vec<[u32; 3]>,
+        mut members: Vec<InvocationId>,
         op: SubgroupOperation,
         collective_op: CollectiveOperation,
         result: Handle<Expression>,
@@ -127,13 +123,11 @@ impl Debugger {
 
         let mut lane_values = Vec::new();
         for gid in &members {
-            let evaluator = self.evaluators.get_mut(gid).ok_or_else(|| {
-                EvaluatorError::InternalError(format!("missing evaluator for {gid:?}"))
-            })?;
+            let evaluator = self.group.get_mut(*gid).state_mut();
             let Some(next) = evaluator.current_statement()? else {
                 return Err(EvaluatorError::SynchronizationError(format!(
                     "thread {} finished while parked at subgroup collective",
-                    self.thread_id_for_gid(*gid)
+                    gid.thread_id()
                 )));
             };
             let Statement::SubgroupCollectiveOperation {
@@ -147,13 +141,13 @@ impl Debugger {
             else {
                 return Err(EvaluatorError::SynchronizationError(format!(
                     "thread {} is not parked at subgroup collective",
-                    self.thread_id_for_gid(*gid)
+                    gid.thread_id()
                 )));
             };
             if found_op != op || found_collective_op != collective_op || found_result != result {
                 return Err(EvaluatorError::SynchronizationError(format!(
                     "thread {} reached a different subgroup collective site",
-                    self.thread_id_for_gid(*gid)
+                    gid.thread_id()
                 )));
             }
             lane_values.push((*gid, evaluator.evaluate_expression(argument)));
@@ -183,7 +177,7 @@ impl Debugger {
 
     pub(super) fn release_subgroup_gather(
         &mut self,
-        mut members: Vec<[u32; 3]>,
+        mut members: Vec<InvocationId>,
         mode: GatherMode,
         result: Handle<Expression>,
     ) -> Result<(), EvaluatorError> {
@@ -193,13 +187,11 @@ impl Debugger {
         let mut target_lanes = HashMap::new();
         for gid in &members {
             let lane = self.subgroup_lane(*gid);
-            let evaluator = self.evaluators.get_mut(gid).ok_or_else(|| {
-                EvaluatorError::InternalError(format!("missing evaluator for {gid:?}"))
-            })?;
+            let evaluator = self.group.get_mut(*gid).state_mut();
             let Some(next) = evaluator.current_statement()? else {
                 return Err(EvaluatorError::SynchronizationError(format!(
                     "thread {} finished while parked at subgroup gather",
-                    self.thread_id_for_gid(*gid)
+                    gid.thread_id()
                 )));
             };
             let Statement::SubgroupGather {
@@ -212,13 +204,13 @@ impl Debugger {
             else {
                 return Err(EvaluatorError::SynchronizationError(format!(
                     "thread {} is not parked at subgroup gather",
-                    self.thread_id_for_gid(*gid)
+                    gid.thread_id()
                 )));
             };
             if found_mode != mode || found_result != result {
                 return Err(EvaluatorError::SynchronizationError(format!(
                     "thread {} reached a different subgroup gather site",
-                    self.thread_id_for_gid(*gid)
+                    gid.thread_id()
                 )));
             }
             lane_values.insert(lane, evaluator.evaluate_expression(argument));
@@ -247,7 +239,7 @@ impl Debugger {
 
     fn inject_statement_result_and_consume(
         &mut self,
-        members: Vec<[u32; 3]>,
+        members: Vec<InvocationId>,
         result: Handle<Expression>,
         value: Value,
     ) -> Result<(), EvaluatorError> {
@@ -260,25 +252,20 @@ impl Debugger {
 
     fn inject_many_statement_results_and_consume(
         &mut self,
-        results: Vec<([u32; 3], Value)>,
+        results: Vec<(InvocationId, Value)>,
         result: Handle<Expression>,
     ) -> Result<(), EvaluatorError> {
         for (gid, value) in results {
             let next = {
-                let evaluator = self.evaluators.get_mut(&gid).ok_or_else(|| {
-                    EvaluatorError::InternalError(format!("missing evaluator for {gid:?}"))
-                })?;
+                let evaluator = self.group.get_mut(gid).state_mut();
                 evaluator.set_current_expression_value(result, value)?;
                 evaluator.consume_current_statement_and_skip_emits()?
             };
-            self.thread_status.insert(
-                gid,
-                if next.is_some() {
-                    ThreadStatus::Running
-                } else {
-                    ThreadStatus::Finished
-                },
-            );
+            self.group.get_mut(gid).set_status(if next.is_some() {
+                ThreadStatus::Running
+            } else {
+                ThreadStatus::Finished
+            });
         }
         Ok(())
     }
@@ -351,9 +338,9 @@ impl Debugger {
 
     fn scan_subgroup_values(
         op: SubgroupOperation,
-        lane_values: &[([u32; 3], Value)],
+        lane_values: &[(InvocationId, Value)],
         inclusive: bool,
-    ) -> Result<Vec<([u32; 3], Value)>, EvaluatorError> {
+    ) -> Result<Vec<(InvocationId, Value)>, EvaluatorError> {
         let Some((_, first_value)) = lane_values.first() else {
             return Ok(Vec::new());
         };

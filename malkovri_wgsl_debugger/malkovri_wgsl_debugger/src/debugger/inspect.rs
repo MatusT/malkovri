@@ -8,7 +8,8 @@ use crate::{
 };
 
 use super::{
-    DebugFrameId, DebugThreadId, Debugger, SourceLocation, StackFrameInfo, ThreadStatus, Variable,
+    DebugFrameId, DebugThreadId, Debugger, InvocationId, SourceLocation, StackFrameInfo,
+    ThreadStatus, Variable,
 };
 
 impl Debugger {
@@ -17,27 +18,26 @@ impl Debugger {
     }
 
     pub fn thread_current_location(&self, thread_id: DebugThreadId) -> Option<SourceLocation> {
-        let gid = *self.thread_ids.get(&thread_id)?;
-        self.location_for_gid(gid)
+        let id = self.group.resolve(thread_id).ok()?;
+        self.location_for_gid(id)
     }
 
     pub fn all_thread_locations(&self) -> Vec<(DebugThreadId, SourceLocation)> {
-        self.thread_order
-            .iter()
-            .enumerate()
-            .filter_map(|(index, gid)| {
-                self.location_for_gid(*gid)
-                    .map(|location| (super::thread_id_for_index(index), location))
+        self.group
+            .ids()
+            .filter_map(|id| {
+                self.location_for_gid(id)
+                    .map(|location| (id.thread_id(), location))
             })
             .collect()
     }
 
-    fn location_for_gid(&self, gid: [u32; 3]) -> Option<SourceLocation> {
-        if matches!(self.thread_status.get(&gid), Some(ThreadStatus::Finished)) {
+    fn location_for_gid(&self, id: InvocationId) -> Option<SourceLocation> {
+        let invocation = self.group.get(id);
+        if matches!(invocation.status(), ThreadStatus::Finished) {
             return None;
         }
-
-        let evaluator = self.evaluators.get(&gid)?;
+        let evaluator = invocation.state();
         let context = evaluator
             .frame_context(evaluator.current_function_frame_index().ok()?)
             .ok()?;
@@ -49,14 +49,14 @@ impl Debugger {
         evaluator: &InvocationState,
         context: FrameContext,
     ) -> Option<SourceLocation> {
-        let StackFrame::Function(frame) = &evaluator.stack[context.function_index] else {
+        let StackFrame::Function(frame) = &evaluator.stack()[context.function_index] else {
             return None;
         };
         let function = evaluator.resolve_function(&frame.function_id);
         let function_name = function.name.clone();
         let (current_statement, span) = self
             .program
-            .block(evaluator.stack[context.block_index].block())
+            .block(evaluator.stack()[context.block_index].block())
             .span_iter()
             .nth(context.statement_index)?;
 
@@ -96,7 +96,7 @@ impl Debugger {
     ) -> Result<Vec<StackFrameInfo>, EvaluatorError> {
         let evaluator = self.evaluator_for_thread(thread_id)?;
         evaluator
-            .stack
+            .stack()
             .iter()
             .enumerate()
             .rev()
@@ -133,7 +133,7 @@ impl Debugger {
     ) -> Result<Vec<Variable>, EvaluatorError> {
         let evaluator = self.evaluator_for_thread(thread_id)?;
         let context = evaluator.frame_context(frame_id.0)?;
-        let StackFrame::Function(frame) = &evaluator.stack[context.function_index] else {
+        let StackFrame::Function(frame) = &evaluator.stack()[context.function_index] else {
             unreachable!()
         };
         let function = evaluator.resolve_function(&frame.function_id);
@@ -201,6 +201,6 @@ impl Debugger {
     }
 
     pub fn entry_point_output(&self) -> Option<Value> {
-        self.evaluator().entry_point_output.clone()
+        self.evaluator().entry_point_output().cloned()
     }
 }

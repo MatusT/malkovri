@@ -2,7 +2,7 @@ use naga::Statement;
 
 use crate::error::EvaluatorError;
 
-use super::{DebugThreadId, Debugger, ParkReason, StepResult, ThreadStatus};
+use super::{DebugThreadId, Debugger, InvocationId, ParkReason, StepResult, ThreadStatus};
 
 impl Debugger {
     pub fn step(&mut self) -> Result<StepResult, EvaluatorError> {
@@ -17,14 +17,13 @@ impl Debugger {
     pub fn step_all(&mut self) -> Result<StepResult, EvaluatorError> {
         let focused_thread = self.focused_thread;
         let runnable_threads = self
-            .thread_order
-            .iter()
-            .copied()
-            .filter(|gid| matches!(self.thread_status.get(gid), Some(ThreadStatus::Running)))
+            .group
+            .ids()
+            .filter(|&id| matches!(self.group.get(id).status(), ThreadStatus::Running))
             .collect::<Vec<_>>();
 
         for gid in runnable_threads {
-            if !matches!(self.thread_status.get(&gid), Some(ThreadStatus::Running)) {
+            if !matches!(self.group.get(gid).status(), ThreadStatus::Running) {
                 continue;
             }
             self.focused_thread = gid;
@@ -38,11 +37,11 @@ impl Debugger {
         Ok(self.session_step_result())
     }
 
-    fn step_gid(&mut self, gid: [u32; 3]) -> Result<StepResult, EvaluatorError> {
-        if matches!(self.thread_status.get(&gid), Some(ThreadStatus::Finished)) {
+    fn step_gid(&mut self, gid: InvocationId) -> Result<StepResult, EvaluatorError> {
+        if matches!(self.group.get(gid).status(), ThreadStatus::Finished) {
             return Ok(self.session_step_result());
         }
-        if matches!(self.thread_status.get(&gid), Some(ThreadStatus::Parked(_))) {
+        if matches!(self.group.get(gid).status(), ThreadStatus::Parked(_)) {
             self.release_ready_parked_threads()?;
             self.detect_deadlock()?;
             return Ok(self.session_step_result());
@@ -52,7 +51,7 @@ impl Debugger {
 
         loop {
             let Some(next) = self.evaluator_mut().current_statement()? else {
-                self.thread_status.insert(gid, ThreadStatus::Finished);
+                self.group.get_mut(gid).set_status(ThreadStatus::Finished);
                 self.release_ready_parked_threads()?;
                 self.detect_deadlock()?;
                 return Ok(self.session_step_result());
@@ -64,7 +63,9 @@ impl Debugger {
                 .leaf()
                 .and_then(Self::park_reason_for_statement)
             {
-                self.thread_status.insert(gid, ThreadStatus::Parked(reason));
+                self.group
+                    .get_mut(gid)
+                    .set_status(ThreadStatus::Parked(reason));
                 self.release_ready_parked_threads()?;
                 self.detect_deadlock()?;
                 return Ok(self.session_step_result());
@@ -72,7 +73,7 @@ impl Debugger {
 
             match self.evaluator_mut().step()? {
                 None => {
-                    self.thread_status.insert(gid, ThreadStatus::Finished);
+                    self.group.get_mut(gid).set_status(ThreadStatus::Finished);
                     self.release_ready_parked_threads()?;
                     self.detect_deadlock()?;
                     return Ok(self.session_step_result());
@@ -85,9 +86,9 @@ impl Debugger {
 
     fn session_step_result(&self) -> StepResult {
         if self
-            .thread_order
-            .iter()
-            .all(|gid| matches!(self.thread_status.get(gid), Some(ThreadStatus::Finished)))
+            .group
+            .ids()
+            .all(|id| matches!(self.group.get(id).status(), ThreadStatus::Finished))
         {
             StepResult::Finished
         } else {

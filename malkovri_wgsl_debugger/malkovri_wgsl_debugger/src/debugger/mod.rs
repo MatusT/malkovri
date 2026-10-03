@@ -1,6 +1,9 @@
 use std::sync::Arc;
 mod collectives;
+mod group;
 mod inspect;
+
+use group::{ExecutionGroup, Invocation, InvocationId};
 mod scheduler;
 mod sync;
 
@@ -216,16 +219,9 @@ pub struct DebugThread {
 /// Create with [`ShaderProgram::create_debugger`], then call [`Debugger::step`] to advance
 /// execution and the inspection methods to read program state.
 pub struct Debugger {
-    evaluators: HashMap<[u32; 3], InvocationState>,
-    thread_status: HashMap<[u32; 3], ThreadStatus>,
-    thread_order: Vec<[u32; 3]>,
-    thread_ids: HashMap<DebugThreadId, [u32; 3]>,
-    focused_thread: [u32; 3],
+    group: ExecutionGroup,
+    focused_thread: InvocationId,
     program: Arc<ShaderProgram>,
-}
-
-fn thread_id_for_index(index: usize) -> DebugThreadId {
-    index as DebugThreadId + 1
 }
 
 impl Debugger {
@@ -282,16 +278,7 @@ impl Debugger {
         global_constants.num_subgroups = total_threads.div_ceil(config.subgroup_size);
 
         let thread_order = thread_order(&config);
-        let focused_thread = thread_order.first().copied().ok_or_else(|| {
-            DebuggerError::InvalidConfig("workgroup must contain at least one thread".into())
-        })?;
-        let thread_ids = thread_order
-            .iter()
-            .enumerate()
-            .map(|(index, gid)| (thread_id_for_index(index), *gid))
-            .collect();
-
-        let mut evaluators = HashMap::new();
+        let mut invocations = Vec::with_capacity(thread_order.len());
         for gid in &thread_order {
             let inputs = match module.entry_points[entry_point_index].stage {
                 naga::ShaderStage::Compute => InvocationInputs::Compute(ComputeThreadInputs::new(
@@ -320,19 +307,13 @@ impl Debugger {
                 shared_workgroup_globals.clone(),
                 inputs,
             )?;
-            evaluators.insert(*gid, evaluator);
+            invocations.push(Invocation::new(*gid, evaluator));
         }
 
-        let thread_status = thread_order
-            .iter()
-            .map(|gid| (*gid, ThreadStatus::Running))
-            .collect();
-
+        let group = ExecutionGroup::new(invocations);
+        let focused_thread = group.resolve(1)?;
         Ok(Self {
-            evaluators,
-            thread_status,
-            thread_order,
-            thread_ids,
+            group,
             focused_thread,
             program,
         })
@@ -344,61 +325,50 @@ impl Debugger {
     }
 
     fn evaluator(&self) -> &InvocationState {
-        &self.evaluators[&self.focused_thread]
+        self.group.get(self.focused_thread).state()
     }
 
     fn evaluator_mut(&mut self) -> &mut InvocationState {
-        self.evaluators
-            .get_mut(&self.focused_thread)
-            .expect("focused thread must have an evaluator")
+        self.group.get_mut(self.focused_thread).state_mut()
     }
 
     fn evaluator_for_thread(
         &self,
         thread_id: DebugThreadId,
     ) -> Result<&InvocationState, EvaluatorError> {
-        let gid = self.thread_ids.get(&thread_id).ok_or_else(|| {
-            EvaluatorError::InternalError(format!("unknown thread id {thread_id}"))
-        })?;
-        Ok(&self.evaluators[gid])
+        Ok(self.group.get(self.group.resolve(thread_id)?).state())
     }
 
     pub fn thread_state(&self, thread_id: DebugThreadId) -> Result<ThreadState, EvaluatorError> {
-        let gid = self.thread_ids.get(&thread_id).ok_or_else(|| {
-            EvaluatorError::InternalError(format!("unknown thread id {thread_id}"))
-        })?;
-        Ok(match self.thread_status[gid] {
-            ThreadStatus::Running => ThreadState::Running,
-            ThreadStatus::Parked(_) => ThreadState::Waiting,
-            ThreadStatus::Finished => ThreadState::Finished,
-        })
+        Ok(
+            match self.group.get(self.group.resolve(thread_id)?).status() {
+                ThreadStatus::Running => ThreadState::Running,
+                ThreadStatus::Parked(_) => ThreadState::Waiting,
+                ThreadStatus::Finished => ThreadState::Finished,
+            },
+        )
     }
 
     pub fn threads(&self) -> Vec<DebugThread> {
-        self.thread_order
-            .iter()
-            .enumerate()
-            .map(|(index, gid)| DebugThread {
-                id: thread_id_for_index(index),
-                global_invocation_id: *gid,
-                name: format!("[{}, {}, {}]", gid[0], gid[1], gid[2]),
+        self.group
+            .ids()
+            .map(|id| {
+                let global_id = self.group.get(id).global_id();
+                DebugThread {
+                    id: id.thread_id(),
+                    global_invocation_id: global_id,
+                    name: format!("[{}, {}, {}]", global_id[0], global_id[1], global_id[2]),
+                }
             })
             .collect()
     }
 
     pub fn focus_thread(&mut self, thread_id: DebugThreadId) -> Result<(), EvaluatorError> {
-        let gid = self.thread_ids.get(&thread_id).copied().ok_or_else(|| {
-            EvaluatorError::InternalError(format!("unknown DAP thread id {thread_id}"))
-        })?;
-        self.focused_thread = gid;
+        self.focused_thread = self.group.resolve(thread_id)?;
         Ok(())
     }
 
     pub fn focused_thread_id(&self) -> DebugThreadId {
-        self.thread_order
-            .iter()
-            .position(|gid| *gid == self.focused_thread)
-            .map(thread_id_for_index)
-            .unwrap_or(1)
+        self.focused_thread.thread_id()
     }
 }
