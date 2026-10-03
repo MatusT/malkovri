@@ -136,14 +136,22 @@ impl Evaluator {
             MathFunction::Fract => math_unary_f32(a, f32::fract),
             MathFunction::Trunc => math_unary_f32(a, f32::trunc),
             MathFunction::Ldexp => {
-                let base = a.as_primitive().and_then(|p| p.as_f32_slice()).unwrap();
-                let b_val = b.unwrap();
-                let exponent = b_val.as_primitive().and_then(|p| p.as_i32_slice()).unwrap();
+                let Some(base) = a.as_primitive().and_then(|p| p.as_f32_slice()) else {
+                    return Value::Uninitialized;
+                };
+                let Some(b_val) = b else {
+                    return Value::Uninitialized;
+                };
+                let Some(exponent) = b_val.as_primitive().and_then(|p| p.as_i32_slice()) else {
+                    return Value::Uninitialized;
+                };
 
                 let floats: Vec<f32> = base
                     .iter()
                     .zip(exponent)
-                    .map(|(base, exp)| base * i32::pow(2, *exp as u32) as f32)
+                    // Use a wider float for the intermediate power: 2^128 is
+                    // outside f32 even when the final scaled value is finite.
+                    .map(|(base, exp)| (f64::from(*base) * 2.0_f64.powi(*exp)) as f32)
                     .collect();
 
                 Value::Primitive(Primitive::from(floats.as_slice()))
