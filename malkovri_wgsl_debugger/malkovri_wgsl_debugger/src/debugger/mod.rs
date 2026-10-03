@@ -128,6 +128,14 @@ pub enum StepResult {
     Finished,
 }
 
+/// Execution state of one invocation, independent of whole-session completion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadState {
+    Running,
+    Waiting,
+    Finished,
+}
+
 /// Identifies a call frame. Valid only until execution resumes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DebugFrameId(pub(crate) usize);
@@ -333,6 +341,17 @@ impl Debugger {
             EvaluatorError::InternalError(format!("unknown thread id {thread_id}"))
         })?;
         Ok(&self.evaluators[gid])
+    }
+
+    pub fn thread_state(&self, thread_id: DebugThreadId) -> Result<ThreadState, EvaluatorError> {
+        let gid = self.thread_ids.get(&thread_id).ok_or_else(|| {
+            EvaluatorError::InternalError(format!("unknown thread id {thread_id}"))
+        })?;
+        Ok(match self.thread_status[gid] {
+            ThreadStatus::Running => ThreadState::Running,
+            ThreadStatus::Parked(_) => ThreadState::Waiting,
+            ThreadStatus::Finished => ThreadState::Finished,
+        })
     }
 
     pub fn threads(&self) -> Vec<DebugThread> {

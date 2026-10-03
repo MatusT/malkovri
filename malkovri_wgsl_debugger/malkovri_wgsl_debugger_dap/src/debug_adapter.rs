@@ -9,7 +9,7 @@ use crate::error::DebugAdapterError;
 use crate::parse_input;
 use crate::protocol::{BreakpointId, OutgoingMessage, StackFrameId, make_variable};
 use crate::references::{FrameReference, References, ScopeKind};
-use malkovri_wgsl_debugger::{DebugThreadId, Debugger, StepResult};
+use malkovri_wgsl_debugger::{DebugThreadId, Debugger, StepResult, ThreadState};
 
 // Defensive UI budget, not shader semantics: if catch-up cannot settle, stop anyway.
 const BREAKPOINT_CATCH_UP_STEP_BUDGET: usize = 100_000;
@@ -524,10 +524,14 @@ impl DebugAdapter {
         let arguments = serde_json::from_value::<dapts::ContinueArguments>(req.arguments.clone())?;
         let single_thread =
             self.single_thread_execution || arguments.single_thread.unwrap_or(false);
-        let response = self.make_response(req.seq, &req.command, &serde_json::json!({}))?;
         let thread_id: DebugThreadId = arguments.thread_id;
         self.debugger_mut()?.focus_thread(thread_id)?;
         self.references.clear();
+        let response = self.make_response(
+            req.seq,
+            &req.command,
+            &serde_json::json!({"allThreadsContinued": !single_thread}),
+        )?;
         let mut trace = Vec::new();
         let event = self.run_to_breakpoint(thread_id, single_thread, &mut trace)?;
 
@@ -607,6 +611,7 @@ impl DebugAdapter {
         }
 
         let mut has_more = false;
+        let mut pause_description = None;
         let mut hit_thread_id = thread_id;
         let mut steps = 0usize;
         loop {
@@ -626,6 +631,11 @@ impl DebugAdapter {
             match result {
                 StepResult::Finished => break,
                 StepResult::Continue => {
+                    let state = debugger.thread_state(thread_id)?;
+                    if single_thread && state != ThreadState::Running {
+                        pause_description = Some(Self::thread_stop_description(state));
+                        break;
+                    }
                     // Single-thread continue only inspects the selected DAP thread.
                     let hit = if single_thread {
                         debugger.thread_current_location(thread_id).and_then(|loc| {
@@ -663,7 +673,12 @@ impl DebugAdapter {
             }
         }
 
-        if has_more {
+        if let Some(description) = pause_description {
+            self.make_stopped_event_with_description(
+                dapts::StoppedEventReason::Pause,
+                Some(description),
+            )
+        } else if has_more {
             debugger.focus_thread(hit_thread_id)?;
             self.make_stopped_event(dapts::StoppedEventReason::Breakpoint)
         } else {
@@ -801,11 +816,33 @@ impl DebugAdapter {
         &mut self,
         reason: dapts::StoppedEventReason,
     ) -> Result<OutgoingMessage, DebugAdapterError> {
+        self.make_stopped_event_with_description(reason, None)
+    }
+
+    fn thread_stop_description(state: ThreadState) -> &'static str {
+        match state {
+            ThreadState::Finished => {
+                "Selected invocation finished; other invocations remain paused."
+            }
+            ThreadState::Waiting => {
+                "Selected invocation is waiting for other invocations at synchronization."
+            }
+            ThreadState::Running => {
+                unreachable!("only stopped invocations have a stop description")
+            }
+        }
+    }
+
+    fn make_stopped_event_with_description(
+        &mut self,
+        reason: dapts::StoppedEventReason,
+        description: Option<&str>,
+    ) -> Result<OutgoingMessage, DebugAdapterError> {
         self.make_event(
             "stopped",
             &dapts::StoppedEvent {
                 reason,
-                description: None,
+                description: description.map(str::to_owned),
                 thread_id: self.debugger.as_ref().map(Debugger::focused_thread_id),
                 preserve_focus_hint: None,
                 text: None,

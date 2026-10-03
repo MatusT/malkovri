@@ -12,7 +12,7 @@ mod wgsl;
 
 pub use debugger::{
     DebugFrameId, DebugThread, DebugThreadId, Debugger, DebuggerError, ResourceBinding,
-    SourceLocation, StackFrameInfo, StepResult, Variable, WorkgroupConfig,
+    SourceLocation, StackFrameInfo, StepResult, ThreadState, Variable, WorkgroupConfig,
 };
 pub use entry_point_inputs::GlobalConstants;
 pub use error::EvaluatorError;
