@@ -17,7 +17,7 @@ Supported:
 - [x] Workgroup/storage/subgroup barrier scheduling
 - [x] `workgroupUniformLoad`
 - [x] Subgroup ballot, gather, and collective operations represented by Naga IR
-- [x] All expressions
+- [x] Scalar/vector expressions (partial builtin coverage)
 
 TODO:
 - [ ] Atomics (`atomic`)
@@ -76,6 +76,35 @@ deno task build
 ```
 
 5. Press **F5** to start debugging.
+
+Step Over executes called functions while still honoring breakpoints inside them. In
+single-thread mode, Continue pauses when the selected invocation finishes or waits
+for other invocations at a synchronization point. Resume the other invocations to
+make progress past a barrier.
+
+Long-running requests pause after a bounded amount of execution. Use Continue to
+resume. Frame and variable references remain valid only while execution is stopped.
+
+## Tests
+
+```sh
+cargo test --workspace --all-targets
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo check -p malkovri_wgsl_debugger_wasm --target wasm32-unknown-unknown
+
+# After installing extension dependencies:
+cd vscode_extension
+deno check src/extension.ts build/build.ts
+```
+
+Core tests assert shader results directly. DAP tests cover inspection, stepping,
+protocol errors, and binding validation. Native transport tests run the adapter in
+a child process with a timeout, so a stalled shader cannot hang the test suite.
+
+Binding input must contain valid values of the selected scalar type; invalid
+elements and integer overflow are reported as errors. Binary data must contain a
+whole number of four-byte elements.
 
 ## Launch config options
 
