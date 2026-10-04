@@ -26,6 +26,20 @@ pub enum RunResult {
 }
 
 impl Debugger {
+    fn is_quad_thread(&self, thread: DebugThreadId) -> bool {
+        self.thread_fragment_info(thread).ok().flatten().is_some()
+    }
+
+    fn same_execution_unit(&self, a: DebugThreadId, b: DebugThreadId) -> bool {
+        match (
+            self.thread_fragment_info(a).ok().flatten(),
+            self.thread_fragment_info(b).ok().flatten(),
+        ) {
+            (Some(a), Some(b)) => a.quad_index == b.quad_index,
+            _ => a == b,
+        }
+    }
+
     /// Advance past a source line and its calls, honoring breakpoints in callees.
     /// Breakpoints are one-based lines in this program's source. If `single_thread`
     /// is false, all invocations advance and any invocation can hit a breakpoint.
@@ -48,7 +62,9 @@ impl Debugger {
             }
             match self.thread_state(thread_id)? {
                 ThreadState::Finished => return Ok(RunResult::InvocationFinished),
-                ThreadState::Waiting if single_thread => return Ok(RunResult::Waiting),
+                ThreadState::Waiting if single_thread && !self.is_quad_thread(thread_id) => {
+                    return Ok(RunResult::Waiting);
+                }
                 _ => {}
             }
 
@@ -60,7 +76,7 @@ impl Debugger {
                 .all_thread_locations()
                 .into_iter()
                 .find(|(id, location)| {
-                    (!single_thread || *id == thread_id)
+                    (!single_thread || self.same_execution_unit(thread_id, *id))
                         && (*id != thread_id
                             || Some(location.line) != initial_line
                             || depth > initial_depth)
@@ -117,14 +133,20 @@ impl Debugger {
             if single_thread {
                 match self.thread_state(thread_id)? {
                     ThreadState::Finished => return Ok(RunResult::InvocationFinished),
-                    ThreadState::Waiting => return Ok(RunResult::Waiting),
+                    ThreadState::Waiting if !self.is_quad_thread(thread_id) => {
+                        return Ok(RunResult::Waiting);
+                    }
+                    ThreadState::Waiting => {}
                     ThreadState::Running => {}
                 }
             }
             let hit = if single_thread {
-                self.thread_current_location(thread_id)
-                    .filter(|location| breakpoints.contains(&location.line))
-                    .map(|location| (thread_id, location))
+                self.all_thread_locations()
+                    .into_iter()
+                    .find(|(id, location)| {
+                        self.same_execution_unit(thread_id, *id)
+                            && breakpoints.contains(&location.line)
+                    })
             } else {
                 self.all_thread_locations()
                     .into_iter()
@@ -137,7 +159,7 @@ impl Debugger {
                         "breakpoint candidate thread={candidate} line={line}"
                     ));
                 }
-                let hit_thread = if single_thread {
+                let hit_thread = if single_thread || self.is_quad_thread(candidate) {
                     candidate
                 } else {
                     self.catch_up_threads_to_breakpoint(candidate, line, trace.as_deref_mut())?

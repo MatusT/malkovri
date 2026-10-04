@@ -9,12 +9,42 @@ impl Debugger {
         if self.is_empty() {
             return Ok(StepResult::Finished);
         }
-        self.step_gid(self.focused_thread)
+        self.step_thread(self.focused_thread_id())
     }
 
     pub fn step_thread(&mut self, thread_id: DebugThreadId) -> Result<StepResult, EvaluatorError> {
+        if self.is_empty() {
+            return Ok(StepResult::Finished);
+        }
         self.focus_thread(thread_id)?;
-        self.step_gid(self.focused_thread)
+        let focused = self.focused_thread;
+        let quad = self
+            .group
+            .get(focused)
+            .state()
+            .fragment_info()
+            .map(|info| info.quad_index);
+        if let Some(quad) = quad {
+            let members = self
+                .group
+                .ids()
+                .filter(|id| {
+                    self.group
+                        .get(*id)
+                        .state()
+                        .fragment_info()
+                        .is_some_and(|info| info.quad_index == quad)
+                })
+                .collect::<Vec<_>>();
+            for id in members {
+                let result = self.step_gid(id);
+                self.focused_thread = focused;
+                result?;
+            }
+            Ok(self.session_step_result())
+        } else {
+            self.step_gid(focused)
+        }
     }
 
     pub fn step_all(&mut self) -> Result<StepResult, EvaluatorError> {

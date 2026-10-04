@@ -491,3 +491,62 @@ fn nonuniform_derivatives_with_missing_lanes_fail_clearly() {
     let error = debugger.run_to_breakpoint(1, false, &[], None).unwrap_err();
     assert!(error.to_string().contains("quad lane returned"), "{error}");
 }
+
+#[test]
+fn selected_pixel_continue_advances_only_its_quad_and_honors_peer_breakpoints() {
+    let program = ShaderProgram::new(
+        r#"
+@fragment fn main(@location(0) uv: vec2f) -> @location(0) vec4f {
+    var value=uv;
+    if uv.x > 1.0 {
+        value += vec2f(1.0);
+    }
+    let gradient = dpdx(value);
+    return vec4f(gradient,0.0,1.0);
+}"#,
+    )
+    .unwrap();
+    let quads = program
+        .interpolate_fragments(
+            0,
+            &full_square(),
+            &RasterConfig {
+                viewport: Viewport {
+                    width: 4,
+                    height: 4,
+                },
+                pixel_range: None,
+            },
+        )
+        .unwrap();
+    let mut debugger = program
+        .create_debugger(
+            0,
+            malkovri_wgsl_debugger::ExecutionConfig::FragmentQuads(quads),
+            GlobalConstants::default(),
+            HashMap::new(),
+        )
+        .unwrap();
+    let other_before = debugger.thread_current_location(5).unwrap().line;
+    assert_eq!(
+        debugger.run_to_breakpoint(1, true, &[5], None).unwrap(),
+        RunResult::Breakpoint
+    );
+    assert_ne!(debugger.focused_thread_id(), 1);
+    assert_eq!(
+        debugger.thread_current_location(5).unwrap().line,
+        other_before
+    );
+    assert_eq!(
+        debugger.run_to_breakpoint(1, true, &[], None).unwrap(),
+        RunResult::InvocationFinished
+    );
+    assert_eq!(
+        debugger.thread_shader_outputs(1).unwrap()[0].value,
+        Some(Primitive::F32x4([2., 1., 0., 1.]).into())
+    );
+    assert_eq!(
+        debugger.thread_current_location(5).unwrap().line,
+        other_before
+    );
+}
