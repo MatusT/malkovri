@@ -286,7 +286,7 @@ fn vertex_triangle_session_supports_entry_stop_inspection_and_stepping() {
         json!({
             "program": shader_path("test_vertex_triangle.wgsl"),
             "stopOnEntry": true,
-            "workgroupConfig": { "workgroupSize": [1, 1, 1] },
+            "drawConfig": { "vertexCount": 1 },
         }),
     );
     let cfg = s.send("configurationDone", json!({}));
@@ -432,7 +432,7 @@ fn shader_outputs_are_inspected_for_the_requested_thread() {
             "program": shader_path("test_vertex_triangle.wgsl"),
             "stopOnEntry": true,
             "singleThreadExecution": true,
-            "workgroupConfig": { "workgroupSize": [2, 1, 1] },
+            "drawConfig": { "vertexCount": 2 },
         }),
     );
     s.send("configurationDone", json!({}));
@@ -451,7 +451,7 @@ fn shader_outputs_are_inspected_for_the_requested_thread() {
     assert_eq!(event_body(&completed, "stopped")["reason"], "pause");
     assert_eq!(
         shader_outputs_for_thread(&mut s, 2).1["@builtin(position)"],
-        "Primitive(F32x4([0.0, 0.5, 0.0, 1.0]))"
+        "Primitive(F32x4([-0.5, -0.5, 0.0, 1.0]))"
     );
     let finished = s.send("continue", json!({ "threadId": 2 }));
     assert_eq!(event_body(&finished, "terminated"), &json!({}));
@@ -1146,4 +1146,132 @@ fn call_stack_shader_stop_on_entry_does_not_terminate_immediately() {
         .unwrap();
     assert_eq!(frames[0]["name"], "main");
     assert_eq!(frames[0]["line"], 10);
+}
+
+#[test]
+fn draw_command_creates_every_vertex_instance_pair_with_offsets() {
+    let mut s = Session::new();
+    s.send("initialize", json!({}));
+    s.send("launch", json!({
+        "program": "draw.wgsl",
+        "source": "@vertex fn main(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance: u32) -> @builtin(position) vec4f { return vec4f(f32(vertex), f32(instance), 0.0, 1.0); }",
+        "stopOnEntry": true,
+        "drawConfig": { "vertexCount": 3, "instanceCount": 2, "firstVertex": 4, "firstInstance": 7 }
+    }));
+    let cfg = s.send("configurationDone", json!({}));
+    assert_eq!(event_body(&cfg, "stopped")["reason"], "entry");
+    let threads = s.send("threads", json!({}));
+    let threads = response_body(&threads, s.last_seq())["threads"]
+        .as_array()
+        .unwrap();
+    assert_eq!(threads.len(), 6);
+    for (index, thread) in threads.iter().enumerate() {
+        let vertex = 4 + index % 3;
+        let instance = 7 + index / 3;
+        assert_eq!(thread["id"], (index + 1) as u64);
+        assert_eq!(
+            thread["name"],
+            format!("vertex {vertex}, instance {instance}")
+        );
+        let frame_id = top_frame_id(&mut s, (index + 1) as u64);
+        let scopes = s.send("scopes", json!({ "frameId": frame_id }));
+        let arguments_ref =
+            scope_reference(response_body(&scopes, s.last_seq()), "Function Arguments");
+        let args = s.send("variables", json!({ "variablesReference": arguments_ref }));
+        let args = variables_map(response_body(&args, s.last_seq()));
+        assert_eq!(args["vertex"], format!("Primitive(U32({vertex}))"));
+        assert_eq!(args["instance"], format!("Primitive(U32({instance}))"));
+    }
+    let completed = s.send("continue", json!({ "threadId": 1 }));
+    assert_eq!(event_body(&completed, "stopped")["reason"], "pause");
+    for index in 0..6 {
+        let vertex = 4 + index % 3;
+        let instance = 7 + index / 3;
+        assert_eq!(
+            shader_outputs_for_thread(&mut s, index + 1).1["@builtin(position)"],
+            format!("Primitive(F32x4([{vertex}.0, {instance}.0, 0.0, 1.0]))")
+        );
+    }
+}
+
+#[test]
+fn launch_rejects_stage_mismatches_and_invalid_draw_commands() {
+    let vertex = "@vertex fn main() -> @builtin(position) vec4f { return vec4f(0.0); }";
+    let compute = "@compute @workgroup_size(1) fn main() {}";
+    for (source, config, expected) in [
+        (
+            vertex,
+            json!({ "workgroupConfig": {} }),
+            "workgroupConfig is only supported for compute",
+        ),
+        (
+            vertex,
+            json!({ "workgroupSize": [2, 1, 1] }),
+            "workgroupConfig is only supported for compute",
+        ),
+        (
+            compute,
+            json!({ "drawConfig": {} }),
+            "drawConfig is only supported for vertex",
+        ),
+        (
+            vertex,
+            json!({ "drawConfig": { "vertexCount": 0 } }),
+            "at least one vertex",
+        ),
+        (
+            vertex,
+            json!({ "drawConfig": { "instanceCount": 0 } }),
+            "at least one vertex",
+        ),
+        (
+            vertex,
+            json!({ "drawConfig": { "vertexCount": 2, "firstVertex": 4294967295u32 } }),
+            "vertex indices exceed",
+        ),
+        (
+            vertex,
+            json!({ "drawConfig": { "instanceCount": 2, "firstInstance": 4294967295u32 } }),
+            "instance indices exceed",
+        ),
+        (
+            vertex,
+            json!({ "drawConfig": { "vertexCount": 65536, "instanceCount": 65536 } }),
+            "invocation count exceeds",
+        ),
+        (
+            vertex,
+            json!({ "drawConfig": { "vertexCount": -1 } }),
+            "u32",
+        ),
+        (
+            vertex,
+            json!({ "drawConfig": { "vertexCount": 1.5 } }),
+            "u32",
+        ),
+        (
+            vertex,
+            json!({ "drawConfig": { "vertexCount": 4294967296u64 } }),
+            "u32",
+        ),
+        (
+            vertex,
+            json!({ "drawConfig": { "vertexCont": 3 } }),
+            "unknown field",
+        ),
+    ] {
+        let mut s = Session::new();
+        let mut args = json!({ "program": "config.wgsl", "source": source });
+        args.as_object_mut()
+            .unwrap()
+            .extend(config.as_object().unwrap().clone());
+        let messages = s.send("launch", args);
+        let response = find_response(&messages, s.last_seq()).unwrap();
+        assert_eq!(response["success"], false, "{response}");
+        assert!(
+            response["message"].as_str().unwrap().contains(expected),
+            "{response}"
+        );
+        assert!(s.adapter.debugger().is_err());
+    }
 }

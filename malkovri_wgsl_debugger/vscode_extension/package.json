@@ -50,7 +50,7 @@
               },
               "workgroupConfig": {
                 "type": "object",
-                "description": "Workgroup and subgroup configuration for the debug session. Compute builtins (global_invocation_id, local_invocation_id, etc.) are derived from these values.",
+                "description": "Workgroup and subgroup configuration for compute shaders only. Compute builtins (global_invocation_id, local_invocation_id, etc.) are derived from these values.",
                 "default": {},
                 "properties": {
                   "workgroupSize": {
@@ -83,6 +83,30 @@
                     "maxItems": 3,
                     "default": [1, 1, 1],
                     "description": "Total number of workgroups in the dispatch: [x, y, z]."
+                  }
+                }
+              },
+              "drawConfig": {
+                "type": "object",
+                "description": "Non-indexed draw command for vertex shaders. Each vertex/instance pair becomes one debugger thread.",
+                "default": {},
+                "additionalProperties": false,
+                "properties": {
+                  "vertexCount": {
+                    "type": "integer", "minimum": 1, "maximum": 4294967295, "default": 1,
+                    "description": "Number of vertices per instance to debug."
+                  },
+                  "instanceCount": {
+                    "type": "integer", "minimum": 1, "maximum": 4294967295, "default": 1,
+                    "description": "Number of instances to debug."
+                  },
+                  "firstVertex": {
+                    "type": "integer", "minimum": 0, "maximum": 4294967295, "default": 0,
+                    "description": "First vertex index supplied to @builtin(vertex_index)."
+                  },
+                  "firstInstance": {
+                    "type": "integer", "minimum": 0, "maximum": 4294967295, "default": 0,
+                    "description": "First instance index supplied to @builtin(instance_index)."
                   }
                 }
               },

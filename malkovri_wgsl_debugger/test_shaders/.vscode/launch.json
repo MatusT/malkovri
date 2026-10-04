@@ -249,9 +249,11 @@
 			"name": "Debug test_vertex_triangle.wgsl",
 			"program": "${workspaceFolder}/test_vertex_triangle.wgsl",
 			"stopOnEntry": true,
-			// Vertex inputs currently default to vertex_index = 0.
-			"workgroupConfig": {
-				"workgroupSize": [1, 1, 1]
+			"drawConfig": {
+				"vertexCount": 3,
+				"instanceCount": 1,
+				"firstVertex": 0,
+				"firstInstance": 0
 			}
 		},
 		{

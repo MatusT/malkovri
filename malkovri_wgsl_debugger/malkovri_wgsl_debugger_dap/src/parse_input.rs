@@ -4,7 +4,56 @@ use std::collections::HashMap;
 use std::{fs, path::Path};
 
 use crate::error::DebugAdapterError;
-use malkovri_wgsl_debugger::{GlobalConstants, Primitive, ResourceBinding, Value, WorkgroupConfig};
+use malkovri_wgsl_debugger::{
+    DrawConfig, ExecutionConfig, GlobalConstants, Primitive, ResourceBinding, ShaderStage, Value,
+    WorkgroupConfig,
+};
+
+pub fn parse_execution_config(
+    arguments: &serde_json::Map<String, serde_json::Value>,
+    stage: ShaderStage,
+) -> Result<ExecutionConfig, DebugAdapterError> {
+    let has_workgroup_config = [
+        "workgroupConfig",
+        "workgroupSize",
+        "workgroupId",
+        "subgroupSize",
+        "numWorkgroups",
+        "size",
+        "id",
+        "count",
+    ]
+    .iter()
+    .any(|key| arguments.contains_key(*key))
+        || arguments.get("shaderInputs").is_some_and(|inputs| {
+            inputs.get("global_invocation_id").is_some()
+                || inputs.get("globalInvocationId").is_some()
+        });
+    if stage != ShaderStage::Compute && has_workgroup_config {
+        return Err(DebugAdapterError::Parse(
+            "workgroupConfig is only supported for compute shaders; use drawConfig for vertex shaders".into(),
+        ));
+    }
+    if stage != ShaderStage::Vertex && arguments.contains_key("drawConfig") {
+        return Err(DebugAdapterError::Parse(
+            "drawConfig is only supported for vertex shaders".into(),
+        ));
+    }
+    match stage {
+        ShaderStage::Compute => Ok(parse_workgroup_config(arguments)?.into()),
+        ShaderStage::Vertex => {
+            let config = arguments
+                .get("drawConfig")
+                .map(|value| serde_json::from_value::<DrawConfig>(value.clone()))
+                .transpose()?
+                .unwrap_or_default();
+            config.validate().map_err(DebugAdapterError::Parse)?;
+            Ok(config.into())
+        }
+        ShaderStage::Fragment => Ok(ExecutionConfig::Fragment),
+        _ => Err(DebugAdapterError::Parse("unsupported shader stage".into())),
+    }
+}
 
 pub fn parse_global_constants(
     arguments: &serde_json::Map<String, serde_json::Value>,

@@ -166,15 +166,44 @@ whole number of four-byte elements.
 
 ## Launch config options
 
+Compute shaders use `workgroupConfig`. Vertex shaders use `drawConfig`, which
+emulates a non-indexed WebGPU `draw(vertexCount, instanceCount, firstVertex,
+firstInstance)` call. The debugger creates `vertexCount * instanceCount` threads,
+with distinct `vertex_index` and `instance_index` builtins, including the starting
+offsets. Threads are listed by instance, then vertex. For example, this debugs
+three vertices in each of two instances (six threads):
+
+```json
+{
+  "drawConfig": {
+    "vertexCount": 3,
+    "instanceCount": 2,
+    "firstVertex": 0,
+    "firstInstance": 0
+  }
+}
+```
+
+Omitting `drawConfig` defaults to one vertex and one instance. Debug sessions
+require at least one invocation; zero counts and overflowing indices are rejected.
+Indexed draws are not supported yet. Supplying either configuration for the wrong
+shader stage is an error. In the Rust API, pass `DrawConfig` for vertex shaders,
+`WorkgroupConfig` for compute shaders, or `ExecutionConfig::Fragment` for a single
+fragment with default inputs to `ShaderProgram::create_debugger`.
+
 | Field                  | Type                           | Default       | Description                                                                        |
 |------------------------|--------------------------------|---------------|------------------------------------------------------------------------------------|
 | `program`              | string                         | —             | Absolute path to the WGSL shader file.                                             |
 | `stopOnEntry`          | boolean                        | `false`       | Stop at the entry point before running to breakpoints.                             |
-| `singleThreadExecution` | boolean                       | `false`       | Step Over and Continue advance only the selected VS Code thread instead of the whole workgroup. |
+| `singleThreadExecution` | boolean                       | `false`       | Step Over and Continue advance only the selected VS Code thread instead of all shader invocations. |
 | `workgroupConfig.workgroupSize` | `[u32, u32, u32]`     | `[1, 1, 1]`   | Number of threads along each dimension of the workgroup being debugged.            |
 | `workgroupConfig.workgroupId`   | `[u32, u32, u32]`     | `[0, 0, 0]`   | Which workgroup in the dispatch to debug.                                           |
 | `workgroupConfig.subgroupSize`  | number                | `4`           | Subgroup (warp) size. Must be a power of 2 in `[4, 128]` (WGSL spec). All thread IDs are derived from this and `workgroupSize`. |
 | `workgroupConfig.numWorkgroups` | `[u32, u32, u32]`     | `[1, 1, 1]`   | Total number of workgroups in the dispatch (used for `@builtin(num_workgroups)`).  |
+| `drawConfig.vertexCount` | u32 | `1` | Vertices per instance (vertex shaders only; at least 1). |
+| `drawConfig.instanceCount` | u32 | `1` | Instances to debug (at least 1). |
+| `drawConfig.firstVertex` | u32 | `0` | First `@builtin(vertex_index)`. |
+| `drawConfig.firstInstance` | u32 | `0` | First `@builtin(instance_index)`. |
 | `bindings`             | object                         | `{}`          | Resource bindings keyed by `"group:binding"` (e.g. `"0:0"`).                       |
 | `bindings[].type`      | `"f32"` \| `"i32"` \| `"u32"` | `"f32"`       | Optional element type of the buffer.                                                |
 | `bindings[].inline`    | array                          | —             | Inline array of values. Cannot be combined with `file`.                            |

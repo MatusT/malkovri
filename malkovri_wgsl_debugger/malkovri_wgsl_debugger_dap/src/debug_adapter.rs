@@ -186,7 +186,13 @@ impl DebugAdapter {
             }
         };
 
-        let workgroup_config = parse_input::parse_workgroup_config(arguments)?;
+        let shader_program = ShaderProgram::new(&source).map_err(DebuggerError::from)?;
+        let stage = shader_program
+            .entry_points()
+            .next()
+            .ok_or_else(|| DebugAdapterError::Parse("shader has no entry points".into()))?
+            .stage;
+        let config = parse_input::parse_execution_config(arguments, stage)?;
         let global_constants = parse_input::parse_global_constants(arguments)?;
         #[cfg(not(target_arch = "wasm32"))]
         let bindings = {
@@ -199,11 +205,8 @@ impl DebugAdapter {
         #[cfg(target_arch = "wasm32")]
         let bindings = parse_input::parse_bindings(arguments)?;
 
-        self.debugger = Some(
-            ShaderProgram::new(&source)
-                .map_err(DebuggerError::from)?
-                .create_debugger(0, workgroup_config, global_constants, bindings)?,
-        );
+        self.debugger =
+            Some(shader_program.create_debugger(0, config, global_constants, bindings)?);
         self.program_path = Some(program_path);
         self.program_name = Some(program_name);
         self.stop_on_entry = stop_on_entry;

@@ -1,4 +1,5 @@
 mod collectives;
+mod config;
 mod group;
 mod inspect;
 mod outputs;
@@ -9,6 +10,7 @@ mod sync;
 
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 
+pub use config::{DrawConfig, ExecutionConfig};
 use group::{ExecutionGroup, Invocation, InvocationId};
 pub use outputs::ShaderOutput;
 pub use run_control::RunResult;
@@ -30,7 +32,7 @@ use crate::{
     value::Value,
 };
 
-/// Workgroup and subgroup configuration for a debug session.
+/// Workgroup and subgroup configuration for a compute debug session.
 ///
 /// Describes the size and position of the workgroup being debugged, and the
 /// subgroup size used for subgroup operations.  All thread IDs
@@ -149,7 +151,7 @@ pub enum DebuggerError {
     Wgsl(#[from] WgslToModuleError),
     #[error("Execution error: {0}")]
     Evaluator(#[from] EvaluatorError),
-    #[error("Invalid WorkgroupConfig: {0}")]
+    #[error("Invalid execution configuration: {0}")]
     InvalidConfig(String),
 }
 
@@ -237,6 +239,7 @@ pub struct StackFrameInfo {
 #[derive(Debug, Clone)]
 pub struct DebugThread {
     pub id: DebugThreadId,
+    /// Compute coordinates, or [vertex_index, instance_index, 0] for vertex threads.
     pub global_invocation_id: [u32; 3],
     pub name: String,
 }
@@ -257,11 +260,10 @@ impl Debugger {
     pub(crate) fn new(
         program: Arc<ShaderProgram>,
         entry_point_index: usize,
-        config: WorkgroupConfig,
+        config: ExecutionConfig,
         mut global_constants: GlobalConstants,
         bindings: HashMap<ResourceBinding, Value>,
     ) -> Result<Self, DebuggerError> {
-        config.validate().map_err(DebuggerError::InvalidConfig)?;
         let module = program.module();
         if module.entry_points.get(entry_point_index).is_none() {
             return Err(DebuggerError::InvalidConfig(format!(
@@ -289,36 +291,61 @@ impl Debugger {
             })
             .collect();
 
-        // Compute-related constants are derived from the workgroup config.
-        let [wx, wy, wz] = config.workgroup_size;
-        global_constants.set_compute_configuration(
-            config.workgroup_size,
-            config.num_workgroups,
-            config.subgroup_size,
-        );
-
-        let thread_order = thread_order(&config);
-        let mut invocations = Vec::with_capacity(thread_order.len());
-        for gid in &thread_order {
-            let inputs = match module.entry_points[entry_point_index].stage {
-                naga::ShaderStage::Compute => InvocationInputs::Compute(ComputeThreadInputs::new(
-                    [gid[0] % wx, gid[1] % wy, gid[2] % wz],
+        let stage = module.entry_points[entry_point_index].stage;
+        let thread_inputs = match (stage, config) {
+            (naga::ShaderStage::Compute, ExecutionConfig::Compute(config)) => {
+                config.validate().map_err(DebuggerError::InvalidConfig)?;
+                let [wx, wy, wz] = config.workgroup_size;
+                global_constants.set_compute_configuration(
                     config.workgroup_size,
-                    config.workgroup_id,
+                    config.num_workgroups,
                     config.subgroup_size,
-                )),
-                naga::ShaderStage::Vertex => {
-                    InvocationInputs::Vertex(VertexThreadInputs::default())
+                );
+                thread_order(&config)
+                    .into_iter()
+                    .map(|gid| {
+                        (
+                            gid,
+                            InvocationInputs::Compute(ComputeThreadInputs::new(
+                                [gid[0] % wx, gid[1] % wy, gid[2] % wz],
+                                config.workgroup_size,
+                                config.workgroup_id,
+                                config.subgroup_size,
+                            )),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            }
+            (naga::ShaderStage::Vertex, ExecutionConfig::Vertex(config)) => {
+                config.validate().map_err(DebuggerError::InvalidConfig)?;
+                let mut inputs = Vec::new();
+                for instance in 0..config.instance_count {
+                    for vertex in 0..config.vertex_count {
+                        let vertex_index = config.first_vertex + vertex;
+                        let instance_index = config.first_instance + instance;
+                        inputs.push((
+                            [vertex_index, instance_index, 0],
+                            InvocationInputs::Vertex(VertexThreadInputs::new(
+                                vertex_index,
+                                instance_index,
+                            )),
+                        ));
+                    }
                 }
-                naga::ShaderStage::Fragment => {
-                    InvocationInputs::Fragment(FragmentThreadInputs::default())
-                }
-                _ => {
-                    return Err(DebuggerError::InvalidConfig(
-                        "unsupported shader stage".into(),
-                    ));
-                }
-            };
+                inputs
+            }
+            (naga::ShaderStage::Fragment, ExecutionConfig::Fragment) => vec![(
+                [0, 0, 0],
+                InvocationInputs::Fragment(FragmentThreadInputs::default()),
+            )],
+            _ => {
+                return Err(DebuggerError::InvalidConfig(format!(
+                    "configuration does not match {stage:?} shader stage; use WorkgroupConfig for compute, DrawConfig for vertex, or ExecutionConfig::Fragment for fragment"
+                )));
+            }
+        };
+        let mut invocations = Vec::with_capacity(thread_inputs.len());
+        for (gid, inputs) in thread_inputs {
             let invocation = InvocationState::new(
                 program.clone(),
                 entry_point_index,
@@ -327,7 +354,7 @@ impl Debugger {
                 shared_workgroup_globals.clone(),
                 inputs,
             )?;
-            invocations.push(Invocation::new(*gid, invocation));
+            invocations.push(Invocation::new(gid, invocation));
         }
 
         let group = ExecutionGroup::new(invocations);
@@ -378,7 +405,13 @@ impl Debugger {
                 DebugThread {
                     id: id.thread_id(),
                     global_invocation_id: global_id,
-                    name: format!("[{}, {}, {}]", global_id[0], global_id[1], global_id[2]),
+                    name: match self.program.module().entry_points[self.entry_point_index].stage {
+                        naga::ShaderStage::Vertex => {
+                            format!("vertex {}, instance {}", global_id[0], global_id[1])
+                        }
+                        naga::ShaderStage::Fragment => "fragment 0".into(),
+                        _ => format!("[{}, {}, {}]", global_id[0], global_id[1], global_id[2]),
+                    },
                 }
             })
             .collect()

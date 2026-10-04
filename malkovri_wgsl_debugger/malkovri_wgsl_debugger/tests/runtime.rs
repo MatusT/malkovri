@@ -1,18 +1,20 @@
 use std::collections::HashMap;
 
 use malkovri_wgsl_debugger::{
-    Debugger, GlobalConstants, Primitive, ShaderProgram, StepResult, Value, WorkgroupConfig,
+    Debugger, DrawConfig, ExecutionConfig, GlobalConstants, Primitive, ShaderProgram, ShaderStage,
+    StepResult, Value, WorkgroupConfig,
 };
 
 fn debugger(source: &str, entry: usize) -> Debugger {
-    ShaderProgram::new(source)
-        .unwrap()
-        .create_debugger(
-            entry,
-            WorkgroupConfig::default(),
-            GlobalConstants::default(),
-            HashMap::new(),
-        )
+    let program = ShaderProgram::new(source).unwrap();
+    let config = match program.entry_points().nth(entry).unwrap().stage {
+        ShaderStage::Compute => WorkgroupConfig::default().into(),
+        ShaderStage::Vertex => DrawConfig::default().into(),
+        ShaderStage::Fragment => ExecutionConfig::Fragment,
+        _ => panic!("unsupported stage"),
+    };
+    program
+        .create_debugger(entry, config, GlobalConstants::default(), HashMap::new())
         .unwrap()
 }
 
@@ -119,11 +121,10 @@ fn vertex_triangle_returns_the_first_position_with_default_inputs() {
     assert_eq!(entry.name, "vs_main");
     assert_eq!(entry.stage, malkovri_wgsl_debugger::ShaderStage::Vertex);
 
-    // Explicit vertex inputs are not configurable yet; the default index is zero.
     let mut debugger = program
         .create_debugger(
             entry.index,
-            WorkgroupConfig::default(),
+            DrawConfig::default(),
             GlobalConstants::default(),
             HashMap::new(),
         )
@@ -239,24 +240,19 @@ fn helper(value: u32) -> u32 {
 }
 "#;
     let program = ShaderProgram::new(source).unwrap();
-    let make_session = |entry| {
+    let make_session = |entry, config: ExecutionConfig| {
         program
-            .create_debugger(
-                entry,
-                WorkgroupConfig::default(),
-                GlobalConstants::default(),
-                HashMap::new(),
-            )
+            .create_debugger(entry, config, GlobalConstants::default(), HashMap::new())
             .unwrap()
     };
-    let mut vertex = make_session(0);
+    let mut vertex = make_session(0, DrawConfig::default().into());
     assert_eq!(finish(&mut vertex), 7);
     assert!(matches!(
         vertex.entry_point_output(),
         Some(Value::Primitive(Primitive::F32x4([0.0, 0.0, 0.0, 1.0])))
     ));
     // A later stage starts from the same program with fresh invocation memory.
-    let mut fragment = make_session(1);
+    let mut fragment = make_session(1, ExecutionConfig::Fragment);
     assert_eq!(finish(&mut fragment), 9);
     assert!(matches!(
         fragment.entry_point_output(),
@@ -292,4 +288,35 @@ fn shared_program_sessions_keep_their_memory_independent() {
     // Sessions retain immutable program data even after the caller releases it.
     assert_eq!(finish(&mut first), 1);
     assert_eq!(finish(&mut second), 1);
+}
+
+#[test]
+fn execution_configuration_must_match_the_selected_shader_stage() {
+    let program =
+        ShaderProgram::new("@vertex fn main() -> @builtin(position) vec4f { return vec4f(0.0); }")
+            .unwrap();
+    for config in [
+        WorkgroupConfig::default().into(),
+        ExecutionConfig::Fragment,
+        DrawConfig {
+            vertex_count: 0,
+            ..Default::default()
+        }
+        .into(),
+    ] {
+        assert!(matches!(
+            program.create_debugger(0, config, GlobalConstants::default(), HashMap::new()),
+            Err(malkovri_wgsl_debugger::DebuggerError::InvalidConfig(_))
+        ));
+    }
+    let program = ShaderProgram::new("@compute @workgroup_size(1) fn main() {}").unwrap();
+    assert!(matches!(
+        program.create_debugger(
+            0,
+            DrawConfig::default(),
+            GlobalConstants::default(),
+            HashMap::new()
+        ),
+        Err(malkovri_wgsl_debugger::DebuggerError::InvalidConfig(_))
+    ));
 }

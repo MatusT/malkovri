@@ -10,7 +10,7 @@ use std::{collections::HashMap, sync::Arc};
 use naga::{Expression, Function, Handle, Module, ResourceBinding, Span, Statement, SwitchValue};
 
 use crate::{
-    debugger::{Debugger, DebuggerError, WorkgroupConfig},
+    debugger::{Debugger, DebuggerError, ExecutionConfig},
     invocation::inputs::GlobalConstants,
     value::Value,
 };
@@ -159,14 +159,23 @@ impl ShaderProgram {
 
     /// Create one independently mutable execution of the selected entry point.
     /// Each debugger shares this program through Arc and owns its execution state.
+    /// Pass [`crate::WorkgroupConfig`] for compute, [`crate::DrawConfig`] for vertex,
+    /// or [`ExecutionConfig::Fragment`] for a single fragment with default inputs.
+    /// The configuration must match the selected entry point's stage.
     pub fn create_debugger(
         self: &Arc<Self>,
         entry_point_index: usize,
-        config: WorkgroupConfig,
+        config: impl Into<ExecutionConfig>,
         constants: GlobalConstants,
         bindings: HashMap<ResourceBinding, Value>,
     ) -> Result<Debugger, DebuggerError> {
-        Debugger::new(self.clone(), entry_point_index, config, constants, bindings)
+        Debugger::new(
+            self.clone(),
+            entry_point_index,
+            config.into(),
+            constants,
+            bindings,
+        )
     }
 
     pub(crate) fn scopes(&self) -> &ModuleScopes {

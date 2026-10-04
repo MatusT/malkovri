@@ -53,6 +53,15 @@ pub(crate) struct VertexThreadInputs {
     instance_index: u32,
 }
 
+impl VertexThreadInputs {
+    pub(crate) fn new(vertex_index: u32, instance_index: u32) -> Self {
+        Self {
+            vertex_index,
+            instance_index,
+        }
+    }
+}
+
 /// Per-thread fragment built-in inputs, computed by the invocation from the
 /// fragment's position in the render target.
 #[derive(Clone, Debug, Default)]
