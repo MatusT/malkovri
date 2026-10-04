@@ -12,11 +12,12 @@ Support two ways to supply fragment inputs from the beginning:
 
 - **From vertices:** the user specifies vertex and fragment entry points, vertex
   data, a draw, and a viewport. Compute pixel inputs from the resulting triangles.
-- **Manual:** the user supplies fragment values directly, with no vertex shader.
-  Explicit neighboring values allow derivatives and texture sampling to be tested.
+- **Supplied vertex outputs:** the user supplies clip positions and location
+  values for the vertices of triangles, plus a viewport, with no vertex shader.
 
-Both paths produce the same fragment quads. Copying one vertex's outputs directly
-into a fragment is not part of this plan.
+Both paths feed the same coverage, interpolation, and quad-generation code. Users
+provide vertex data; pixel inputs, quad origins, lanes, and helper coverage are
+computed internally.
 
 ## What already works
 
@@ -43,7 +44,7 @@ flowchart LR
     VS --> O[Vertex output records]
     O --> P[Compute coverage and interpolate pixel inputs]
     P --> Q[Fragment quads: four lanes plus coverage]
-    M[Manual fragment inputs] --> Q
+    M[Supplied vertex outputs] --> O
     Q --> FS[Run fragment shader with quad coordination]
     T[Texture and sampler data] --> FS
     FS --> R[Per-pixel outputs and inspection]
@@ -226,32 +227,41 @@ slice, not an automatic consequence of having four lanes:
 Full fragment subgroups and additional quad builtins can follow independently;
 a quad must not be treated as an arbitrary compute workgroup or subgroup.
 
-## 5. Manual inputs use the same quad path
+## 5. Supply vertex outputs without running a vertex shader
 
-Allow either a common set of location values for all four lanes, or four explicit
-lane records with independently supplied locations and depth/reciprocal-W values.
-The two forms are mutually exclusive. Both construct `FragmentQuad` directly;
-no vertex entry, triangle, or viewport is required.
+Accept an array of vertex-output records. Each record contains `position`, the
+four-component clip-space output normally returned as `@builtin(position)`, and
+`locations`, the user-defined outputs keyed by location. Consecutive groups of
+three records form triangles. Require a nonempty multiple of three records and
+a viewport; `focusPixel` is optional, just as in the vertex-execution path.
 
-A common-value fixture deliberately defines constant varyings, so their input
-derivatives are zero. Builtin pixel positions still differ between lanes. For
-nonconstant inputs, require all four lane records; do not infer unknown neighbors.
-Validate every lane against the fragment interface. Default depth to 0, reciprocal
-W to 1, front-facing to true, and single-sample coverage to all four lanes. Optional
-coverage bits make uncovered lanes helpers. Manual pixel XY comes from an even,
-nonnegative `quadOrigin`; require finite depth, positive finite reciprocal W, and
-depth in `[0, 1]`.
+No vertex entry or draw configuration is needed. The first version treats the
+records as one instance, assigning vertex and primitive identities from array
+order. Infer each location's type and interpolation qualifiers from the selected
+fragment entry. Validate every record against that interface: require all declared
+locations, reject unknown locations and wrong types/shapes, and apply the same
+clip-position restrictions as generated vertex outputs. No vertex interface is
+available or needed in this mode.
 
-The user can inspect one selected pixel while its neighbors execute as needed.
-Manual and vertex-driven quads with identical resolved inputs must produce the
-same results, including derivatives and sampled colors.
+Pass these records through the same triangle coverage and interpolation functions
+used after vertex execution. Compute framebuffer positions, depth, reciprocal W,
+front-facing, sample coverage, neighboring values, and helper lanes internally.
+The launch schema exposes no lane records, quad origins, or per-lane overrides.
+Constant varyings can be supplied by giving each triangle vertex the same value.
+
+The user selects pixels for inspection, while the debugger generates and executes
+their neighboring lanes as needed. Supplied records identical to a vertex shader's
+outputs must produce identical pixel inputs, coverage, derivatives, and sampled
+colors when the viewport and fragment resources are the same.
 
 ## Proposed launch shape
 
 Keep the existing top-level entry selection for the target fragment. A tagged
-`fragmentConfig` chooses manual inputs or vertex-driven interpolation. The first
-version uses vertex and fragment entries from the same WGSL file. Both share the
-launch resource bindings.
+`fragmentConfig` chooses vertex execution or supplied vertex outputs. Both modes
+use the same viewport and optional pixel selection. When running a vertex shader,
+the first version uses vertex and fragment entries from the same WGSL file and
+shares launch resource bindings. The supplied-output mode can use a WGSL file
+containing only the fragment entry.
 
 Vertex-driven example: `vs_main` takes position at location 0 and UV at location 1,
 and returns clip position, UV, and color for `fs_main`:
@@ -287,50 +297,60 @@ dimensions must be positive; focus must lie within the viewport. Apply a checked
 invocation/allocation limit before creating all pixel threads and report an
 oversized request rather than truncating it.
 
-Manual example: `fs_main` takes a `vec2<f32>` at location 0 and a `vec4<f32>` at
-location 1. These explicit neighbors permit nonzero UV derivatives:
+Supplied-output example: `fs_main` takes a `vec2<f32>` at location 0 and a
+`vec4<f32>` at location 1. The user supplies three clip positions, UVs, and colors;
+the debugger generates all pixel and quad inputs:
 
 ```json
 {
   "type": "wgsl",
   "request": "launch",
-  "name": "Debug manual fragment quad",
+  "name": "Debug supplied vertex outputs",
   "program": "${workspaceFolder}/shader.wgsl",
   "entryType": "fragment",
   "entryPoint": "fs_main",
   "stopOnEntry": true,
   "fragmentConfig": {
-    "kind": "manual",
-    "quadOrigin": [32, 16],
-    "lanes": [
-      { "locations": { "0": [0.25, 0.50], "1": [1.0, 0.0, 0.0, 1.0] } },
-      { "locations": { "0": [0.50, 0.50], "1": [1.0, 0.0, 0.0, 1.0] } },
-      { "locations": { "0": [0.25, 0.75], "1": [1.0, 0.0, 0.0, 1.0] } },
-      { "locations": { "0": [0.50, 0.75], "1": [1.0, 0.0, 0.0, 1.0] } }
-    ]
+    "kind": "vertexOutputs",
+    "vertexOutputs": [
+      {
+        "position": [-0.8, -0.8, 0.5, 1.0],
+        "locations": { "0": [0.0, 0.0], "1": [1.0, 0.0, 0.0, 1.0] }
+      },
+      {
+        "position": [0.8, -0.8, 0.5, 1.0],
+        "locations": { "0": [1.0, 0.0], "1": [0.0, 1.0, 0.0, 1.0] }
+      },
+      {
+        "position": [0.0, 0.8, 0.5, 1.0],
+        "locations": { "0": [0.5, 1.0], "1": [0.0, 0.0, 1.0, 1.0] }
+      }
+    ],
+    "viewport": { "width": 64, "height": 64 },
+    "focusPixel": [32, 32]
   }
 }
 ```
 
-For constant inputs, replace `lanes` with a single `locations` object. The manual
-schema can expose shared builtin defaults, per-lane depth/reciprocal-W overrides,
-and coverage as described above. Final field spelling belongs to implementation
-review; the required distinction is common values versus four explicit records.
+Here `position` always means the vertex's clip-space output. The debugger derives
+fragment `@builtin(position)` after projection and interpolation. Neither example
+requires the user to configure quads or helper pixels.
 
 New fields are stage-specific and unknown/mixed modes are errors. Vertex-only
 launches gain top-level `vertexAttributes` alongside existing `drawConfig`.
 Existing compute and vertex launch behavior stays intact. Retain the old default
-fragment path for simple existing callers; require explicit quad inputs for new
-derivative/sampling execution. Migrate public Rust configuration constructors,
+fragment path for simple existing callers; new derivative/sampling execution uses
+quads generated from either source of vertex outputs. Migrate Rust constructors,
 callers, and README examples together when adding configured fragment execution.
 
 ## Debugger behavior
 
 For vertex-driven execution, the coordinator runs vertices, pauses with their
 outputs available, generates fragment inputs, and stops at fragment entry on the
-next Continue. Manual input starts directly at fragment entry when `stopOnEntry`
-is enabled. Keep vertex results inspectable while stepping fragments. Pause again
-for final fragment output inspection before terminating.
+next Continue. With supplied outputs, generate pixel inputs immediately and stop
+at fragment entry when `stopOnEntry` is enabled; there is no vertex execution
+stage. Keep generated or supplied vertex records inspectable while stepping
+fragments. Pause again for final fragment output inspection before terminating.
 
 Thread labels include pixel, primitive/instance, lane, and helper status. A step
 focused on a pixel advances its quad as needed for dependencies; in fragment mode,
@@ -353,7 +373,7 @@ small set of focused, tested commits:
 | --- | --- | --- |
 | 1 | Vertex attributes, shared interface resolution, structured output extraction | Direct/struct interfaces; nonzero vertex/instance offsets; invalid types/counts; completed outputs per invocation; unchanged builtin-only vertex behavior. |
 | 2 | Pixel coverage, interpolation, and quad input generation | Known triangle at selected pixels; unequal W distinguishes perspective/linear; flat integers preserve provoking vertex; winding/Y flip; shared edges; degenerate/outside triangles; odd viewport and boundary helpers; separate overlapping primitives. |
-| 3 | Configurable fragment quad execution from either input source | A fragment-only module runs manual fixtures; equivalent manual/interpolated quads agree; builtin/struct inputs inspect correctly; helper writes and nested discard are handled; outputs retain pixel identity. |
+| 3 | Configurable fragment quad execution from either source of vertex outputs | A fragment-only module runs supplied-output fixtures; supplied and shader-generated vertex outputs produce equal coverage, interpolated inputs, and results; missing locations, malformed positions, and incomplete triangles fail; builtin/struct inputs inspect correctly; helper writes and nested discard are handled; outputs retain pixel identity. |
 | 4 | Resumable expression collectives and derivatives | Known fine/coarse differences; shader-computed operands; branches reconverge; loop/call instances stay separate; helpers participate; budget/step resumption works; invalid nonuniform collectives fail instead of hanging. |
 | 5 | CPU texture/sampler bindings and sampling | Known texels, address/filter modes, explicit and implicit LOD, distinct mip colors, quad-edge helpers, invalid bindings, and uniformity diagnostics. |
 | 6 | Complete linked DAP/VS Code workflow and examples | Vertex-output pause, fragment-entry stop, pixel/quad stepping, peer breakpoints, final results, stale references, relaunch, and native/WASM parity. |

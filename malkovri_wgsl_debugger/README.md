@@ -145,9 +145,10 @@ execution still needs explicit vertex/fragment inputs, `@location` value transfe
 and rasterization/interpolation. Those can be added around successive sessions
 without combining both stages into an invocation's execution state.
 
-The [fragment support plan](PLAN_GRAPHICS.md) covers manual fragment inputs,
-interpolating vertex outputs at pixels, and 2×2 fragment quads for derivatives and
-texture sampling. Its configuration examples describe planned behavior.
+The [fragment support plan](PLAN_GRAPHICS.md) covers shader-generated or manually
+supplied vertex outputs, their interpolation at pixels, and internally generated
+2×2 fragment quads for derivatives and texture sampling. Its configuration
+examples describe planned behavior.
 
 ## Tests
 
