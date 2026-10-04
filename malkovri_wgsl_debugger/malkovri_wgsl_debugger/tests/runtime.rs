@@ -198,11 +198,19 @@ fn helper() -> Output {
     );
     let outputs = debugger.thread_shader_outputs(1).unwrap();
     assert_eq!(outputs[0].name, "@location(0)");
+    assert!(matches!(
+        outputs[0].binding,
+        naga::Binding::Location { location: 0, .. }
+    ));
     assert_eq!(
         outputs[0].value,
         Some(Primitive::F32x3([1.0, 0.0, 0.5]).into())
     );
     assert_eq!(outputs[1].name, "@builtin(position)");
+    assert!(matches!(
+        outputs[1].binding,
+        naga::Binding::BuiltIn(naga::BuiltIn::Position { .. })
+    ));
     assert_eq!(
         outputs[1].value,
         Some(Primitive::F32x4([0.0, 0.5, 0.0, 1.0]).into())

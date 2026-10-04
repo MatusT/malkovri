@@ -9,6 +9,8 @@ use super::{DebugThreadId, Debugger, SourceLocation};
 pub struct ShaderOutput {
     /// WGSL interface annotation, such as `@builtin(position)` or `@location(0)`.
     pub name: String,
+    /// Machine-readable binding, including interpolation and sampling qualifiers.
+    pub binding: Binding,
     pub value: Option<Value>,
 }
 
@@ -28,6 +30,7 @@ impl Debugger {
         if let Some(binding) = &result.binding {
             return Ok(vec![ShaderOutput {
                 name: output_name(binding),
+                binding: binding.clone(),
                 value: value.cloned(),
             }]);
         }
@@ -40,6 +43,7 @@ impl Debugger {
             .filter_map(|(index, member)| {
                 member.binding.as_ref().map(|binding| ShaderOutput {
                     name: output_name(binding),
+                    binding: binding.clone(),
                     value: value.map(|value| value.index_into(index)),
                 })
             })

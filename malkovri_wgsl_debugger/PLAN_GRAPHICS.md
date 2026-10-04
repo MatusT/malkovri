@@ -1,7 +1,8 @@
 # Plan: Fragment Shaders with Interpolated Pixel Inputs and 2×2 Quads
 
-Status: design proposal, 2026-10-04. Implementation has not started. Configuration
-examples below are proposed, not currently supported.
+Status: implementation in progress, 2026-10-04. Configuration examples below are
+planned until their implementation slices land. Texture resources and sampling
+are deferred by request; quad execution and derivatives remain in scope.
 
 Run the vertex shader, collect its outputs, compute interpolated inputs for each
 pixel, and execute the fragment shader in groups of four neighboring pixels. Use
@@ -399,7 +400,7 @@ small set of focused, tested commits:
 | 2 | Pixel coverage, interpolation, and quad input generation | Known triangle at selected pixels; unequal W distinguishes perspective/linear; flat integers preserve provoking vertex; winding/Y flip; shared edges; degenerate/outside triangles; odd viewport and boundary helpers; separate overlapping primitives; half-open range bounds and validation; one-pixel/unaligned ranges; no invocations for excluded quads; no writes/outputs from range-boundary helpers; selected pixel inputs and derivatives match a full-viewport run for shaders without cross-fragment side effects; allocation counts include only selected quads and helpers. |
 | 3 | Configurable fragment quad execution from either source of vertex outputs | A fragment-only module runs supplied-output fixtures; supplied and shader-generated vertex outputs produce equal coverage, interpolated inputs, and results; missing locations, malformed positions, and incomplete triangles fail; builtin/struct inputs inspect correctly; helper writes and nested discard are handled; outputs retain pixel identity. |
 | 4 | Resumable expression collectives and derivatives | Known fine/coarse differences; shader-computed operands; branches reconverge; loop/call instances stay separate; helpers participate; budget/step resumption works; invalid nonuniform collectives fail instead of hanging. |
-| 5 | CPU texture/sampler bindings and sampling | Known texels, address/filter modes, explicit and implicit LOD, distinct mip colors, quad-edge helpers, invalid bindings, and uniformity diagnostics. |
+| Later | CPU texture/sampler bindings and sampling (deferred) | Known texels, address/filter modes, explicit and implicit LOD, distinct mip colors, quad-edge helpers, invalid bindings, and uniformity diagnostics. |
 | 6 | Complete linked DAP/VS Code workflow and examples | Vertex-output pause, fragment-entry stop, pixel/quad stepping, peer breakpoints, final results, stale references, relaunch, and native/WASM parity. |
 
 Add standalone launch/schema support with slice 3; finish stage transitions and
