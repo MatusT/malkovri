@@ -8,7 +8,7 @@ mod value;
 pub use debugger::{
     DebugFrameId, DebugThread, DebugThreadId, Debugger, DebuggerError, DrawConfig, ExecutionConfig,
     RunResult, ShaderOutput, SourceLocation, StackFrameInfo, StepResult, ThreadState, Variable,
-    WorkgroupConfig,
+    VertexAttribute, VertexConfig, VertexStepMode, WorkgroupConfig,
 };
 pub use error::EvaluatorError;
 pub use invocation::inputs::GlobalConstants;
@@ -18,3 +18,5 @@ pub use value::Value;
 
 pub use naga::{ResourceBinding, ShaderStage};
 pub use program::{EntryPointInfo, ShaderProgram};
+
+pub use program::interface::{LocationInput, ShaderIoType};

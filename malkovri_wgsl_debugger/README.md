@@ -228,3 +228,12 @@ fragment with default inputs to `ShaderProgram::create_debugger`.
 | `bindings[].file`      | string                         | —             | Path to a data file relative to the shader. Cannot be combined with `inline`.      |
 | `bindings[].fileContent` | string                       | —             | Inline file content; currently supports RON content.                               |
 | `bindings[].format`    | `"ron"` \| `"binary"`          | `"ron"`       | File format: `"ron"` (RON array) or `"binary"` (little-endian 4-byte values).     |
+
+### Decoded vertex inputs (Rust)
+
+Pass `VertexConfig { draw, attributes }` to `create_debugger` to supply
+`@location` attributes. Each `VertexAttribute` contains typed `Value`s and a
+`VertexStepMode::Vertex` or `Instance`. Stream lengths match the corresponding
+draw count, and indexing starts at zero even with nonzero `firstVertex` or
+`firstInstance`. Direct arguments and input structs use the same bindings.
+`DrawConfig` alone remains supported for shaders with only builtin inputs.

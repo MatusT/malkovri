@@ -1,4 +1,6 @@
 use crate::{Primitive, Value};
+use naga::{Binding, Handle, Module, Type, TypeInner};
+use std::collections::BTreeMap;
 
 /// Per-thread compute built-in inputs, computed by the invocation from the
 /// thread's position within the workgroup.
@@ -50,13 +52,19 @@ impl ComputeThreadInputs {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct VertexThreadInputs {
     vertex_index: u32,
+    locations: BTreeMap<u32, Value>,
     instance_index: u32,
 }
 
 impl VertexThreadInputs {
-    pub(crate) fn new(vertex_index: u32, instance_index: u32) -> Self {
+    pub(crate) fn new(
+        vertex_index: u32,
+        instance_index: u32,
+        locations: BTreeMap<u32, Value>,
+    ) -> Self {
         Self {
             vertex_index,
+            locations,
             instance_index,
         }
     }
@@ -120,6 +128,36 @@ pub(crate) enum InvocationInputs {
 }
 
 impl InvocationInputs {
+    pub(crate) fn argument(
+        &self,
+        module: &Module,
+        ty: Handle<Type>,
+        binding: Option<&Binding>,
+        globals: &GlobalConstants,
+    ) -> Value {
+        match binding {
+            Some(Binding::BuiltIn(builtin)) => self.builtin(*builtin, globals),
+            Some(Binding::Location { location, .. }) => match self {
+                Self::Vertex(inputs) => inputs.locations.get(location).cloned().unwrap_or_default(),
+                _ => Value::Uninitialized,
+            },
+            None => match &module.types[ty].inner {
+                TypeInner::Struct { members, .. } => Value::Struct(
+                    members
+                        .iter()
+                        .map(|m| {
+                            (
+                                m.name.clone().unwrap_or_default(),
+                                self.argument(module, m.ty, m.binding.as_ref(), globals),
+                            )
+                        })
+                        .collect(),
+                ),
+                _ => Value::Uninitialized,
+            },
+        }
+    }
+
     pub fn compute(&self) -> Option<&ComputeThreadInputs> {
         match self {
             Self::Compute(inputs) => Some(inputs),

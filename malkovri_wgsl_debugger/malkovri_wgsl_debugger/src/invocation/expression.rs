@@ -198,22 +198,10 @@ impl InvocationState {
         let StackFrame::Function(ref frame) = self.stack[func_idx] else {
             return ArgumentValue::Value(Value::Uninitialized);
         };
-        let function = self.resolve_function(&frame.function_id());
-        let function_argument = &function.arguments[index];
-
-        if let Some(binding) = &function_argument.binding {
-            ArgumentValue::Value(match binding {
-                naga::Binding::BuiltIn(builtin) => {
-                    self.inputs.builtin(*builtin, &self.global_constants)
-                }
-                naga::Binding::Location { .. } => Value::Uninitialized,
-            })
-        } else {
-            frame
-                .argument(index)
-                .cloned()
-                .unwrap_or(ArgumentValue::Value(Value::Uninitialized))
-        }
+        frame
+            .argument(index)
+            .cloned()
+            .unwrap_or(ArgumentValue::Value(Value::Uninitialized))
     }
 
     pub(crate) fn evaluate_local_variable(

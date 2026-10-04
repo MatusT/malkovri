@@ -28,7 +28,6 @@ use storage::GlobalValue;
 
 pub(crate) struct InvocationState {
     program: Arc<ShaderProgram>,
-    global_constants: GlobalConstants,
     global_values: HashMap<naga::Handle<GlobalVariable>, GlobalValue>,
     entry_point_output: Option<Value>,
     entry_point_return: Option<StatementId>,
@@ -79,16 +78,28 @@ impl InvocationState {
             }
         }
 
+        let arguments = module.entry_points[entry_point_index]
+            .function
+            .arguments
+            .iter()
+            .map(|arg| {
+                crate::invocation::place::ArgumentValue::Value(inputs.argument(
+                    module,
+                    arg.ty,
+                    arg.binding.as_ref(),
+                    &global_constants,
+                ))
+            })
+            .collect();
         let invocation = InvocationState {
             global_values,
             program,
-            global_constants,
             entry_point_output: None,
             entry_point_return: None,
             stack: vec![StackFrame::Function(Box::new(FunctionFrame::new(
                 FunctionId::EntryPoint(entry_point_index),
                 block,
-                Vec::new(),
+                arguments,
                 None,
             )))],
             inputs,

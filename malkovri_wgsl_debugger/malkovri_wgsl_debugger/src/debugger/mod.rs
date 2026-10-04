@@ -10,7 +10,7 @@ mod sync;
 
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 
-pub use config::{DrawConfig, ExecutionConfig};
+pub use config::{DrawConfig, ExecutionConfig, VertexAttribute, VertexConfig, VertexStepMode};
 use group::{ExecutionGroup, Invocation, InvocationId};
 pub use outputs::ShaderOutput;
 pub use run_control::RunResult;
@@ -317,17 +317,20 @@ impl Debugger {
                     .collect::<Vec<_>>()
             }
             (naga::ShaderStage::Vertex, ExecutionConfig::Vertex(config)) => {
-                config.validate().map_err(DebuggerError::InvalidConfig)?;
+                config
+                    .validate(&program, entry_point_index)
+                    .map_err(DebuggerError::InvalidConfig)?;
                 let mut inputs = Vec::new();
-                for instance in 0..config.instance_count {
-                    for vertex in 0..config.vertex_count {
-                        let vertex_index = config.first_vertex + vertex;
-                        let instance_index = config.first_instance + instance;
+                for instance in 0..config.draw.instance_count {
+                    for vertex in 0..config.draw.vertex_count {
+                        let vertex_index = config.draw.first_vertex + vertex;
+                        let instance_index = config.draw.first_instance + instance;
                         inputs.push((
                             [vertex_index, instance_index, 0],
                             InvocationInputs::Vertex(VertexThreadInputs::new(
                                 vertex_index,
                                 instance_index,
+                                config.locations(vertex, instance),
                             )),
                         ));
                     }
