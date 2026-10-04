@@ -253,3 +253,9 @@ masks. `PixelRange { from, to }` uses inclusive/exclusive framebuffer bounds wit
 changing the viewport. Outside-range lanes are generated only as helpers in needed
 quads. The initial implementation supports center/flat interpolation, positive
 clip W, and vertex depth in `[0, W]`; clipping and texture sampling are deferred.
+
+`ExecutionConfig::FragmentQuads(quads)` executes generated pixel inputs, including
+input structs and fragment builtins. `thread_fragment_info` identifies pixels and
+helper/discard state. Helpers continue computing but never produce shader outputs
+or write resource memory; `discard` also suppresses subsequent observable effects
+when called from a nested function. Empty quad lists finish without invocations.

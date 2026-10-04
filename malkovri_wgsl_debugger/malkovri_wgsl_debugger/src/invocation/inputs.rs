@@ -79,6 +79,8 @@ pub(crate) struct FragmentThreadInputs {
     sample_index: u32,
     sample_mask: u32,
     primitive_index: u32,
+    pub(crate) locations: BTreeMap<u32, Value>,
+    pub(crate) info: Option<crate::graphics::FragmentInfo>,
 }
 
 /// Constant globals supplied by the caller and copied into a session.
@@ -128,6 +130,13 @@ pub(crate) enum InvocationInputs {
 }
 
 impl InvocationInputs {
+    pub(crate) fn fragment_info(&self) -> Option<crate::graphics::FragmentInfo> {
+        match self {
+            Self::Fragment(input) => input.info.clone(),
+            _ => None,
+        }
+    }
+
     pub(crate) fn argument(
         &self,
         module: &Module,
@@ -139,6 +148,9 @@ impl InvocationInputs {
             Some(Binding::BuiltIn(builtin)) => self.builtin(*builtin, globals),
             Some(Binding::Location { location, .. }) => match self {
                 Self::Vertex(inputs) => inputs.locations.get(location).cloned().unwrap_or_default(),
+                Self::Fragment(inputs) => {
+                    inputs.locations.get(location).cloned().unwrap_or_default()
+                }
                 _ => Value::Uninitialized,
             },
             None => match &module.types[ty].inner {
@@ -238,5 +250,35 @@ impl GlobalConstants {
         self.num_workgroups = count;
         self.subgroup_size = subgroup_size;
         self.num_subgroups = (size[0] * size[1] * size[2]).div_ceil(subgroup_size);
+    }
+}
+
+impl FragmentThreadInputs {
+    pub(crate) fn from_quad(
+        quad: &crate::graphics::FragmentQuad,
+        quad_index: usize,
+        lane: usize,
+    ) -> Self {
+        let input = &quad.inputs[lane];
+        Self {
+            position: input.position,
+            front_facing: input.front_facing,
+            sample_index: 0,
+            sample_mask: input.sample_mask,
+            primitive_index: quad.primitive_index,
+            locations: input.locations.clone(),
+            info: Some(crate::graphics::FragmentInfo {
+                pixel: [
+                    quad.origin[0] + lane as u32 % 2,
+                    quad.origin[1] + lane as u32 / 2,
+                ],
+                quad_index,
+                lane: lane as u32,
+                primitive_index: quad.primitive_index,
+                instance_index: quad.instance_index,
+                helper: quad.selected & (1 << lane) == 0,
+                discarded: false,
+            }),
+        }
     }
 }

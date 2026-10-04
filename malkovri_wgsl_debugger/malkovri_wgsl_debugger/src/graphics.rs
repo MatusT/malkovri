@@ -327,3 +327,15 @@ fn interpolate(
     }
     Ok(Primitive::from(&result).into())
 }
+
+/// Inspection identity and output eligibility of a fragment invocation.
+#[derive(Clone, Debug)]
+pub struct FragmentInfo {
+    pub pixel: [u32; 2],
+    pub quad_index: usize,
+    pub lane: u32,
+    pub primitive_index: u32,
+    pub instance_index: u32,
+    pub helper: bool,
+    pub discarded: bool,
+}

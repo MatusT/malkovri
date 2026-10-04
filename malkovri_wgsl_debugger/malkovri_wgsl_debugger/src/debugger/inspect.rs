@@ -14,6 +14,9 @@ use super::{
 
 impl Debugger {
     pub fn current_location(&self) -> Option<SourceLocation> {
+        if self.is_empty() {
+            return None;
+        }
         self.location_for_gid(self.focused_thread)
     }
 
@@ -120,6 +123,9 @@ impl Debugger {
 
     /// All local variables and `let` bindings visible at the current execution point.
     pub fn local_variables(&self) -> Vec<Variable> {
+        if self.is_empty() {
+            return Vec::new();
+        }
         let Ok(index) = self.invocation().current_function_frame_index() else {
             return Vec::new();
         };
@@ -162,6 +168,9 @@ impl Debugger {
 
     /// Current function arguments with their names and values.
     pub fn argument_variables(&self) -> Vec<Variable> {
+        if self.is_empty() {
+            return Vec::new();
+        }
         let Ok(index) = self.invocation().current_function_frame_index() else {
             return Vec::new();
         };
@@ -197,6 +206,9 @@ impl Debugger {
 
     /// All global variables with their names and values.
     pub fn global_variables(&self) -> Vec<Variable> {
+        if self.is_empty() {
+            return Vec::new();
+        }
         self.invocation()
             .global_variable_values()
             .into_iter()
@@ -205,6 +217,9 @@ impl Debugger {
     }
 
     pub fn entry_point_output(&self) -> Option<Value> {
+        if self.is_empty() {
+            return None;
+        }
         self.invocation().entry_point_output().cloned()
     }
 }

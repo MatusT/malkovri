@@ -302,3 +302,102 @@ fn rasterizer_handles_empty_coverage_and_odd_viewport() {
     vertices[0].position[3] = 0.;
     assert!(p.interpolate_fragments(0, &vertices, &config).is_err());
 }
+
+#[test]
+fn fragment_quads_resolve_struct_inputs_and_suppress_helper_and_discard_writes() {
+    use malkovri_wgsl_debugger::{ExecutionConfig, ResourceBinding};
+    let program = ShaderProgram::new(
+        r#"
+@group(0) @binding(0) var<storage, read_write> values: array<u32>;
+struct In { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+fn maybe_discard(x: f32) { if x > 1.0 { discard; } }
+@fragment fn main(input: In) -> @location(0) vec4f {
+    let index = u32(input.pos.y) * 4u + u32(input.pos.x);
+    values[index] = 1u;
+    maybe_discard(input.pos.x);
+    values[index] = 2u;
+    return vec4f(input.uv, 0.0, 1.0);
+}"#,
+    )
+    .unwrap();
+    let config = RasterConfig {
+        viewport: Viewport {
+            width: 4,
+            height: 4,
+        },
+        pixel_range: Some(PixelRange {
+            from: [1, 1],
+            to: [2, 2],
+        }),
+    };
+    let quads = program
+        .interpolate_fragments(0, &full_square(), &config)
+        .unwrap();
+    let mut debugger = program
+        .create_debugger(
+            0,
+            ExecutionConfig::FragmentQuads(quads),
+            GlobalConstants::default(),
+            HashMap::from([(
+                ResourceBinding {
+                    group: 0,
+                    binding: 0,
+                },
+                Value::Array(vec![Primitive::U32(0).into(); 16]),
+            )]),
+        )
+        .unwrap();
+    assert_eq!(
+        debugger.run_to_breakpoint(1, false, &[], None).unwrap(),
+        RunResult::Finished
+    );
+    assert_eq!(debugger.threads().len(), 4);
+    for thread in 1..=4 {
+        assert!(
+            debugger
+                .thread_shader_outputs(thread)
+                .unwrap()
+                .iter()
+                .all(|output| output.value.is_none())
+        );
+    }
+    let info = debugger.thread_fragment_info(4).unwrap().unwrap();
+    assert!(info.discarded && info.helper);
+    let globals = debugger.global_variables();
+    let values = &globals
+        .iter()
+        .find(|v| v.name.as_deref() == Some("values"))
+        .unwrap()
+        .value;
+    for i in 0..16 {
+        assert_eq!(
+            values.index_into(i),
+            Primitive::U32(if i == 5 { 1 } else { 0 }).into()
+        );
+    }
+}
+
+#[test]
+fn empty_fragment_selection_finishes_without_invocations() {
+    let program =
+        ShaderProgram::new("@fragment fn main() -> @location(0) vec4f { return vec4f(1.0); }")
+            .unwrap();
+    let mut debugger = program
+        .create_debugger(
+            0,
+            malkovri_wgsl_debugger::ExecutionConfig::FragmentQuads(vec![]),
+            GlobalConstants::default(),
+            HashMap::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        debugger.run_to_breakpoint(1, false, &[], None).unwrap(),
+        RunResult::Finished
+    );
+    assert!(debugger.threads().is_empty());
+    assert!(debugger.current_location().is_none());
+    assert!(debugger.entry_point_output().is_none());
+    assert!(debugger.global_variables().is_empty());
+    assert!(debugger.local_variables().is_empty());
+    assert!(debugger.argument_variables().is_empty());
+}

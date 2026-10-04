@@ -6,6 +6,9 @@ use super::{DebugThreadId, Debugger, InvocationId, ParkReason, StepResult, Threa
 
 impl Debugger {
     pub fn step(&mut self) -> Result<StepResult, EvaluatorError> {
+        if self.is_empty() {
+            return Ok(StepResult::Finished);
+        }
         self.step_gid(self.focused_thread)
     }
 

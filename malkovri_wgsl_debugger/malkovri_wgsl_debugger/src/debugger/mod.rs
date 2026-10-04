@@ -337,6 +337,52 @@ impl Debugger {
                 }
                 inputs
             }
+            (naga::ShaderStage::Fragment, ExecutionConfig::FragmentQuads(quads)) => {
+                if quads.len() > crate::graphics::MAX_FRAGMENT_INVOCATIONS / 4 {
+                    return Err(DebuggerError::InvalidConfig(
+                        "fragment invocation limit exceeded".into(),
+                    ));
+                }
+                let fields = program
+                    .input_locations(entry_point_index)
+                    .map_err(DebuggerError::InvalidConfig)?;
+                let mut inputs = Vec::with_capacity(quads.len() * 4);
+                for (index, quad) in quads.iter().enumerate() {
+                    if quad.selected == 0
+                        || quad.selected & !quad.coverage != 0
+                        || (quad.coverage | quad.selected) & !15 != 0
+                        || quad.origin.iter().any(|v| v % 2 != 0 || *v >= 1 << 23)
+                    {
+                        return Err(DebuggerError::InvalidConfig(
+                            "invalid fragment quad masks or origin".into(),
+                        ));
+                    }
+                    for lane in 0..4 {
+                        for field in &fields {
+                            let value = quad.inputs[lane]
+                                .locations
+                                .get(&field.location)
+                                .ok_or_else(|| {
+                                    DebuggerError::InvalidConfig(format!(
+                                        "missing @location({})",
+                                        field.location
+                                    ))
+                                })?;
+                            field
+                                .ty
+                                .validate(value)
+                                .map_err(DebuggerError::InvalidConfig)?;
+                        }
+                        let input = FragmentThreadInputs::from_quad(quad, index, lane);
+                        let info = input.info.as_ref().unwrap();
+                        inputs.push((
+                            [info.pixel[0], info.pixel[1], quad.primitive_index],
+                            InvocationInputs::Fragment(input),
+                        ));
+                    }
+                }
+                inputs
+            }
             (naga::ShaderStage::Fragment, ExecutionConfig::Fragment) => vec![(
                 [0, 0, 0],
                 InvocationInputs::Fragment(FragmentThreadInputs::default()),
@@ -361,7 +407,7 @@ impl Debugger {
         }
 
         let group = ExecutionGroup::new(invocations);
-        let focused_thread = group.resolve(1)?;
+        let focused_thread = group.ids().next().unwrap_or(InvocationId::placeholder());
         Ok(Self {
             group,
             focused_thread,
@@ -400,6 +446,17 @@ impl Debugger {
         )
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.group.ids().next().is_none()
+    }
+
+    pub fn thread_fragment_info(
+        &self,
+        thread: DebugThreadId,
+    ) -> Result<Option<crate::graphics::FragmentInfo>, EvaluatorError> {
+        Ok(self.invocation_for_thread(thread)?.fragment_info())
+    }
+
     pub fn threads(&self) -> Vec<DebugThread> {
         self.group
             .ids()
@@ -412,7 +469,28 @@ impl Debugger {
                         naga::ShaderStage::Vertex => {
                             format!("vertex {}, instance {}", global_id[0], global_id[1])
                         }
-                        naga::ShaderStage::Fragment => "fragment 0".into(),
+                        naga::ShaderStage::Fragment => {
+                            self.group.get(id).state().fragment_info().map_or_else(
+                                || "fragment 0".into(),
+                                |info| {
+                                    format!(
+                                        "pixel [{}, {}], primitive {}, instance {}, lane {}{}",
+                                        info.pixel[0],
+                                        info.pixel[1],
+                                        info.primitive_index,
+                                        info.instance_index,
+                                        info.lane,
+                                        if info.discarded {
+                                            " (discarded helper)"
+                                        } else if info.helper {
+                                            " (helper)"
+                                        } else {
+                                            ""
+                                        }
+                                    )
+                                },
+                            )
+                        }
                         _ => format!("[{}, {}, {}]", global_id[0], global_id[1], global_id[2]),
                     },
                 }

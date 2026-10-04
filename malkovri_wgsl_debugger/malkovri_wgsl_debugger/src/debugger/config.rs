@@ -9,6 +9,8 @@ pub enum ExecutionConfig {
     Vertex(VertexConfig),
     /// Execute one fragment with default fragment inputs.
     Fragment,
+    /// Execute internally generated fragment quads.
+    FragmentQuads(Vec<crate::graphics::FragmentQuad>),
 }
 
 impl From<WorkgroupConfig> for ExecutionConfig {

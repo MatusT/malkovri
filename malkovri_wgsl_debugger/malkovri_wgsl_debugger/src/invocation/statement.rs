@@ -84,9 +84,9 @@ impl InvocationState {
                 .current_function_frame_mut()?
                 .set_control_flow(ControlFlow::Continue),
             Statement::ControlBarrier(_) | Statement::MemoryBarrier(_) => {}
-            Statement::Kill => self
-                .current_function_frame_mut()?
-                .set_control_flow(ControlFlow::Return(None)),
+            Statement::Kill => {
+                self.discarded = true;
+            }
             Statement::ImageStore { .. } => {
                 return Err(EvaluatorError::UnsupportedStatement("imageStore".into()));
             }

@@ -106,6 +106,12 @@ impl InvocationState {
                     .map_err(EvaluatorError::InternalError)
             }
             PlaceRoot::Global { handle } => {
+                if self.is_helper()
+                    && self.program.module().global_variables[*handle].space
+                        != naga::AddressSpace::Private
+                {
+                    return Ok(());
+                }
                 self.ensure_global_variable_value(*handle)?;
                 let slot = self.global_values.get_mut(handle).ok_or_else(|| {
                     EvaluatorError::InternalError(format!(

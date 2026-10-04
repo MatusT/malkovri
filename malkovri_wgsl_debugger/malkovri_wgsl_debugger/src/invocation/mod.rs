@@ -30,6 +30,7 @@ pub(crate) struct InvocationState {
     program: Arc<ShaderProgram>,
     global_values: HashMap<naga::Handle<GlobalVariable>, GlobalValue>,
     entry_point_output: Option<Value>,
+    discarded: bool,
     entry_point_return: Option<StatementId>,
     stack: Vec<StackFrame>,
     inputs: InvocationInputs,
@@ -95,6 +96,7 @@ impl InvocationState {
             global_values,
             program,
             entry_point_output: None,
+            discarded: false,
             entry_point_return: None,
             stack: vec![StackFrame::Function(Box::new(FunctionFrame::new(
                 FunctionId::EntryPoint(entry_point_index),
@@ -108,8 +110,24 @@ impl InvocationState {
         Ok(invocation)
     }
 
+    pub(crate) fn is_helper(&self) -> bool {
+        self.discarded || self.inputs.fragment_info().is_some_and(|info| info.helper)
+    }
+
+    pub(crate) fn fragment_info(&self) -> Option<crate::graphics::FragmentInfo> {
+        self.inputs.fragment_info().map(|mut info| {
+            info.discarded = self.discarded;
+            info.helper |= self.discarded;
+            info
+        })
+    }
+
     pub(crate) fn entry_point_output(&self) -> Option<&Value> {
-        self.entry_point_output.as_ref()
+        if self.is_helper() {
+            None
+        } else {
+            self.entry_point_output.as_ref()
+        }
     }
 
     pub(crate) fn entry_point_return(&self) -> Option<StatementId> {

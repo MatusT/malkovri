@@ -35,6 +35,9 @@ impl Debugger {
         single_thread: bool,
         breakpoints: &[u32],
     ) -> Result<RunResult, EvaluatorError> {
+        if self.is_empty() {
+            return Ok(RunResult::Finished);
+        }
         self.focus_thread(thread_id)?;
         let initial_depth = self.call_stack().len();
         let initial_line = self.current_location().map(|location| location.line);
@@ -84,6 +87,9 @@ impl Debugger {
         breakpoints: &[u32],
         mut trace: Option<&mut Vec<String>>,
     ) -> Result<RunResult, EvaluatorError> {
+        if self.is_empty() {
+            return Ok(RunResult::Finished);
+        }
         self.focus_thread(thread_id)?;
         if let Some(trace) = trace.as_mut() {
             let lines = breakpoints

@@ -7,6 +7,9 @@ use super::{DebugThreadId, ThreadStatus};
 pub(super) struct InvocationId(usize);
 
 impl InvocationId {
+    pub(super) fn placeholder() -> Self {
+        Self(0)
+    }
     pub fn thread_id(self) -> DebugThreadId {
         self.0 as DebugThreadId + 1
     }
