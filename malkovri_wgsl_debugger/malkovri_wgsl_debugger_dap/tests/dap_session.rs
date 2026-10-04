@@ -1425,3 +1425,36 @@ fn invalid_or_ambiguous_entry_selection_preserves_the_previous_session() {
         );
     }
 }
+
+#[test]
+fn launch_decodes_vertex_attributes_and_rejects_bad_data() {
+    let source = "@vertex fn main(@location(0) point: vec2f) -> @builtin(position) vec4f { return vec4f(point, 0.0, 1.0); }";
+    for (attributes, valid) in [
+        (json!({"0": {"values": [[0.25, 0.5]]}}), true),
+        (json!({"0": {"values": [[0.25]]}}), false),
+        (json!({"0": {"values": [[0.25, 0.5]], "typo": 1}}), false),
+        (json!({"0": {"values": []}}), false),
+        (json!({"1": {"values": [[0.25, 0.5]]}}), false),
+    ] {
+        let mut s = Session::new();
+        s.send("initialize", json!({}));
+        s.send("configurationDone", json!({}));
+        let messages = s.send("launch", json!({"program":"vertex.wgsl", "source":source, "entryType":"vertex", "vertexAttributes":attributes}));
+        assert_eq!(
+            find_response(&messages, s.last_seq()).unwrap()["success"],
+            valid,
+            "{messages:?}"
+        );
+        if valid {
+            assert_eq!(
+                s.adapter
+                    .debugger()
+                    .unwrap()
+                    .thread_shader_outputs(1)
+                    .unwrap()[0]
+                    .value,
+                Some(malkovri_wgsl_debugger::Primitive::F32x4([0.25, 0.5, 0.0, 1.0]).into())
+            );
+        }
+    }
+}

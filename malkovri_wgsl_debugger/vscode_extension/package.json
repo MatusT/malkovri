@@ -120,6 +120,19 @@
                   }
                 }
               },
+              "vertexAttributes": {
+                "type": "object",
+                "description": "Decoded vertex attributes keyed by shader location; arrays are relative to the draw start.",
+                "additionalProperties": {
+                  "type": "object",
+                  "required": ["values"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "stepMode": { "enum": ["vertex", "instance"], "default": "vertex" },
+                    "values": { "type": "array", "minItems": 1, "items": { "type": ["number", "array"] } }
+                  }
+                }
+              },
               "globalConstants": {
                 "type": "object",
                 "description": "Shared builtin constants for future vertex/fragment support.",

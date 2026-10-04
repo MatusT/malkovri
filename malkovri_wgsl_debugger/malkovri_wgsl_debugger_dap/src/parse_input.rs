@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::{fs, path::Path};
@@ -6,7 +6,8 @@ use std::{fs, path::Path};
 use crate::error::DebugAdapterError;
 use malkovri_wgsl_debugger::{
     DrawConfig, EntryPointInfo, ExecutionConfig, GlobalConstants, Primitive, ResourceBinding,
-    ShaderProgram, ShaderStage, Value, WorkgroupConfig,
+    ShaderProgram, ShaderStage, Value, VertexAttribute, VertexConfig, VertexStepMode,
+    WorkgroupConfig,
 };
 
 #[derive(serde::Deserialize)]
@@ -74,6 +75,8 @@ pub fn select_entry_point<'a>(
 pub fn parse_execution_config(
     arguments: &serde_json::Map<String, serde_json::Value>,
     stage: ShaderStage,
+    program: &ShaderProgram,
+    entry_index: usize,
 ) -> Result<ExecutionConfig, DebugAdapterError> {
     let has_workgroup_config = [
         "workgroupConfig",
@@ -101,6 +104,11 @@ pub fn parse_execution_config(
             "drawConfig is only supported for vertex shaders".into(),
         ));
     }
+    if stage != ShaderStage::Vertex && arguments.contains_key("vertexAttributes") {
+        return Err(DebugAdapterError::Parse(
+            "vertexAttributes is only supported for vertex shaders".into(),
+        ));
+    }
     match stage {
         ShaderStage::Compute => Ok(parse_workgroup_config(arguments)?.into()),
         ShaderStage::Vertex => {
@@ -110,7 +118,13 @@ pub fn parse_execution_config(
                 .transpose()?
                 .unwrap_or_default();
             config.validate().map_err(DebugAdapterError::Parse)?;
-            Ok(config.into())
+            let attributes =
+                parse_vertex_attributes(arguments.get("vertexAttributes"), program, entry_index)?;
+            Ok(VertexConfig {
+                draw: config,
+                attributes,
+            }
+            .into())
         }
         ShaderStage::Fragment => Ok(ExecutionConfig::Fragment),
         _ => Err(DebugAdapterError::Parse("unsupported shader stage".into())),
@@ -430,4 +444,55 @@ fn parse_ron(key: &str, type_str: &str, content: &str) -> Result<Value, DebugAda
             "Unknown type '{type_str}' for binding '{key}'"
         ))),
     }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AttributeInput {
+    #[serde(default)]
+    step_mode: VertexStepMode,
+    values: Vec<serde_json::Value>,
+}
+
+pub fn parse_vertex_attributes(
+    value: Option<&serde_json::Value>,
+    program: &ShaderProgram,
+    entry: usize,
+) -> Result<BTreeMap<u32, VertexAttribute>, DebugAdapterError> {
+    let raw: BTreeMap<u32, AttributeInput> = value
+        .map(|v| serde_json::from_value(v.clone()))
+        .transpose()?
+        .unwrap_or_default();
+    let fields = program
+        .input_locations(entry)
+        .map_err(DebugAdapterError::Parse)?;
+    raw.into_iter()
+        .map(|(location, attribute)| {
+            let field = fields
+                .iter()
+                .find(|f| f.location == location)
+                .ok_or_else(|| {
+                    DebugAdapterError::Parse(format!("unknown vertex @location({location})"))
+                })?;
+            let values = attribute
+                .values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    field.ty.parse_json(value).map_err(|e| {
+                        DebugAdapterError::Parse(format!(
+                            "vertexAttributes.{location}.values[{index}]: {e}"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((
+                location,
+                VertexAttribute {
+                    step_mode: attribute.step_mode,
+                    values,
+                },
+            ))
+        })
+        .collect()
 }

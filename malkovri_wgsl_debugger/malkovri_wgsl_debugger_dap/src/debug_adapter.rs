@@ -188,7 +188,12 @@ impl DebugAdapter {
 
         let shader_program = ShaderProgram::new(&source).map_err(DebuggerError::from)?;
         let entry = parse_input::select_entry_point(arguments, &shader_program)?;
-        let config = parse_input::parse_execution_config(arguments, entry.stage)?;
+        let config = parse_input::parse_execution_config(
+            arguments,
+            entry.stage,
+            &shader_program,
+            entry.index,
+        )?;
         let global_constants = parse_input::parse_global_constants(arguments)?;
         #[cfg(not(target_arch = "wasm32"))]
         let bindings = {

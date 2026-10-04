@@ -237,3 +237,9 @@ Pass `VertexConfig { draw, attributes }` to `create_debugger` to supply
 draw count, and indexing starts at zero even with nonzero `firstVertex` or
 `firstInstance`. Direct arguments and input structs use the same bindings.
 `DrawConfig` alone remains supported for shaders with only builtin inputs.
+
+In launch JSON, use `vertexAttributes` keyed by location, for example
+`"vertexAttributes": { "0": { "values": [[0.0, 0.5], [0.5, -0.5]] } }`
+with `drawConfig.vertexCount: 2`. `stepMode` defaults to `"vertex"`; use
+`"instance"` for one value per instance. Numeric types come from the selected
+entry's WGSL declarations. Missing inputs and malformed attributes fail launch.
