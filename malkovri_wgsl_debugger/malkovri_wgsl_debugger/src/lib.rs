@@ -20,3 +20,5 @@ pub use naga::{ResourceBinding, ShaderStage};
 pub use program::{EntryPointInfo, ShaderProgram};
 
 pub use program::interface::{LocationInput, ShaderIoType};
+
+pub mod graphics;

@@ -243,3 +243,13 @@ In launch JSON, use `vertexAttributes` keyed by location, for example
 with `drawConfig.vertexCount: 2`. `stepMode` defaults to `"vertex"`; use
 `"instance"` for one value per instance. Numeric types come from the selected
 entry's WGSL declarations. Missing inputs and malformed attributes fail launch.
+
+### CPU pixel interpolation (Rust)
+
+`ShaderProgram::interpolate_fragments` accepts a fragment entry, triangle-list
+`graphics::VertexOutput` records, and `RasterConfig`. It returns 2×2 quads with
+interpolated locations, fragment positions, geometric coverage, and selected output
+masks. `PixelRange { from, to }` uses inclusive/exclusive framebuffer bounds without
+changing the viewport. Outside-range lanes are generated only as helpers in needed
+quads. The initial implementation supports center/flat interpolation, positive
+clip W, and vertex depth in `[0, W]`; clipping and texture sampling are deferred.
