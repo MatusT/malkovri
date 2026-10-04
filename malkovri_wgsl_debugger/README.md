@@ -147,8 +147,9 @@ without combining both stages into an invocation's execution state.
 
 The [fragment support plan](PLAN_GRAPHICS.md) covers shader-generated or manually
 supplied vertex outputs, their interpolation at pixels, and internally generated
-2×2 fragment quads for derivatives and texture sampling. Its configuration
-examples describe planned behavior.
+2×2 fragment quads for derivatives and texture sampling. A rectangular pixel range
+limits fragment execution within the viewport. Its configuration examples describe
+planned behavior.
 
 ## Tests
 

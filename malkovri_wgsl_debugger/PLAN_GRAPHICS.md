@@ -17,7 +17,8 @@ Support two ways to supply fragment inputs from the beginning:
 
 Both paths feed the same coverage, interpolation, and quad-generation code. Users
 provide vertex data; pixel inputs, quad origins, lanes, and helper coverage are
-computed internally.
+computed internally. An optional rectangular pixel range limits fragment execution
+within the viewport for either input path.
 
 ## What already works
 
@@ -60,7 +61,7 @@ The core only needs records for:
 - `FragmentInput`: framebuffer position, front-facing/sample builtins, and
   location values.
 - `FragmentQuad`: primitive/instance identity, even pixel origin, four inputs,
-  and a four-bit coverage mask.
+  and four-bit geometric-coverage and selected-output masks.
 - Fragment results: pixel/primitive identity, returned location/builtin outputs,
   and whether the lane is uncovered or discarded.
 
@@ -104,7 +105,8 @@ For each triangle:
 
 1. Divide clip XYZ by W, then map to a viewport of width `Wv` and height `Hv`:
    `x = (ndc.x + 1) * Wv / 2`, `y = (1 - ndc.y) * Hv / 2`.
-2. Clamp the triangle's screen bounding box to the viewport. Test pixel centers
+2. Intersect the triangle's screen bounding box with the viewport and requested
+   pixel range before generating invocations. Test pixel centers
    `(x + 0.5, y + 0.5)` using edge functions and a deterministic top-left rule.
    Skip zero-area triangles. Derive `frontFacing` from the configured winding,
    accounting for the Y flip; default to CCW front faces and no culling.
@@ -120,10 +122,23 @@ For each triangle:
    Set sample index to 0 and coverage mask to 1 for covered lanes.
 5. Group pixels into aligned 2×2 quads and compute all four lane inputs as below.
 
-Use a small viewport by default. An optional `focusPixel` selects its complete
-quad for debugging; omitting it runs all covered quads. The focus never removes
-neighbor lanes. No coverage at the selected pixel produces a clear no-fragment
-result. Without a focus, no covered triangles completes with zero fragments.
+Use a small viewport by default. An optional `pixelRange` contains `from: [x, y]`
+and `to: [x, y]`, defining a half-open rectangle: `fromX <= x < toX` and
+`fromY <= y < toY`. Omit it to use the full viewport. For a single pixel `(x, y)`,
+use `from: [x, y]` and `to: [x + 1, y + 1]`.
+
+The range limits work; it does not resize the viewport, change interpolation, or
+rebase framebuffer coordinates. Skip quads with no triangle-covered pixel inside
+the range. If none qualify, complete with zero fragments. Do not run outside
+fragments and then execute shader `discard` to filter their results.
+
+At unaligned range boundaries, retain the other lanes of each required 2×2 quad
+as helpers, even when they are outside the range. These lanes provide derivatives
+and texture-sampling operands but commit no outputs or observable writes. All
+other outside invocations are never created. Keep geometric coverage separate
+from the selection mask so selection does not alter inputs such as sample coverage
+for retained lanes. Apply the allocation limit to selected quads including helpers,
+not to the unselected full viewport.
 
 Triangles that overlap a pixel produce distinct fragment invocations, identified
 by instance, primitive, and pixel. Do not silently merge them. This first version
@@ -150,14 +165,16 @@ lane 0: (x,   y)      lane 1: (x+1, y)
 lane 2: (x,   y+1)    lane 3: (x+1, y+1)
 ```
 
-Create a quad if any lane is covered. Uncovered lanes, including lanes beyond an
-odd-sized viewport boundary, execute as helpers. Compute their inputs from the
+Create a quad if any lane is both covered and inside the pixel range. Uncovered
+lanes, lanes outside the range, and lanes beyond an odd-sized viewport boundary
+execute as helpers within those quads. Compute their inputs from the
 same triangle's interpolation planes, even outside its coverage; do not copy the
 nearest covered value. Keep quads separate per primitive so adjacent triangles
 cannot exchange derivative operands.
 
-Track coverage and helper/discard state separately from whether a thread is
-running. Helpers execute shader calculations and contribute to quad operations,
+Track geometric coverage, range membership, and helper/discard state separately
+from whether a thread is running. Helpers execute shader calculations and
+contribute to quad operations,
 but do not commit outputs or writes to externally visible resource memory.
 Private/local writes still work. A covered lane executing `discard`, including
 inside a called function, becomes a helper for the remainder of execution. Earlier
@@ -233,7 +250,7 @@ Accept an array of vertex-output records. Each record contains `position`, the
 four-component clip-space output normally returned as `@builtin(position)`, and
 `locations`, the user-defined outputs keyed by location. Consecutive groups of
 three records form triangles. Require a nonempty multiple of three records and
-a viewport; `focusPixel` is optional, just as in the vertex-execution path.
+a viewport; `pixelRange` is optional, just as in the vertex-execution path.
 
 No vertex entry or draw configuration is needed. The first version treats the
 records as one instance, assigning vertex and primitive identities from array
@@ -249,17 +266,18 @@ front-facing, sample coverage, neighboring values, and helper lanes internally.
 The launch schema exposes no lane records, quad origins, or per-lane overrides.
 Constant varyings can be supplied by giving each triangle vertex the same value.
 
-The user selects pixels for inspection, while the debugger generates and executes
-their neighboring lanes as needed. Supplied records identical to a vertex shader's
-outputs must produce identical pixel inputs, coverage, derivatives, and sampled
-colors when the viewport and fragment resources are the same.
+The user selects a pixel range to execute, then chooses pixels for inspection;
+the debugger generates neighboring helper lanes as needed. Supplied records
+identical to a vertex shader's outputs must produce identical pixel inputs,
+coverage, derivatives, and sampled colors when the viewport, pixel range, and
+fragment resources are the same.
 
 ## Proposed launch shape
 
 Keep the existing top-level entry selection for the target fragment. A tagged
 `fragmentConfig` chooses vertex execution or supplied vertex outputs. Both modes
-use the same viewport and optional pixel selection. When running a vertex shader,
-the first version uses vertex and fragment entries from the same WGSL file and
+use the same viewport and optional rectangular pixel range. When running a vertex
+shader, the first version uses both entries from the same WGSL file and
 shares launch resource bindings. The supplied-output mode can use a WGSL file
 containing only the fragment entry.
 
@@ -286,16 +304,21 @@ and returns clip position, UV, and color for `fs_main`:
       }
     },
     "viewport": { "width": 64, "height": 64 },
-    "focusPixel": [32, 32]
+    "pixelRange": { "from": [32, 32], "to": [48, 48] }
   }
 }
 ```
 
-Omit `focusPixel` to execute the whole covered viewport. Attribute `stepMode`
-defaults to `vertex`. Initially topology is fixed to triangle-list. Viewport
-dimensions must be positive; focus must lie within the viewport. Apply a checked
-invocation/allocation limit before creating all pixel threads and report an
-oversized request rather than truncating it.
+Omit `pixelRange` to execute the whole covered viewport. `from` is inclusive and
+`to` is exclusive; the example selects pixel indices 32 through 47 on both axes.
+Require both endpoints as integer pairs with
+`0 <= fromX < toX <= viewport.width` and
+`0 <= fromY < toY <= viewport.height`. Reject missing endpoints, reversed or empty
+ranges, fractional coordinates, and out-of-viewport bounds. No quad alignment is
+required from the user. Attribute `stepMode` defaults to `vertex`; initially
+topology is fixed to triangle-list. Viewport dimensions must be positive. Check
+invocation/allocation limits before creating selected pixel threads and boundary
+helpers, reporting oversized requests rather than truncating them.
 
 Supplied-output example: `fs_main` takes a `vec2<f32>` at location 0 and a
 `vec4<f32>` at location 1. The user supplies three clip positions, UVs, and colors;
@@ -327,7 +350,7 @@ the debugger generates all pixel and quad inputs:
       }
     ],
     "viewport": { "width": 64, "height": 64 },
-    "focusPixel": [32, 32]
+    "pixelRange": { "from": [32, 32], "to": [48, 48] }
   }
 }
 ```
@@ -356,7 +379,8 @@ Thread labels include pixel, primitive/instance, lane, and helper status. A step
 focused on a pixel advances its quad as needed for dependencies; in fragment mode,
 `singleThreadExecution` therefore selects a quad as the execution unit while the
 selected lane remains the inspection focus. Other quads stay paused. Ordinary
-Continue can run all quads. Honor breakpoints and budget limits during peer
+Continue can run all generated quads within the requested range, including their
+boundary helpers. Honor breakpoints and budget limits during peer
 progress; stop the quad consistently and describe the lane that hit a breakpoint.
 
 Preserve breakpoints across stages. Give new stage threads distinct DAP IDs and
@@ -372,7 +396,7 @@ small set of focused, tested commits:
 | Order | Slice | Required evidence |
 | --- | --- | --- |
 | 1 | Vertex attributes, shared interface resolution, structured output extraction | Direct/struct interfaces; nonzero vertex/instance offsets; invalid types/counts; completed outputs per invocation; unchanged builtin-only vertex behavior. |
-| 2 | Pixel coverage, interpolation, and quad input generation | Known triangle at selected pixels; unequal W distinguishes perspective/linear; flat integers preserve provoking vertex; winding/Y flip; shared edges; degenerate/outside triangles; odd viewport and boundary helpers; separate overlapping primitives. |
+| 2 | Pixel coverage, interpolation, and quad input generation | Known triangle at selected pixels; unequal W distinguishes perspective/linear; flat integers preserve provoking vertex; winding/Y flip; shared edges; degenerate/outside triangles; odd viewport and boundary helpers; separate overlapping primitives; half-open range bounds and validation; one-pixel/unaligned ranges; no invocations for excluded quads; no writes/outputs from range-boundary helpers; selected pixel inputs and derivatives match a full-viewport run for shaders without cross-fragment side effects; allocation counts include only selected quads and helpers. |
 | 3 | Configurable fragment quad execution from either source of vertex outputs | A fragment-only module runs supplied-output fixtures; supplied and shader-generated vertex outputs produce equal coverage, interpolated inputs, and results; missing locations, malformed positions, and incomplete triangles fail; builtin/struct inputs inspect correctly; helper writes and nested discard are handled; outputs retain pixel identity. |
 | 4 | Resumable expression collectives and derivatives | Known fine/coarse differences; shader-computed operands; branches reconverge; loop/call instances stay separate; helpers participate; budget/step resumption works; invalid nonuniform collectives fail instead of hanging. |
 | 5 | CPU texture/sampler bindings and sampling | Known texels, address/filter modes, explicit and implicit LOD, distinct mip colors, quad-edge helpers, invalid bindings, and uniformity diagnostics. |
