@@ -1,4 +1,5 @@
 //! CPU triangle interpolation shared by supplied and shader-generated vertex outputs.
+use glam::{DVec2, DVec3};
 use std::collections::BTreeMap;
 
 use crate::{LocationInput, Primitive, ShaderProgram, Value};
@@ -78,13 +79,14 @@ impl RasterConfig {
     }
 }
 
-fn edge(a: [f64; 2], b: [f64; 2], p: [f64; 2]) -> f64 {
-    (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
+fn edge(a: DVec2, b: DVec2, p: DVec2) -> f64 {
+    (b - a).perp_dot(p - a)
 }
-fn top_left(a: [f64; 2], b: [f64; 2]) -> bool {
-    b[1] < a[1] || (b[1] == a[1] && b[0] > a[0])
+fn top_left(a: DVec2, b: DVec2) -> bool {
+    let direction = b - a;
+    direction.y < 0.0 || (direction.y == 0.0 && direction.x > 0.0)
 }
-fn covered(points: &[[f64; 2]; 3], p: [f64; 2]) -> bool {
+fn covered(points: &[DVec2; 3], p: DVec2) -> bool {
     (0..3).all(|i| {
         let a = points[i];
         let b = points[(i + 1) % 3];
@@ -153,10 +155,9 @@ impl ShaderProgram {
             let mut v = [&triangle[0], &triangle[1], &triangle[2]];
             let mut points = v.map(|v| {
                 let [x, y, _, w] = v.position.map(f64::from);
-                [
-                    (x / w + 1.) * f64::from(config.viewport.width) / 2.,
-                    (1. - y / w) * f64::from(config.viewport.height) / 2.,
-                ]
+                DVec2::new(x / w + 1.0, 1.0 - y / w)
+                    * DVec2::new(config.viewport.width as f64, config.viewport.height as f64)
+                    * 0.5
             });
             let area = edge(points[0], points[1], points[2]);
             if area == 0. {
@@ -168,24 +169,22 @@ impl ShaderProgram {
                 v.swap(1, 2);
             }
             let area = area.abs();
-            let from: [u32; 2] = std::array::from_fn(|axis| {
-                points
-                    .iter()
-                    .map(|p| p[axis])
-                    .fold(f64::INFINITY, f64::min)
-                    .floor()
-                    .max(f64::from(range.from[axis]))
-                    .min(f64::from(range.to[axis])) as u32
-            });
-            let to: [u32; 2] = std::array::from_fn(|axis| {
-                points
-                    .iter()
-                    .map(|p| p[axis])
-                    .fold(f64::NEG_INFINITY, f64::max)
-                    .ceil()
-                    .max(f64::from(range.from[axis]))
-                    .min(f64::from(range.to[axis])) as u32
-            });
+            let range_min = DVec2::from_array(range.from.map(f64::from));
+            let range_max = DVec2::from_array(range.to.map(f64::from));
+            let bounds_min = points
+                .iter()
+                .copied()
+                .fold(DVec2::INFINITY, DVec2::min)
+                .floor()
+                .clamp(range_min, range_max);
+            let bounds_max = points
+                .iter()
+                .copied()
+                .fold(DVec2::NEG_INFINITY, DVec2::max)
+                .ceil()
+                .clamp(range_min, range_max);
+            let from = bounds_min.to_array().map(|x| x as u32);
+            let to = bounds_max.to_array().map(|x| x as u32);
             if (0..2).any(|i| from[i] >= to[i]) {
                 continue;
             }
@@ -207,7 +206,10 @@ impl ShaderProgram {
                     for (lane, p) in pixels.iter().enumerate() {
                         if p[0] < config.viewport.width
                             && p[1] < config.viewport.height
-                            && covered(&points, [f64::from(p[0]) + 0.5, f64::from(p[1]) + 0.5])
+                            && covered(
+                                &points,
+                                DVec2::from_array(p.map(f64::from)) + DVec2::splat(0.5),
+                            )
                         {
                             coverage |= 1 << lane;
                             if (0..2).all(|i| p[i] >= range.from[i] && p[i] < range.to[i]) {
@@ -226,26 +228,24 @@ impl ShaderProgram {
                     }
                     let mut inputs = Vec::with_capacity(4);
                     for (lane, pixel) in pixels.iter().enumerate() {
-                        let p = pixel.map(|p| f64::from(p) + 0.5);
-                        let lambda = [
+                        let p = DVec2::from_array(pixel.map(f64::from)) + DVec2::splat(0.5);
+                        let lambda = DVec3::new(
                             edge(points[1], points[2], p) / area,
                             edge(points[2], points[0], p) / area,
                             edge(points[0], points[1], p) / area,
-                        ];
-                        let reciprocal_w: f64 = (0..3)
-                            .map(|i| lambda[i] / f64::from(v[i].position[3]))
-                            .sum();
+                        );
+                        let vertex_reciprocal_w =
+                            DVec3::from_array(v.map(|v| 1.0 / f64::from(v.position[3])));
+                        let reciprocal_w = lambda.dot(vertex_reciprocal_w);
                         if reciprocal_w == 0. || !reciprocal_w.is_finite() {
                             return Err(
                                 "invalid interpolation denominator (including helper lanes)".into(),
                             );
                         }
-                        let depth: f64 = (0..3)
-                            .map(|i| {
-                                lambda[i] * f64::from(v[i].position[2])
-                                    / f64::from(v[i].position[3])
-                            })
-                            .sum();
+                        let depth = lambda.dot(
+                            DVec3::from_array(v.map(|v| f64::from(v.position[2])))
+                                * vertex_reciprocal_w,
+                        );
                         let locations = fields
                             .iter()
                             .map(|f| {
@@ -286,7 +286,7 @@ fn interpolate(
     field: &LocationInput,
     vertices: &[&VertexOutput; 3],
     provoking: &VertexOutput,
-    lambda: [f64; 3],
+    lambda: DVec3,
     reciprocal_w: f64,
 ) -> Result<Value, String> {
     let mode = field.interpolation.unwrap_or(Interpolation::Perspective);
