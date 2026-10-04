@@ -1,359 +1,374 @@
-# Plan: Graphics Pipeline Support (Vertex + Fragment Shaders)
+# Plan: Fragment Shaders with Interpolated Pixel Inputs and 2×2 Quads
 
-## Context
+Status: design proposal, 2026-10-04. Implementation has not started. Configuration
+examples below are proposed, not currently supported.
 
-The current debugger runs compute shaders. Vertex and fragment builtins already exist in `EntryPointInputs`, and naga already parses `@builtin` / `@location` bindings on function arguments and return types. However:
-- Entry point return values are currently **discarded** (`evaluator.rs:431-449` only caches return values for non-entry-point function calls)
-- `@location(N)` vertex shader inputs return `Value::Uninitialized` (`eval_expressions.rs:255`)
-- `StepResult` carries no output data
+Run the vertex shader, collect its outputs, compute interpolated inputs for each
+pixel, and execute the fragment shader in groups of four neighboring pixels. Use
+a straightforward CPU implementation and the existing interpreter. Model the
+behavior needed to debug shader results without reproducing GPU internals.
 
-The graphics pipeline requires: **vertex stage → rasterization → fragment stage**, where rasterization is a CPU-side software step that maps vertex outputs to fragment inputs via barycentric interpolation.
+Support two ways to supply fragment inputs from the beginning:
 
----
+- **From vertices:** the user specifies vertex and fragment entry points, vertex
+  data, a draw, and a viewport. Compute pixel inputs from the resulting triangles.
+- **Manual:** the user supplies fragment values directly, with no vertex shader.
+  Explicit neighboring values allow derivatives and texture sampling to be tested.
 
-## Critical Files
+Both paths produce the same fragment quads. Copying one vertex's outputs directly
+into a fragment is not part of this plan.
 
-- `malkovri_wgsl_debugger/src/evaluator.rs` — `apply_return()` needs to capture entry point return values
-- `malkovri_wgsl_debugger/src/eval_expressions.rs` — `@location(N)` on vertex args needs vertex buffer data
-- `malkovri_wgsl_debugger/src/entry_point_inputs.rs` — extend for vertex buffer inputs
-- `malkovri_wgsl_debugger_dap/src/parse_input.rs` — parse vertex buffers and draw call from launch config
-- `malkovri_wgsl_debugger_dap/src/debug_adapter.rs` — pipeline stage transitions
+## What already works
 
----
+| Existing capability | Location | Work still needed |
+| --- | --- | --- |
+| Vertex/instance invocations from a non-indexed draw | `malkovri_wgsl_debugger/src/debugger/config.rs` | Supply attributes at `@location(N)`. |
+| Entry-point return capture | `malkovri_wgsl_debugger/src/invocation/step.rs` | Reuse it for vertex and fragment outputs. |
+| Per-thread Shader Outputs inspection | `malkovri_wgsl_debugger/src/debugger/outputs.rs` and DAP | Expose binding metadata for interpolation, beyond display names. |
+| Basic fragment entry execution | `ExecutionConfig::Fragment` | Configurable inputs and multiple pixel invocations. |
+| Stage/name entry selection | `malkovri_wgsl_debugger_dap/src/parse_input.rs` | Select both entries for a vertex-driven run. |
+| Invocation scheduling and collective result injection | `malkovri_wgsl_debugger/src/debugger/` | Add quad coordination for expressions. |
+| Naga validation, including uniformity | `malkovri_wgsl_debugger/src/program/parse.rs` | Preserve checks and report unsupported runtime cases clearly. |
 
-## Data Flow
+`@location` arguments currently evaluate to `Value::Uninitialized`. Input structs
+also need their members assembled from bindings. Derivative and texture expressions
+are not implemented. `discard` currently behaves as a return from the current
+function, which is insufficient for fragments and helper lanes.
 
-```
-VertexBuffer(s) + DrawCall
-        ↓
-  VertexDebugger          (one PerThread per vertex invocation)
-        ↓  outputs: Vec<VertexOutput>
-    Rasterizer             (software, CPU — not debuggable, automatic)
-        ↓  outputs: Vec<FragmentInput>
-  FragmentDebugger         (one PerThread per fragment)
-        ↓  outputs: Vec<FragmentOutput>
-```
+## Data flow and small core types
 
----
-
-## Stage 1 — Capture Entry Point Return Values (~1 day)
-
-**Change to `Evaluator::apply_return()`:** When the returning frame is an entry point (i.e., `call_result_handle` is `None`), store the return value in a new field instead of discarding it.
-
-```rust
-// In Evaluator (or PerThread after the compute plan refactor):
-pub entry_point_output: Option<Value>,
-```
-
-When the entry point returns, walk the return type's struct fields (via `module.types[result_ty].inner`) and their `naga::Binding` annotations to produce a labelled output:
-
-```rust
-pub struct ShaderOutput {
-    pub builtins: HashMap<naga::BuiltIn, Value>,
-    pub locations: HashMap<u32, Value>,
-}
+```mermaid
+flowchart LR
+    V[Vertex entry + data + draw] --> VS[Run vertex invocations]
+    VS --> O[Vertex output records]
+    O --> P[Compute coverage and interpolate pixel inputs]
+    P --> Q[Fragment quads: four lanes plus coverage]
+    M[Manual fragment inputs] --> Q
+    Q --> FS[Run fragment shader with quad coordination]
+    T[Texture and sampler data] --> FS
+    FS --> R[Per-pixel outputs and inspection]
 ```
 
-This is used by both vertex (to extract `position` + varyings) and fragment (to extract `frag_depth` + color outputs) stages.
+Reuse `ShaderProgram` and `Debugger`; each debugger executes one stage. A small
+coordinator runs vertex execution, input generation, and fragment execution in
+sequence. Input generation is ordinary CPU code, not a debuggable shader stage.
 
----
+The core only needs records for:
 
-## Stage 2 — Vertex Buffer Inputs (~1 day)
+- `VertexOutput`: vertex/instance identity, clip position, and location values.
+- `FragmentInput`: framebuffer position, front-facing/sample builtins, and
+  location values.
+- `FragmentQuad`: primitive/instance identity, even pixel origin, four inputs,
+  and a four-bit coverage mask.
+- Fragment results: pixel/primitive identity, returned location/builtin outputs,
+  and whether the lane is uncovered or discarded.
 
-Currently `@location(N)` on vertex shader function arguments returns `Value::Uninitialized`. For vertex shaders, `@location(N)` means "read from vertex buffer attribute N for the current vertex."
+Keep these records independent of launch JSON. Add structured binding/type metadata
+to output inspection or a core extraction helper; never parse `"@location(0)"`
+from display labels. Use the same reflected interface mapping for direct arguments,
+struct arguments, direct returns, and struct returns.
 
-**New input type:**
-```rust
-pub struct VertexBuffer {
-    pub attributes: HashMap<u32, Vec<Value>>,  // location → per-vertex values
-}
+Initialize resource bindings once for a linked run and share resource storage
+across its stages. Keep private globals and frames per invocation. Completed
+vertex outputs are retained as snapshots. Independent debugger sessions remain
+isolated; creating a fresh session from the original launch values must not
+silently reset resource writes during a linked run.
+
+## 1. Run vertices and collect usable outputs
+
+Keep `DrawConfig` and its vertex/instance indexing. Add decoded attribute arrays
+keyed by shader location. Each array has `stepMode: "vertex"` or `"instance"` and
+exactly `vertexCount` or `instanceCount` values respectively. Array indexing is
+relative to `firstVertex`/`firstInstance`; builtin indices retain their absolute
+values. This keeps user-provided data small even when debugging nonzero indices.
+
+Infer scalar/vector types from WGSL and validate data before execution. Initially
+support `f32`, `i32`, `u32`, and vectors of 2–4 elements. Reject missing locations,
+wrong shapes/types, overflow, non-finite data, and unsupported types. Attribute
+arrays are decoded values; binary vertex formats and strides can come later.
+
+Collect every invocation's clip position and varyings after completion. Match
+vertex outputs to fragment inputs by location, exact type, and compatible
+interpolation metadata. Names and struct member order do not matter. Extra vertex
+outputs can remain unused. Missing inputs or incompatible interfaces fail before
+the vertex stage runs.
+
+## 2. Compute inputs at pixels
+
+Start with non-indexed triangle lists. Within each instance, consecutive groups
+of three vertex outputs form triangles; require a multiple-of-three vertex count
+for this mode. Preserve the current ability to run a single vertex independently.
+
+For each triangle:
+
+1. Divide clip XYZ by W, then map to a viewport of width `Wv` and height `Hv`:
+   `x = (ndc.x + 1) * Wv / 2`, `y = (1 - ndc.y) * Hv / 2`.
+2. Clamp the triangle's screen bounding box to the viewport. Test pixel centers
+   `(x + 0.5, y + 0.5)` using edge functions and a deterministic top-left rule.
+   Skip zero-area triangles. Derive `frontFacing` from the configured winding,
+   accounting for the Y flip; default to CCW front faces and no culling.
+3. Compute screen-space barycentric weights `lambda_i`. For each fragment
+   location, interpolate according to its metadata:
+   - Perspective: `sum(lambda_i * value_i / w_i) / sum(lambda_i / w_i)`.
+   - Linear: `sum(lambda_i * value_i)`.
+   - Flat: use the original primitive's first vertex; choose first consistently
+     for a supported `either` qualifier too. Winding normalization must preserve
+     this identity.
+4. Set fragment position to pixel-center XY, interpolated `z_i / w_i` in the
+   default depth range `[0, 1]`, and `sum(lambda_i / w_i)` as its W component.
+   Set sample index to 0 and coverage mask to 1 for covered lanes.
+5. Group pixels into aligned 2×2 quads and compute all four lane inputs as below.
+
+Use a small viewport by default. An optional `focusPixel` selects its complete
+quad for debugging; omitting it runs all covered quads. The focus never removes
+neighbor lanes. No coverage at the selected pixel produces a clear no-fragment
+result. Without a focus, no covered triangles completes with zero fragments.
+
+Triangles that overlap a pixel produce distinct fragment invocations, identified
+by instance, primitive, and pixel. Do not silently merge them. This first version
+returns shader outputs rather than compositing an image with depth or blending.
+
+Start with single-sample center interpolation and flat inputs. Support triangles
+with finite coordinates, positive clip W, and all vertex depths inside `[0, W]`;
+report unsupported near/far clipping instead of producing incorrect inputs.
+Screen-space bounding-box clamping handles triangles extending beyond viewport XY.
+Reject zero/non-finite interpolation denominators. Full clipping, MSAA, and other
+interpolation sampling modes are later additions.
+
+Vertex and fragment `position` have different meanings; their conversion follows
+the [WGSL position definition](https://www.w3.org/TR/WGSL/#position-builtin-value).
+Interpolation qualifiers follow [WGSL interpolation](https://www.w3.org/TR/WGSL/#interpolation).
+Coverage and the viewport transform should be tested against [WebGPU rasterization](https://www.w3.org/TR/webgpu/#rasterization).
+
+## 3. Use four lanes for every fragment quad
+
+Use a fixed lane order with an even framebuffer origin `(x, y)`:
+
+```text
+lane 0: (x,   y)      lane 1: (x+1, y)
+lane 2: (x,   y+1)    lane 3: (x+1, y+1)
 ```
 
-The user provides this in the launch config alongside the draw call:
+Create a quad if any lane is covered. Uncovered lanes, including lanes beyond an
+odd-sized viewport boundary, execute as helpers. Compute their inputs from the
+same triangle's interpolation planes, even outside its coverage; do not copy the
+nearest covered value. Keep quads separate per primitive so adjacent triangles
+cannot exchange derivative operands.
+
+Track coverage and helper/discard state separately from whether a thread is
+running. Helpers execute shader calculations and contribute to quad operations,
+but do not commit outputs or writes to externally visible resource memory.
+Private/local writes still work. A covered lane executing `discard`, including
+inside a called function, becomes a helper for the remainder of execution. Earlier
+observable writes remain; later ones are suppressed. Do not terminate that lane
+while a neighbor can still need it.
+
+This matches the required role of [fragment helper invocations](https://www.w3.org/TR/WGSL/#fragment-shaders-and-helper-invocations)
+and [discard](https://www.w3.org/TR/WGSL/#discard-statement), without emulating
+hardware scheduling.
+
+## 4. Coordinate derivatives and implicit texture sampling
+
+Keep independent CPU interpreter state per lane and advance lanes sequentially.
+At a derivative or implicit-LOD sampling expression, park each lane, collect all
+four operands for the same dynamic operation, compute results, cache them in each
+lane, and resume. Ordinary arithmetic and control flow remain per invocation.
+
+This extends the existing collective scheduling idea, but these operations occur
+inside Naga expression `Emit` ranges. Make emits resumable at an individual
+expression: evaluate preceding expressions once, park before the collective, and
+resume dependent expressions after injecting results. Inspection must only read
+cached results and must not run neighbors or sample textures again.
+
+Match rendezvous by expression site and dynamic call/loop instance, not source
+line or expression handle alone. Different calls or iterations must never exchange
+operands. Allow lanes to reconverge after ordinary divergent branches. If a lane
+has returned or reached an incompatible collective, report a useful divergence
+error; do not hang or substitute zero derivatives. Keep execution budget pauses
+resumable, including halfway through a quad rendezvous.
+
+For lane operand values `v0, v1, v2, v3`, use these deterministic choices:
+
+| Operation | Result per lane |
+| --- | --- |
+| `dpdxFine` | `[v1-v0, v1-v0, v3-v2, v3-v2]` |
+| `dpdyFine` | `[v2-v0, v3-v1, v2-v0, v3-v1]` |
+| `dpdxCoarse` / `dpdyCoarse` | Use `v1-v0` / `v2-v0` for every lane. |
+| Unqualified `dpdx` / `dpdy` | Use the fine choice. |
+| `fwidth` variants | Sum absolute X and Y derivatives of the corresponding variant. |
+
+Apply these componentwise to supported float values. Derive the expression's
+actual operand values across lanes, including computations inside the shader;
+precomputed input gradients alone are insufficient.
+
+Keep Naga's existing uniformity validation enabled. Uniformity constraints apply
+to operations such as derivatives and implicit-LOD sampling, not every `if` in a
+fragment shader. Surface validation diagnostics. If diagnostics are disabled by
+the shader and a collective cannot rendezvous, fail explicitly at runtime. We do
+not promise useful derivatives from nonuniform collective execution. See
+[WGSL derivatives](https://www.w3.org/TR/WGSL/#derivatives).
+
+Quads provide the operand differences; texture sampling additionally needs texture
+and sampler resources plus a CPU sampler. Plan that as a separate implementation
+slice, not an automatic consequence of having four lanes:
+
+- Start with 2D float RGBA texel data and explicit mip levels, plus nearest/linear
+  filtering and clamp/repeat address modes. Keep existing buffer binding syntax;
+  add tagged texture/sampler binding forms with identical native/WASM decoding.
+- Implement explicit-level sampling first, then implicit sampling using quad UV
+  differences scaled by texture dimensions. Choose LOD from the maximum gradient
+  length, handle a zero gradient as the finest level, and apply sampler LOD clamps
+  and mip filtering. Explicit-gradient sampling can reuse the same sampler.
+- Use tiny known textures and distinct mip colors to verify coordinates, filtering,
+  addressing, and derivative-driven LOD. Reject unsupported dimensions/formats and
+  operations explicitly. No claim of bit-for-bit hardware filtering or anisotropy.
+
+Full fragment subgroups and additional quad builtins can follow independently;
+a quad must not be treated as an arbitrary compute workgroup or subgroup.
+
+## 5. Manual inputs use the same quad path
+
+Allow either a common set of location values for all four lanes, or four explicit
+lane records with independently supplied locations and depth/reciprocal-W values.
+The two forms are mutually exclusive. Both construct `FragmentQuad` directly;
+no vertex entry, triangle, or viewport is required.
+
+A common-value fixture deliberately defines constant varyings, so their input
+derivatives are zero. Builtin pixel positions still differ between lanes. For
+nonconstant inputs, require all four lane records; do not infer unknown neighbors.
+Validate every lane against the fragment interface. Default depth to 0, reciprocal
+W to 1, front-facing to true, and single-sample coverage to all four lanes. Optional
+coverage bits make uncovered lanes helpers. Manual pixel XY comes from an even,
+nonnegative `quadOrigin`; require finite depth, positive finite reciprocal W, and
+depth in `[0, 1]`.
+
+The user can inspect one selected pixel while its neighbors execute as needed.
+Manual and vertex-driven quads with identical resolved inputs must produce the
+same results, including derivatives and sampled colors.
+
+## Proposed launch shape
+
+Keep the existing top-level entry selection for the target fragment. A tagged
+`fragmentConfig` chooses manual inputs or vertex-driven interpolation. The first
+version uses vertex and fragment entries from the same WGSL file. Both share the
+launch resource bindings.
+
+Vertex-driven example: `vs_main` takes position at location 0 and UV at location 1,
+and returns clip position, UV, and color for `fs_main`:
+
 ```json
 {
-  "vertexBuffers": [
-    { "location": 0, "values": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] }
-  ],
-  "drawCall": { "vertexCount": 3, "instanceCount": 1 }
-}
-```
-
-In `eval_expressions.rs`, the `Binding::Location` arm for vertex function arguments reads `vertex_buffer.attributes[location][vertex_index]` instead of returning `Uninitialized`.
-
----
-
-## Stage 3 — `VertexDebugger` (~1 day)
-
-Essentially the same as `WorkgroupDebugger` from PLAN.md but for vertex invocations. Uses `Evaluator` with `HashMap<ThreadId, PerThread>`, one thread per vertex.
-
-Per-thread inputs generated from `vertex_index` and `instance_index`:
-```rust
-EntryPointInputs {
-    vertex_index: i as u32,
-    instance_index: 0,
-    // @location(N) comes from VertexBuffer
-}
-```
-
-No workgroup barriers or subgroup ops needed for basic vertex shaders (vertex shaders are fully independent). The multi-thread `Evaluator` from PLAN.md still handles them correctly — threads simply never hit a barrier.
-
-After all threads finish, collect `ShaderOutput` per thread into `Vec<VertexOutput>`:
-```rust
-pub struct VertexOutput {
-    pub position: [f32; 4],                  // @builtin(position) — clip space
-    pub locations: HashMap<u32, Value>,      // @location(N) varyings
-}
-```
-
----
-
-## Stage 4 — Software Rasterizer (~3 days)
-
-The rasterizer is **not debuggable** — it runs automatically between vertex and fragment stages. It takes `Vec<VertexOutput>` + viewport config and produces `Vec<FragmentInput>`.
-
-### Spec conformance
-
-All algorithms below are derived from the WebGPU and WGSL specifications:
-
-| Algorithm | Spec status | Source |
-|---|---|---|
-| Viewport transform | Derivable — perspective divide + scale/offset | WebGPU §"Coordinate Systems" |
-| `@interpolate(perspective)` | Fully specified | WGSL §"Interpolation": `(Σ vᵢ/wᵢ·λᵢ) / (Σ λᵢ/wᵢ)` |
-| `@interpolate(linear)` | Fully specified | WGSL: `Σ vᵢ·λᵢ` (screen-space, no w-correction) |
-| `@interpolate(flat)` / provoking vertex | Fully specified | WGSL: first vertex of each primitive |
-| Depth interpolation | Fully specified | Linear over viewport-space z |
-| Pixel coverage / fill rule | **Implementation-defined** | WebGPU says top-left tie-breaking only |
-
-### Input configuration
-
-```rust
-pub struct RasterizerConfig {
-    pub viewport_width: u32,
-    pub viewport_height: u32,
-    pub topology: PrimitiveTopology,      // TriangleList | TriangleStrip (initially TriangleList)
-    pub coverage_mode: RasterizationMode, // see below
-}
-
-/// Pixel coverage rule. All major WebGPU-capable GPUs use the same top-left
-/// convention and pixel-center sampling — differences are only in sub-pixel
-/// precision and exact edge tie-breaking, which only matters at triangle boundaries.
-pub enum RasterizationMode {
-    /// Standard top-left fill convention. Pixel center at (x+0.5, y+0.5).
-    /// Covers a pixel if its center lies strictly inside the triangle,
-    /// or exactly on a top edge (horizontal, y decreases) or left edge
-    /// (non-horizontal, going downward). Matches D3D12/Vulkan/WebGPU baseline.
-    /// Source: WebGPU spec §"Rasterization", D3D12 spec §"Triangle Rasterization Rules".
-    TopLeft,
-
-    /// NVIDIA (Pascal/Turing/Ampere/Ada). Same top-left rule, 1/256 sub-pixel
-    /// precision (8 fixed-point bits). Documented in NVIDIA OpenGL conformance
-    /// and D3D12 HLK test suite results.
-    Nvidia,
-
-    /// AMD GCN/RDNA. Same top-left rule, 1/256 sub-pixel precision.
-    /// Source: AMD "Rasterizer Order Views" and D3D12 conformance documentation.
-    Amd,
-
-    /// Apple GPU (M-series/A-series via Metal). Same top-left rule, 1/256
-    /// sub-pixel precision. Source: Metal Feature Set Tables and Metal spec
-    /// §"Rasterization".
-    Apple,
-
-    /// ARM Mali (Valhall/5th-gen). Follows Vulkan fill rules (top-left).
-    /// Source: ARM Mali GPU Best Practices Guide §"Geometry".
-    Mali,
-
-    /// Qualcomm Adreno. Follows Vulkan fill rules.
-    /// Source: Qualcomm Adreno GPU Developer Guide.
-    Adreno,
-
-    /// Permissive — covers any pixel whose center is inside or exactly on
-    /// any edge. Useful when debugging shader logic and exact coverage
-    /// at seams doesn't matter; maximises visible fragments.
-    Permissive,
-}
-```
-
-In practice, for pixels whose centers are clearly inside a triangle (the vast majority during shader debugging), all modes produce identical results. Differences only appear at triangle boundaries.
-
-### Algorithm (per triangle, vertices A/B/C)
-
-1. **Viewport transform** (WebGPU §"Coordinate Systems"):
-   - Perspective divide: `ndc = clip.xyz / clip.w`
-   - Screen space: `sx = (ndc.x + 1) × (width/2)`, `sy = (1 − ndc.y) × (height/2)` (y flipped: NDC bottom-up, screen top-down)
-   - Depth: `sz = ndc.z × (maxDepth − minDepth) + minDepth`
-
-2. **Bounding box** of triangle in screen space, clamped to viewport.
-
-3. **For each pixel (px, py) in bounding box**, sample at `(px + 0.5, py + 0.5)`:
-   - Compute edge functions (signed areas): `e0 = (B−A)×(P−A)`, etc.
-   - Coverage test per `RasterizationMode` (top-left: inside if all `e ≥ 0` with tie-breaking on shared edges).
-   - If covered: compute barycentric coordinates `λ = (e0, e1, e2) / (e0+e1+e2)`.
-   - Interpolate varyings (see below).
-   - Determine `front_facing`: positive signed area → front face.
-   - Emit a `FragmentInput`.
-
-### Interpolation formulas (from WGSL spec)
-
-**`@interpolate(perspective)` (default)** — perspective-correct:
-```
-interp(v) = (λ₀·v₀/w₀ + λ₁·v₁/w₁ + λ₂·v₂/w₂) / (λ₀/w₀ + λ₁/w₁ + λ₂/w₂)
-```
-where `w₀/w₁/w₂` are the clip-space W values from vertex outputs.
-
-**`@interpolate(linear)`** — screen-space linear (no perspective correction):
-```
-interp(v) = λ₀·v₀ + λ₁·v₁ + λ₂·v₂
-```
-
-**`@interpolate(flat)`** — no interpolation, provoking vertex (WebGPU spec: first vertex of primitive):
-```
-interp(v) = v₀
-```
-
-**Depth** (`@builtin(position).z`) — interpolated linearly in viewport space (same as `linear`).
-
-**`@builtin(position).w`** in fragment shader — set to `1/clip.w` (perspective-correct reciprocal).
-
-```rust
-pub struct FragmentInput {
-    pub position: [f32; 4],              // screen xy, viewport-space z, 1/clip.w
-    pub front_facing: bool,
-    pub locations: HashMap<u32, Value>,  // interpolated varyings
-}
-```
-
----
-
-## Stage 5 — `FragmentDebugger` (~1 day)
-
-Like `VertexDebugger` but each thread is a fragment. Per-thread `EntryPointInputs`:
-```rust
-EntryPointInputs {
-    position: fragment_input.position,
-    front_facing: fragment_input.front_facing,
-    // @location(N) comes from fragment_input.locations
-}
-```
-
-`@location(N)` on **fragment** shader arguments reads from `fragment_input.locations[N]` (interpolated varyings from rasterizer).
-
-After all fragments finish, collect `ShaderOutput` per thread into `Vec<FragmentOutput>`:
-```rust
-pub struct FragmentOutput {
-    pub screen_position: [u32; 2],         // which pixel
-    pub locations: HashMap<u32, Value>,    // @location(N) color outputs
-    pub frag_depth: Option<f32>,           // @builtin(frag_depth) if written
-}
-```
-
----
-
-## Stage 6 — `GraphicsPipelineDebugger` (~2 days)
-
-**New file:** `malkovri_wgsl_debugger/src/graphics_pipeline_debugger.rs`
-
-Orchestrates the three stages with a state machine:
-
-```rust
-pub struct GraphicsPipelineDebugger {
-    state: PipelineState,
-    source: String,
-    rasterizer_config: RasterizerConfig,
-}
-
-enum PipelineState {
-    Vertex(VertexDebugger),
-    Fragment {
-        debugger: FragmentDebugger,
-        vertex_outputs: Vec<VertexOutput>,   // kept for inspection
+  "type": "wgsl",
+  "request": "launch",
+  "name": "Debug interpolated fragments",
+  "program": "${workspaceFolder}/shader.wgsl",
+  "entryType": "fragment",
+  "entryPoint": "fs_main",
+  "stopOnEntry": true,
+  "fragmentConfig": {
+    "kind": "vertices",
+    "vertex": {
+      "entryPoint": "vs_main",
+      "drawConfig": { "vertexCount": 3, "instanceCount": 1 },
+      "vertexAttributes": {
+        "0": { "values": [[-0.8, -0.8, 0.5], [0.8, -0.8, 0.5], [0.0, 0.8, 0.5]] },
+        "1": { "values": [[0.0, 0.0], [1.0, 0.0], [0.5, 1.0]] }
+      }
     },
-    Finished {
-        vertex_outputs: Vec<VertexOutput>,
-        fragment_outputs: Vec<FragmentOutput>,
-    },
-}
-
-impl GraphicsPipelineDebugger {
-    pub fn new(source, vertex_ep_index, fragment_ep_index, config, vertex_buffers, draw_call, rasterizer_config, bindings) -> Result<Self>
-    pub fn step(&mut self) -> Result<PipelineStepResult>
-    pub fn stage(&self) -> PipelineStage          // Vertex | Fragment | Finished
-    pub fn threads(&self) -> Vec<ThreadInfo>       // delegates to current stage
-    pub fn current_location(&self, thread_id: u32) -> Option<SourceLocation>
-    pub fn local_variables(&self, thread_id: u32) -> Vec<Variable>
-    pub fn argument_variables(&self, thread_id: u32) -> Vec<Variable>
-    pub fn global_variables(&self) -> Vec<Variable>
-    // Output inspection:
-    pub fn vertex_outputs(&self) -> &[VertexOutput]    // available after vertex stage
-    pub fn fragment_outputs(&self) -> &[FragmentOutput] // available after Finished
-    pub fn source(&self) -> &str
-}
-
-pub enum PipelineStepResult {
-    Continue,
-    StageTransition(PipelineStage),  // vertex → fragment, or fragment → finished
-    Finished,
+    "viewport": { "width": 64, "height": 64 },
+    "focusPixel": [32, 32]
+  }
 }
 ```
 
-**`step()` transitions:**
-- While in `Vertex`: delegate to `VertexDebugger::step()`. When it returns `WorkgroupStepResult::Finished`, run the rasterizer automatically, transition to `Fragment`.
-- While in `Fragment`: delegate to `FragmentDebugger::step()`. When finished, transition to `Finished`.
+Omit `focusPixel` to execute the whole covered viewport. Attribute `stepMode`
+defaults to `vertex`. Initially topology is fixed to triangle-list. Viewport
+dimensions must be positive; focus must lie within the viewport. Apply a checked
+invocation/allocation limit before creating all pixel threads and report an
+oversized request rather than truncating it.
 
----
+Manual example: `fs_main` takes a `vec2<f32>` at location 0 and a `vec4<f32>` at
+location 1. These explicit neighbors permit nonzero UV derivatives:
 
-## Stage 7 — DAP Adapter Changes (~2 days)
-
-Extend `parse_input.rs` to parse vertex buffers and draw call from launch config. Add `GraphicsPipelineDebugger` to `DebuggerKind`:
-
-```rust
-enum DebuggerKind {
-    Single(Debugger),
-    Workgroup(WorkgroupDebugger),
-    Graphics(GraphicsPipelineDebugger),
+```json
+{
+  "type": "wgsl",
+  "request": "launch",
+  "name": "Debug manual fragment quad",
+  "program": "${workspaceFolder}/shader.wgsl",
+  "entryType": "fragment",
+  "entryPoint": "fs_main",
+  "stopOnEntry": true,
+  "fragmentConfig": {
+    "kind": "manual",
+    "quadOrigin": [32, 16],
+    "lanes": [
+      { "locations": { "0": [0.25, 0.50], "1": [1.0, 0.0, 0.0, 1.0] } },
+      { "locations": { "0": [0.50, 0.50], "1": [1.0, 0.0, 0.0, 1.0] } },
+      { "locations": { "0": [0.25, 0.75], "1": [1.0, 0.0, 0.0, 1.0] } },
+      { "locations": { "0": [0.50, 0.75], "1": [1.0, 0.0, 0.0, 1.0] } }
+    ]
+  }
 }
 ```
 
-The DAP `threads` response labels threads differently per stage:
-- Vertex: `"vertex {vertex_index}"`
-- Fragment: `"fragment [{px},{py}]"`
+For constant inputs, replace `lanes` with a single `locations` object. The manual
+schema can expose shared builtin defaults, per-lane depth/reciprocal-W overrides,
+and coverage as described above. Final field spelling belongs to implementation
+review; the required distinction is common values versus four explicit records.
 
-A custom `output` event is sent at stage transitions so the user can see in VS Code when rasterization happens and how many fragments were generated.
+New fields are stage-specific and unknown/mixed modes are errors. Vertex-only
+launches gain top-level `vertexAttributes` alongside existing `drawConfig`.
+Existing compute and vertex launch behavior stays intact. Retain the old default
+fragment path for simple existing callers; require explicit quad inputs for new
+derivative/sampling execution. Migrate public Rust configuration constructors,
+callers, and README examples together when adding configured fragment execution.
 
----
+## Debugger behavior
 
-## What Is NOT Included (future work)
+For vertex-driven execution, the coordinator runs vertices, pauses with their
+outputs available, generates fragment inputs, and stops at fragment entry on the
+next Continue. Manual input starts directly at fragment entry when `stopOnEntry`
+is enabled. Keep vertex results inspectable while stepping fragments. Pause again
+for final fragment output inspection before terminating.
 
-- **Clipping** — vertices behind the near plane produce incorrect results; can be added later.
-- **Depth testing / depth buffer** — fragments are not discarded based on depth; all are passed to the fragment shader.
-- **MSAA** — single sample per pixel only.
-- **Centroid / sample interpolation** — only `center` and `flat` modes are implemented.
-- **Index buffers** — only non-indexed draws (`vertexCount` vertices in order). Index buffer support is a straightforward extension.
-- **Multiple instances** — `instanceCount > 1` is not supported initially.
-- **Geometry / mesh shaders** — not in WGSL scope.
+Thread labels include pixel, primitive/instance, lane, and helper status. A step
+focused on a pixel advances its quad as needed for dependencies; in fragment mode,
+`singleThreadExecution` therefore selects a quad as the execution unit while the
+selected lane remains the inspection focus. Other quads stay paused. Ordinary
+Continue can run all quads. Honor breakpoints and budget limits during peer
+progress; stop the quad consistently and describe the lane that hit a breakpoint.
 
----
+Preserve breakpoints across stages. Give new stage threads distinct DAP IDs and
+invalidate stale frame/variable references on every resume/transition. Retained
+output snapshots receive new references. Fragment outputs exclude helper and
+discarded lanes; inspection still shows why those lanes produced no output.
 
-## Edge Cases
+## Implementation order and acceptance tests
 
-- **No fragments generated** (triangle fully outside viewport): fragment stage is skipped, `PipelineStepResult::Finished` immediately after rasterization.
-- **Degenerate triangles** (zero area): skipped by rasterizer (edge function sum is zero).
-- **`@interpolate(flat)`** — provoking vertex semantics: use the values from vertex 0 of each triangle (WGSL default is "first" provoking vertex).
-- **`position.w == 0`** — perspective division would divide by zero; skip the triangle or clamp.
-- **Fragment discard (`Statement::Kill`)** — currently a no-op; a killed fragment's `FragmentOutput` entry should be omitted or flagged.
+This is the plan to review before writing runtime code. Each slice should be a
+small set of focused, tested commits:
 
----
+| Order | Slice | Required evidence |
+| --- | --- | --- |
+| 1 | Vertex attributes, shared interface resolution, structured output extraction | Direct/struct interfaces; nonzero vertex/instance offsets; invalid types/counts; completed outputs per invocation; unchanged builtin-only vertex behavior. |
+| 2 | Pixel coverage, interpolation, and quad input generation | Known triangle at selected pixels; unequal W distinguishes perspective/linear; flat integers preserve provoking vertex; winding/Y flip; shared edges; degenerate/outside triangles; odd viewport and boundary helpers; separate overlapping primitives. |
+| 3 | Configurable fragment quad execution from either input source | A fragment-only module runs manual fixtures; equivalent manual/interpolated quads agree; builtin/struct inputs inspect correctly; helper writes and nested discard are handled; outputs retain pixel identity. |
+| 4 | Resumable expression collectives and derivatives | Known fine/coarse differences; shader-computed operands; branches reconverge; loop/call instances stay separate; helpers participate; budget/step resumption works; invalid nonuniform collectives fail instead of hanging. |
+| 5 | CPU texture/sampler bindings and sampling | Known texels, address/filter modes, explicit and implicit LOD, distinct mip colors, quad-edge helpers, invalid bindings, and uniformity diagnostics. |
+| 6 | Complete linked DAP/VS Code workflow and examples | Vertex-output pause, fragment-entry stop, pixel/quad stepping, peer breakpoints, final results, stale references, relaunch, and native/WASM parity. |
 
-## Estimated Effort
+Add standalone launch/schema support with slice 3; finish stage transitions and
+quad-aware debugging as the relevant core pieces land. Do not advertise derivative
+or texture support until slices 4 and 5 pass. The 2×2 data model and helper behavior
+are present from the first fragment implementation, avoiding a later redesign.
 
-| Stage | Days |
-|---|---|
-| 1. Capture entry point return values | 1 |
-| 2. Vertex buffer inputs | 1 |
-| 3. VertexDebugger | 1 |
-| 4. Software rasterizer | 3 |
-| 5. FragmentDebugger | 1 |
-| 6. GraphicsPipelineDebugger | 2 |
-| 7. DAP adapter | 2 |
-| **Total** | **~11 days** |
+Use existing core/DAP test suites and focused fixtures under `test_shaders/`.
+Run workspace tests, formatting and Clippy, WASM compilation, and extension type
+checks as appropriate to each implementation commit. Test plain interpolation and
+quad math independently of DAP before adding UI behavior.
+
+Deferred: full clipping, raw vertex formats, indexed/strip draws, MSAA,
+centroid/sample interpolation, depth/stencil/blending, additional texture types,
+and GPU-specific precision/scheduling. These do not block the two planned input
+paths or the quad execution model.
