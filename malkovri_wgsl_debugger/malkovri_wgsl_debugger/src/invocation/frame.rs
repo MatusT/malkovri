@@ -70,6 +70,7 @@ pub(crate) struct BlockFrame {
     block: BlockId,
     current_statement_index: usize,
     kind: BlockKind,
+    iteration: u64,
 }
 
 impl BlockFrame {
@@ -77,8 +78,13 @@ impl BlockFrame {
         Self {
             block,
             kind,
+            iteration: 0,
             current_statement_index: 0,
         }
+    }
+
+    pub(crate) fn iteration(&self) -> u64 {
+        self.iteration
     }
 
     pub(crate) fn kind(&self) -> &BlockKind {
@@ -101,6 +107,7 @@ impl BlockFrame {
 
     /// Restart the loop body from the beginning. No-op if not a Loop.
     pub(crate) fn restart_body(&mut self) {
+        self.iteration += 1;
         if let BlockKind::Loop {
             ref mut other_block,
             ref mut in_continuing,

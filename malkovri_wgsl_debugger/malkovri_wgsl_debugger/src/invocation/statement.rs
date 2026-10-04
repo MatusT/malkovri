@@ -60,9 +60,10 @@ impl InvocationState {
 
     fn handle_leaf(&mut self, statement: &Statement) -> Result<(), EvaluatorError> {
         match statement {
-            Statement::Emit(range) => {
-                self.emit_expressions(range.clone())?;
-                self.initialize_local_variables_for_emit(range.clone())?;
+            Statement::Emit(_) => {
+                return Err(EvaluatorError::InternalError(
+                    "emit must use resumable stepping".into(),
+                ));
             }
             Statement::Call {
                 function,
@@ -143,18 +144,41 @@ impl InvocationState {
 
     /// Evaluate in IR order. A loop may execute the same Emit again, so discard
     /// its previous results before computing this iteration's values and places.
-    fn emit_expressions(&mut self, range: naga::Range<Expression>) -> Result<(), EvaluatorError> {
+    pub(super) fn emit_expressions(
+        &mut self,
+        range: naga::Range<Expression>,
+    ) -> Result<bool, EvaluatorError> {
         let function_index = self.current_function_frame_index()?;
-        let frame = self.current_function_frame_mut()?;
-        for handle in range.clone() {
-            frame.forget_expression(handle);
+        if self.emit_index.is_none() {
+            for handle in range.clone() {
+                self.current_function_frame_mut()?.forget_expression(handle);
+            }
+            self.emit_index = Some(0);
         }
-        for handle in range {
+        for (index, handle) in range.clone().enumerate().skip(self.emit_index.unwrap()) {
+            match self.current_function()?.expressions[handle] {
+                Expression::Derivative { axis, ctrl, expr } => {
+                    self.emit_index = Some(index);
+                    self.begin_derivative(handle, axis, ctrl, expr)?;
+                    return Ok(false);
+                }
+                Expression::ImageSample { .. }
+                | Expression::ImageLoad { .. }
+                | Expression::ImageQuery { .. } => {
+                    return Err(EvaluatorError::UnsupportedStatement(
+                        "texture execution is deferred".into(),
+                    ));
+                }
+                _ => {}
+            }
             let value = self.evaluate_expr(handle, function_index);
             self.current_function_frame_mut()?
                 .set_expression(handle, value);
+            self.emit_index = Some(index + 1);
         }
-        Ok(())
+        self.emit_index = None;
+        self.initialize_local_variables_for_emit(range)?;
+        Ok(true)
     }
 
     fn initialize_local_variables_for_emit(

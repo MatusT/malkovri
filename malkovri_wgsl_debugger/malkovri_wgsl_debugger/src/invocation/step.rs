@@ -85,7 +85,13 @@ impl InvocationState {
 
         let id = self.current_frame()?.position();
         let program = self.program.clone();
-        self.handle_instruction(id, program.instruction(id))?;
+        if let Some(naga::Statement::Emit(range)) = program.instruction(id).leaf() {
+            if !self.emit_expressions(range.clone())? {
+                return Ok(Some(id));
+            }
+        } else {
+            self.handle_instruction(id, program.instruction(id))?;
+        }
 
         if matches!(
             program.instruction(id).leaf(),

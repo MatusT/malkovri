@@ -3,6 +3,7 @@ mod config;
 mod group;
 mod inspect;
 mod outputs;
+mod quad;
 
 mod run_control;
 mod scheduler;
@@ -178,6 +179,7 @@ pub struct DebugFrameId(usize);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ParkReason {
+    Quad,
     Barrier(Barrier),
     WorkGroupUniformLoad {
         result: Handle<Expression>,
@@ -198,6 +200,7 @@ enum ParkReason {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ParkScope {
+    Quad(usize),
     Workgroup,
     Subgroup(u32),
 }

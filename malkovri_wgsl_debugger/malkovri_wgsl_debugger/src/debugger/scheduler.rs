@@ -66,6 +66,11 @@ impl Debugger {
                 .leaf()
                 .and_then(Self::park_reason_for_statement)
             {
+                if self.invocation().fragment_info().is_some() {
+                    return Err(EvaluatorError::UnsupportedStatement(
+                        "fragment subgroup/barrier operations are not supported".into(),
+                    ));
+                }
                 self.group
                     .get_mut(gid)
                     .set_status(ThreadStatus::Parked(reason));
@@ -74,7 +79,16 @@ impl Debugger {
                 return Ok(self.session_step_result());
             }
 
-            match self.invocation_mut().step()? {
+            let next = self.invocation_mut().step()?;
+            if self.invocation().quad_wait().is_some() {
+                self.group
+                    .get_mut(gid)
+                    .set_status(ThreadStatus::Parked(ParkReason::Quad));
+                self.release_ready_parked_threads()?;
+                self.detect_deadlock()?;
+                return Ok(StepResult::Continue);
+            }
+            match next {
                 None => {
                     self.group.get_mut(gid).set_status(ThreadStatus::Finished);
                     self.release_ready_parked_threads()?;

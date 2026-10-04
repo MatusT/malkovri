@@ -5,6 +5,7 @@ pub(crate) mod frame;
 pub(crate) mod inputs;
 mod math;
 pub(crate) mod place;
+pub(crate) mod quad;
 mod scopes;
 mod statement;
 mod step;
@@ -31,6 +32,8 @@ pub(crate) struct InvocationState {
     global_values: HashMap<naga::Handle<GlobalVariable>, GlobalValue>,
     entry_point_output: Option<Value>,
     discarded: bool,
+    quad_wait: Option<quad::QuadWait>,
+    emit_index: Option<usize>,
     entry_point_return: Option<StatementId>,
     stack: Vec<StackFrame>,
     inputs: InvocationInputs,
@@ -97,6 +100,8 @@ impl InvocationState {
             program,
             entry_point_output: None,
             discarded: false,
+            quad_wait: None,
+            emit_index: None,
             entry_point_return: None,
             stack: vec![StackFrame::Function(Box::new(FunctionFrame::new(
                 FunctionId::EntryPoint(entry_point_index),

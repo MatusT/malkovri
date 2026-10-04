@@ -401,3 +401,93 @@ fn empty_fragment_selection_finishes_without_invocations() {
     assert!(debugger.local_variables().is_empty());
     assert!(debugger.argument_variables().is_empty());
 }
+
+#[test]
+fn quad_derivatives_use_shader_operands_across_calls_loops_and_helpers() {
+    let program = ShaderProgram::new(
+        r#"
+fn gradient(uv: vec2f) -> vec4f {
+    let v=uv.x*uv.y;
+    return vec4f(dpdxFine(v),dpdyFine(v),dpdxCoarse(v),fwidth(v));
+}
+@fragment fn main(@location(0) uv: vec2f) -> @location(0) vec4f {
+    if uv.x > 1.0 { discard; }
+    var sum=vec4f(0.0);
+    for(var i=0u;i<3u;i++) { sum += gradient(uv*f32(i+1u)); }
+    return sum;
+}"#,
+    )
+    .unwrap();
+    let config = RasterConfig {
+        viewport: Viewport {
+            width: 4,
+            height: 4,
+        },
+        pixel_range: Some(PixelRange {
+            from: [0, 0],
+            to: [1, 1],
+        }),
+    };
+    let quads = program
+        .interpolate_fragments(0, &full_square(), &config)
+        .unwrap();
+    let mut debugger = program
+        .create_debugger(
+            0,
+            malkovri_wgsl_debugger::ExecutionConfig::FragmentQuads(quads),
+            GlobalConstants::default(),
+            HashMap::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        debugger.run_to_breakpoint(1, false, &[], None).unwrap(),
+        RunResult::Finished
+    );
+    assert_eq!(
+        debugger.thread_shader_outputs(1).unwrap()[0].value,
+        Some(Primitive::F32x4([7., 7., 7., 14.]).into())
+    );
+    for id in 2..=4 {
+        assert!(
+            debugger.thread_shader_outputs(id).unwrap()[0]
+                .value
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn nonuniform_derivatives_with_missing_lanes_fail_clearly() {
+    let shader = "@fragment fn main(@location(0) uv: vec2f) -> @location(0) vec4f { if uv.x > 1.0 {return vec4f(0.0);} return vec4f(dpdx(uv),0.0,1.0); }";
+
+    let program = ShaderProgram::new(&format!(
+        "diagnostic(off, derivative_uniformity);\n{shader}"
+    ))
+    .unwrap();
+    let quads = program
+        .interpolate_fragments(
+            0,
+            &full_square(),
+            &RasterConfig {
+                viewport: Viewport {
+                    width: 4,
+                    height: 4,
+                },
+                pixel_range: Some(PixelRange {
+                    from: [0, 0],
+                    to: [1, 1],
+                }),
+            },
+        )
+        .unwrap();
+    let mut debugger = program
+        .create_debugger(
+            0,
+            malkovri_wgsl_debugger::ExecutionConfig::FragmentQuads(quads),
+            GlobalConstants::default(),
+            HashMap::new(),
+        )
+        .unwrap();
+    let error = debugger.run_to_breakpoint(1, false, &[], None).unwrap_err();
+    assert!(error.to_string().contains("quad lane returned"), "{error}");
+}

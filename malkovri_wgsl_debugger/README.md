@@ -259,3 +259,10 @@ input structs and fragment builtins. `thread_fragment_info` identifies pixels an
 helper/discard state. Helpers continue computing but never produce shader outputs
 or write resource memory; `discard` also suppresses subsequent observable effects
 when called from a nested function. Empty quad lists finish without invocations.
+
+Fragment quads support `dpdx`, `dpdy`, and `fwidth` (fine and coarse variants).
+Derivative expressions rendezvous across four lanes, including helpers, using
+shader-computed operands. Missing/divergent participants produce an execution
+error. Native and WASM builds use scalar `glam` double-precision vectors for
+rasterization. Texture expressions currently report an explicit unsupported error;
+texture bindings and sampling will be added later on this quad foundation.

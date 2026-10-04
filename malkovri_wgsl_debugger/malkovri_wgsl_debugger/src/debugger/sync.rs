@@ -29,6 +29,16 @@ impl Debugger {
                 continue;
             }
 
+            if matches!(reason, ParkReason::Quad)
+                && members
+                    .iter()
+                    .any(|id| matches!(self.group.get(*id).status(), ThreadStatus::Finished))
+            {
+                return Err(self.synchronization_error(
+                    "quad lane returned before derivative rendezvous",
+                    &members,
+                ));
+            }
             let all_parked = members
                 .iter()
                 .all(|member| matches!(self.group.get(*member).status(), ThreadStatus::Parked(_)));
@@ -93,12 +103,23 @@ impl Debugger {
     fn live_members_for_reason(&self, gid: InvocationId, reason: &ParkReason) -> Vec<InvocationId> {
         self.members_for_scope(self.scope_for_reason(gid, reason))
             .into_iter()
-            .filter(|member| !matches!(self.group.get(*member).status(), ThreadStatus::Finished))
+            .filter(|member| {
+                matches!(reason, ParkReason::Quad)
+                    || !matches!(self.group.get(*member).status(), ThreadStatus::Finished)
+            })
             .collect()
     }
 
     fn scope_for_reason(&self, gid: InvocationId, reason: &ParkReason) -> ParkScope {
         match reason {
+            ParkReason::Quad => ParkScope::Quad(
+                self.group
+                    .get(gid)
+                    .state()
+                    .fragment_info()
+                    .unwrap()
+                    .quad_index,
+            ),
             ParkReason::Barrier(barrier)
                 if barrier.contains(Barrier::SUB_GROUP)
                     && !barrier
@@ -117,6 +138,17 @@ impl Debugger {
 
     fn members_for_scope(&self, scope: ParkScope) -> Vec<InvocationId> {
         match scope {
+            ParkScope::Quad(index) => self
+                .group
+                .ids()
+                .filter(|id| {
+                    self.group
+                        .get(*id)
+                        .state()
+                        .fragment_info()
+                        .is_some_and(|info| info.quad_index == index)
+                })
+                .collect(),
             ParkScope::Workgroup => self.group.ids().collect(),
             ParkScope::Subgroup(subgroup_id) => self
                 .group
@@ -140,6 +172,7 @@ impl Debugger {
         members: Vec<InvocationId>,
     ) -> Result<(), EvaluatorError> {
         match reason {
+            ParkReason::Quad => self.release_quad(members),
             ParkReason::Barrier(_) => self.release_barrier(members),
             ParkReason::WorkGroupUniformLoad { result } => {
                 self.release_workgroup_uniform_load(members, result)
