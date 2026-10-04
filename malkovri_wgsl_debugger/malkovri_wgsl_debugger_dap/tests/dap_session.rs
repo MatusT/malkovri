@@ -126,6 +126,20 @@ fn globals_for_thread(session: &mut Session, thread_id: DebugThreadId) -> HashMa
         .collect()
 }
 
+fn shader_outputs_for_thread(
+    session: &mut Session,
+    thread_id: DebugThreadId,
+) -> (u32, HashMap<String, String>) {
+    let frame_id = top_frame_id(session, thread_id);
+    let scopes = session.send("scopes", json!({ "frameId": frame_id }));
+    let outputs_ref = scope_reference(response_body(&scopes, session.last_seq()), "Shader Outputs");
+    let outputs = session.send("variables", json!({ "variablesReference": outputs_ref }));
+    (
+        outputs_ref,
+        variables_map(response_body(&outputs, session.last_seq())),
+    )
+}
+
 fn launch_and_configure(session: &mut Session, shader: &str, breakpoints: &[u32]) -> Vec<Value> {
     session.send("initialize", json!({}));
     session.send(
@@ -291,6 +305,8 @@ fn vertex_triangle_session_supports_entry_stop_inspection_and_stepping() {
         variables_map(response_body(&args, s.last_seq()))["in_vertex_index"],
         "Primitive(U32(0))"
     );
+    let (entry_outputs_ref, outputs) = shader_outputs_for_thread(&mut s, 1);
+    assert_eq!(outputs["@builtin(position)"], "not produced yet");
 
     let next = s.send("next", json!({ "threadId": 1 }));
     assert_eq!(event_body(&next, "stopped")["reason"], "step");
@@ -302,13 +318,143 @@ fn vertex_triangle_session_supports_entry_stop_inspection_and_stepping() {
         variables_map(response_body(&locals, s.last_seq()))["pos"],
         "Array([Primitive(F32x2([0.0, 0.5])), Primitive(F32x2([-0.5, -0.5])), Primitive(F32x2([0.5, -0.5]))])"
     );
+    assert_eq!(
+        shader_outputs_for_thread(&mut s, 1).1["@builtin(position)"],
+        "not produced yet"
+    );
 
-    let cont = s.send("continue", json!({ "threadId": 1 }));
-    assert_eq!(event_body(&cont, "terminated"), &json!({}));
+    let returned = s.send("next", json!({ "threadId": 1 }));
+    assert_eq!(event_body(&returned, "stopped")["reason"], "pause");
+    assert!(
+        returned
+            .iter()
+            .all(|message| message["event"] != "terminated")
+    );
     assert_eq!(
         s.adapter.debugger().unwrap().entry_point_output(),
         Some(malkovri_wgsl_debugger::Primitive::F32x4([0.0, 0.5, 0.0, 1.0]).into())
     );
+    let stack = s.send("stackTrace", json!({ "threadId": 1 }));
+    let frames = &response_body(&stack, s.last_seq())["stackFrames"];
+    assert_eq!(frames.as_array().unwrap().len(), 1);
+    assert_eq!(frames[0]["name"], "vs_main");
+    assert_eq!(
+        frames[0]["source"]["path"],
+        shader_path("test_vertex_triangle.wgsl")
+    );
+    let return_line = include_str!("../../test_shaders/test_vertex_triangle.wgsl")
+        .lines()
+        .position(|line| line.contains("return vec4f"))
+        .unwrap()
+        + 1;
+    assert_eq!(frames[0]["line"], return_line);
+    let completed_frame_id = frames[0]["id"].clone();
+    let (outputs_ref, outputs) = shader_outputs_for_thread(&mut s, 1);
+    assert_eq!(
+        outputs["@builtin(position)"],
+        "Primitive(F32x4([0.0, 0.5, 0.0, 1.0]))"
+    );
+    let expired = s.send(
+        "variables",
+        json!({ "variablesReference": entry_outputs_ref }),
+    );
+    assert_eq!(
+        find_response(&expired, s.last_seq()).unwrap()["success"],
+        false
+    );
+
+    let cont = s.send("continue", json!({ "threadId": 1 }));
+    assert_eq!(event_body(&cont, "terminated"), &json!({}));
+    assert!(cont.iter().all(|message| message["event"] != "stopped"));
+    let expired = s.send("variables", json!({ "variablesReference": outputs_ref }));
+    assert_eq!(
+        find_response(&expired, s.last_seq()).unwrap()["success"],
+        false
+    );
+    let expired = s.send("scopes", json!({ "frameId": completed_frame_id }));
+    assert_eq!(
+        find_response(&expired, s.last_seq()).unwrap()["success"],
+        false
+    );
+}
+
+#[test]
+fn vertex_outputs_pause_after_continue_and_after_relaunch() {
+    for stop_on_entry in [false, true] {
+        let mut s = Session::new();
+        s.send("initialize", json!({}));
+        for run in 0..2 {
+            let launch = s.send(
+                "launch",
+                json!({
+                    "program": shader_path("test_vertex_triangle.wgsl"),
+                    "stopOnEntry": stop_on_entry,
+                }),
+            );
+            let initial = if run == 0 {
+                s.send("configurationDone", json!({}))
+            } else {
+                launch
+            };
+            let completed = if stop_on_entry {
+                assert_eq!(event_body(&initial, "stopped")["reason"], "entry");
+                assert_eq!(
+                    shader_outputs_for_thread(&mut s, 1).1["@builtin(position)"],
+                    "not produced yet"
+                );
+                s.send("continue", json!({ "threadId": 1 }))
+            } else {
+                initial
+            };
+            assert_eq!(event_body(&completed, "stopped")["reason"], "pause");
+            assert!(
+                completed
+                    .iter()
+                    .all(|message| message["event"] != "terminated")
+            );
+            assert_eq!(
+                shader_outputs_for_thread(&mut s, 1).1["@builtin(position)"],
+                "Primitive(F32x4([0.0, 0.5, 0.0, 1.0]))"
+            );
+            let finished = s.send("continue", json!({ "threadId": 1 }));
+            assert_eq!(event_body(&finished, "terminated"), &json!({}));
+        }
+    }
+}
+
+#[test]
+fn shader_outputs_are_inspected_for_the_requested_thread() {
+    let mut s = Session::new();
+    s.send("initialize", json!({}));
+    s.send(
+        "launch",
+        json!({
+            "program": shader_path("test_vertex_triangle.wgsl"),
+            "stopOnEntry": true,
+            "singleThreadExecution": true,
+            "workgroupConfig": { "workgroupSize": [2, 1, 1] },
+        }),
+    );
+    s.send("configurationDone", json!({}));
+    let completed = s.send("continue", json!({ "threadId": 1 }));
+    assert_eq!(event_body(&completed, "stopped")["reason"], "pause");
+    assert_eq!(
+        shader_outputs_for_thread(&mut s, 1).1["@builtin(position)"],
+        "Primitive(F32x4([0.0, 0.5, 0.0, 1.0]))"
+    );
+    assert_eq!(
+        shader_outputs_for_thread(&mut s, 2).1["@builtin(position)"],
+        "not produced yet"
+    );
+    assert_eq!(s.adapter.debugger().unwrap().focused_thread_id(), 1);
+    let completed = s.send("continue", json!({ "threadId": 2 }));
+    assert_eq!(event_body(&completed, "stopped")["reason"], "pause");
+    assert_eq!(
+        shader_outputs_for_thread(&mut s, 2).1["@builtin(position)"],
+        "Primitive(F32x4([0.0, 0.5, 0.0, 1.0]))"
+    );
+    let finished = s.send("continue", json!({ "threadId": 2 }));
+    assert_eq!(event_body(&finished, "terminated"), &json!({}));
 }
 
 #[test]

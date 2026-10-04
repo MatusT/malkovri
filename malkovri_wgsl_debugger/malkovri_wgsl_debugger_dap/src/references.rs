@@ -7,7 +7,7 @@ use crate::{error::DebugAdapterError, protocol::StackFrameId};
 #[derive(Clone, Copy)]
 pub(crate) struct FrameReference {
     thread_id: DebugThreadId,
-    frame_id: DebugFrameId,
+    frame_id: Option<DebugFrameId>,
 }
 
 #[derive(Clone, Copy)]
@@ -15,6 +15,7 @@ pub(crate) enum ScopeKind {
     Locals,
     Arguments,
     Globals,
+    ShaderOutputs,
 }
 
 /// DAP references belong to one suspension. IDs are never reused when resumed.
@@ -65,13 +66,26 @@ impl FrameReference {
     pub fn new(thread_id: DebugThreadId, frame_id: DebugFrameId) -> Self {
         Self {
             thread_id,
-            frame_id,
+            frame_id: Some(frame_id),
         }
+    }
+    pub fn shader_outputs(thread_id: DebugThreadId) -> Self {
+        Self {
+            thread_id,
+            frame_id: None,
+        }
+    }
+    pub fn is_shader_outputs(self) -> bool {
+        self.frame_id.is_none()
     }
     pub fn thread_id(self) -> DebugThreadId {
         self.thread_id
     }
-    pub fn frame_id(self) -> DebugFrameId {
-        self.frame_id
+    pub fn frame_id(self) -> Result<DebugFrameId, DebugAdapterError> {
+        self.frame_id.ok_or_else(|| {
+            DebugAdapterError::InvalidProgram(
+                "shader output frame has no live function frame".into(),
+            )
+        })
     }
 }

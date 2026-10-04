@@ -129,6 +129,16 @@ fn vertex_triangle_returns_the_first_position_with_default_inputs() {
         )
         .unwrap();
     assert_eq!(debugger.entry_point_output(), None);
+    let outputs = debugger.thread_shader_outputs(1).unwrap();
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].name, "@builtin(position)");
+    assert_eq!(outputs[0].value, None);
+    assert!(
+        debugger
+            .thread_entry_point_return_location(1)
+            .unwrap()
+            .is_none()
+    );
 
     for _ in 0..1_000 {
         if debugger.step_all().unwrap() == StepResult::Finished {
@@ -136,10 +146,79 @@ fn vertex_triangle_returns_the_first_position_with_default_inputs() {
                 debugger.entry_point_output(),
                 Some(Primitive::F32x4([0.0, 0.5, 0.0, 1.0]).into())
             );
+            assert_eq!(
+                debugger.thread_shader_outputs(1).unwrap()[0].value,
+                debugger.entry_point_output()
+            );
+            let location = debugger
+                .thread_entry_point_return_location(1)
+                .unwrap()
+                .unwrap();
+            assert_eq!(location.function_name.as_deref(), Some("vs_main"));
+            assert!(
+                debugger
+                    .source()
+                    .lines()
+                    .nth(location.line as usize - 1)
+                    .unwrap()
+                    .contains("return vec4f")
+            );
+            assert!(debugger.call_stack().is_empty());
             return;
         }
     }
     panic!("vertex shader did not finish within 1,000 steps");
+}
+
+#[test]
+fn shader_outputs_map_struct_members_and_retain_the_executed_entry_return() {
+    let source = r#"
+struct Output {
+    @location(0) color: vec3f,
+    @builtin(position) position: vec4f,
+}
+fn helper() -> Output {
+    return Output(vec3f(1.0, 0.0, 0.5), vec4f(0.0, 0.5, 0.0, 1.0));
+}
+@vertex fn main(@builtin(vertex_index) index: u32) -> Output {
+    if index == 0u {
+        return helper();
+    }
+    return Output(vec3f(0.0), vec4f(0.0));
+}
+"#;
+    let mut debugger = debugger(source, 0);
+    let outputs = debugger.thread_shader_outputs(1).unwrap();
+    assert_eq!(outputs.len(), 2);
+    assert!(outputs.iter().all(|output| output.value.is_none()));
+    assert_eq!(
+        debugger.run_to_breakpoint(1, false, &[], None).unwrap(),
+        malkovri_wgsl_debugger::RunResult::Finished
+    );
+    let outputs = debugger.thread_shader_outputs(1).unwrap();
+    assert_eq!(outputs[0].name, "@location(0)");
+    assert_eq!(
+        outputs[0].value,
+        Some(Primitive::F32x3([1.0, 0.0, 0.5]).into())
+    );
+    assert_eq!(outputs[1].name, "@builtin(position)");
+    assert_eq!(
+        outputs[1].value,
+        Some(Primitive::F32x4([0.0, 0.5, 0.0, 1.0]).into())
+    );
+    let location = debugger
+        .thread_entry_point_return_location(1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        source
+            .lines()
+            .nth(location.line as usize - 1)
+            .unwrap()
+            .trim(),
+        "return helper();"
+    );
+    assert!(debugger.thread_shader_outputs(99).is_err());
 }
 
 #[test]

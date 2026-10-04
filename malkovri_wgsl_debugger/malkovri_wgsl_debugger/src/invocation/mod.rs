@@ -16,7 +16,7 @@ use crate::{
     error::EvaluatorError,
     invocation::frame::{FrameContext, FunctionFrame, StackFrame},
     invocation::inputs::{GlobalConstants, InvocationInputs},
-    program::{FunctionId, ShaderProgram},
+    program::{FunctionId, ShaderProgram, StatementId},
     value::Value,
 };
 
@@ -31,6 +31,7 @@ pub(crate) struct InvocationState {
     global_constants: GlobalConstants,
     global_values: HashMap<naga::Handle<GlobalVariable>, GlobalValue>,
     entry_point_output: Option<Value>,
+    entry_point_return: Option<StatementId>,
     stack: Vec<StackFrame>,
     inputs: InvocationInputs,
 }
@@ -83,6 +84,7 @@ impl InvocationState {
             program,
             global_constants,
             entry_point_output: None,
+            entry_point_return: None,
             stack: vec![StackFrame::Function(Box::new(FunctionFrame::new(
                 FunctionId::EntryPoint(entry_point_index),
                 block,
@@ -97,6 +99,10 @@ impl InvocationState {
 
     pub(crate) fn entry_point_output(&self) -> Option<&Value> {
         self.entry_point_output.as_ref()
+    }
+
+    pub(crate) fn entry_point_return(&self) -> Option<StatementId> {
+        self.entry_point_return
     }
 
     pub(crate) fn stack(&self) -> &[StackFrame] {

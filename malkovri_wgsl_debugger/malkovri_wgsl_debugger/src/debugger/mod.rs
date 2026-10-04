@@ -1,6 +1,7 @@
 mod collectives;
 mod group;
 mod inspect;
+mod outputs;
 
 mod run_control;
 mod scheduler;
@@ -9,6 +10,7 @@ mod sync;
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 
 use group::{ExecutionGroup, Invocation, InvocationId};
+pub use outputs::ShaderOutput;
 pub use run_control::RunResult;
 
 use naga::{
@@ -247,6 +249,7 @@ pub struct Debugger {
     group: ExecutionGroup,
     focused_thread: InvocationId,
     program: Arc<ShaderProgram>,
+    entry_point_index: usize,
 }
 
 impl Debugger {
@@ -333,6 +336,7 @@ impl Debugger {
             group,
             focused_thread,
             program,
+            entry_point_index,
         })
     }
 

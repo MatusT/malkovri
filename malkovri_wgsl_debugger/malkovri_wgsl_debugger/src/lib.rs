@@ -6,8 +6,8 @@ mod program;
 mod value;
 
 pub use debugger::{
-    DebugFrameId, DebugThread, DebugThreadId, Debugger, DebuggerError, RunResult, SourceLocation,
-    StackFrameInfo, StepResult, ThreadState, Variable, WorkgroupConfig,
+    DebugFrameId, DebugThread, DebugThreadId, Debugger, DebuggerError, RunResult, ShaderOutput,
+    SourceLocation, StackFrameInfo, StepResult, ThreadState, Variable, WorkgroupConfig,
 };
 pub use error::EvaluatorError;
 pub use invocation::inputs::GlobalConstants;

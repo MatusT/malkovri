@@ -25,6 +25,7 @@ pub struct DebugAdapter {
     stop_on_entry: bool,
     single_thread_execution: bool,
     trace_enabled: bool,
+    outputs_presented: bool,
 }
 
 impl Default for DebugAdapter {
@@ -47,6 +48,7 @@ impl DebugAdapter {
             stop_on_entry: false,
             single_thread_execution: false,
             trace_enabled: false,
+            outputs_presented: false,
         }
     }
 
@@ -207,6 +209,7 @@ impl DebugAdapter {
         self.stop_on_entry = stop_on_entry;
         self.single_thread_execution = single_thread_execution;
         self.trace_enabled = trace_enabled;
+        self.outputs_presented = false;
         self.references.clear();
 
         let mut messages = Vec::new();
@@ -227,7 +230,29 @@ impl DebugAdapter {
         let arguments =
             serde_json::from_value::<dapts::StackTraceArguments>(req.arguments.clone())?;
         let thread_id: DebugThreadId = arguments.thread_id;
-        let frames = self.debugger()?.thread_call_stack(thread_id)?;
+        let debugger = self.debugger()?;
+        let mut frames = debugger
+            .thread_call_stack(thread_id)?
+            .into_iter()
+            .map(|frame| {
+                (
+                    FrameReference::new(thread_id, frame.id),
+                    frame.name,
+                    frame.location,
+                )
+            })
+            .collect::<Vec<_>>();
+        // A completed shader has no live call frame. Keep its return site selectable
+        // so the client can request output scopes while stopped after execution.
+        if frames.is_empty()
+            && let Some(location) = debugger.thread_entry_point_return_location(thread_id)?
+        {
+            frames.push((
+                FrameReference::shader_outputs(thread_id),
+                location.function_name.clone(),
+                Some(location),
+            ));
+        }
         let path = self
             .program_path
             .as_ref()
@@ -236,16 +261,14 @@ impl DebugAdapter {
             .to_string();
 
         let mut stack_frames = Vec::new();
-        for frame in &frames {
-            let frame_id = self
-                .references
-                .insert_frame(FrameReference::new(thread_id, frame.id));
-            let location = frame.location.as_ref();
+        for (reference, name, location) in &frames {
+            let frame_id = self.references.insert_frame(*reference);
+            let location = location.as_ref();
             let line = location.map(|loc| loc.line).unwrap_or(1);
             let column = location.map(|loc| loc.column).unwrap_or(0);
             stack_frames.push(dapts::StackFrame {
                 id: frame_id,
-                name: frame.name.as_deref().unwrap_or("main").to_string(),
+                name: name.as_deref().unwrap_or("main").to_string(),
                 source: Some(dapts::Source {
                     name: self.program_name.clone(),
                     path: Some(path.clone()),
@@ -286,29 +309,38 @@ impl DebugAdapter {
         let frame_reference = self.references.frame(frame_id)?;
         let thread_id = frame_reference.thread_id();
         let debugger = self.debugger()?;
-        let local_count = debugger
-            .frame_local_variables(thread_id, frame_reference.frame_id())?
-            .len();
-        let argument_count = debugger
-            .frame_argument_variables(thread_id, frame_reference.frame_id())?
-            .len();
+        let (local_count, argument_count) = if frame_reference.is_shader_outputs() {
+            (0, 0)
+        } else {
+            let frame_id = frame_reference.frame_id()?;
+            (
+                debugger.frame_local_variables(thread_id, frame_id)?.len(),
+                debugger
+                    .frame_argument_variables(thread_id, frame_id)?
+                    .len(),
+            )
+        };
         let globals = debugger.thread_global_variables(thread_id)?;
+        let output_count = debugger.thread_shader_outputs(thread_id)?.len();
 
-        let mut scopes = vec![dapts::Scope {
-            name: "Locals".to_string(),
-            variables_reference: self
-                .references
-                .insert_scope(frame_reference, ScopeKind::Locals),
-            named_variables: Some(local_count as u32),
-            indexed_variables: None,
-            expensive: false,
-            source: None,
-            line: None,
-            end_line: None,
-            column: None,
-            end_column: None,
-            presentation_hint: Some(dapts::ScopePresentationHint::Locals),
-        }];
+        let mut scopes = Vec::new();
+        if !frame_reference.is_shader_outputs() {
+            scopes.push(dapts::Scope {
+                name: "Locals".to_string(),
+                variables_reference: self
+                    .references
+                    .insert_scope(frame_reference, ScopeKind::Locals),
+                named_variables: Some(local_count as u32),
+                indexed_variables: None,
+                expensive: false,
+                source: None,
+                line: None,
+                end_line: None,
+                column: None,
+                end_column: None,
+                presentation_hint: Some(dapts::ScopePresentationHint::Locals),
+            });
+        }
 
         if argument_count > 0 {
             scopes.push(dapts::Scope {
@@ -335,6 +367,24 @@ impl DebugAdapter {
                     .references
                     .insert_scope(frame_reference, ScopeKind::Globals),
                 named_variables: Some(globals.len() as u32),
+                indexed_variables: None,
+                expensive: false,
+                source: None,
+                line: None,
+                end_line: None,
+                column: None,
+                end_column: None,
+                presentation_hint: None,
+            });
+        }
+
+        if output_count > 0 {
+            scopes.push(dapts::Scope {
+                name: "Shader Outputs".to_string(),
+                variables_reference: self
+                    .references
+                    .insert_scope(frame_reference, ScopeKind::ShaderOutputs),
+                named_variables: Some(output_count as u32),
                 indexed_variables: None,
                 expensive: false,
                 source: None,
@@ -542,6 +592,7 @@ impl DebugAdapter {
 
     fn handle_disconnect(&mut self, seq: i64) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         self.debugger = None;
+        self.outputs_presented = false;
         self.references.clear();
         Ok(vec![self.make_response(
             seq,
@@ -552,6 +603,7 @@ impl DebugAdapter {
 
     fn handle_terminate(&mut self, seq: i64) -> Result<Vec<OutgoingMessage>, DebugAdapterError> {
         self.debugger = None;
+        self.outputs_presented = false;
         self.references.clear();
         Ok(vec![
             self.make_response(seq, "terminate", &serde_json::json!({}))?,
@@ -566,18 +618,37 @@ impl DebugAdapter {
         let argument = serde_json::from_value::<dapts::VariablesArguments>(req.arguments.clone())?;
         let (frame, kind) = self.references.scope(argument.variables_reference)?;
         let debugger = self.debugger()?;
+        let make_variables = |variables: Vec<malkovri_wgsl_debugger::Variable>| {
+            variables
+                .into_iter()
+                .map(|variable| make_variable(variable.name, &format!("{:?}", variable.value)))
+                .collect::<Vec<_>>()
+        };
         let variables = match kind {
-            ScopeKind::Locals => {
-                debugger.frame_local_variables(frame.thread_id(), frame.frame_id())?
+            ScopeKind::Locals => make_variables(
+                debugger.frame_local_variables(frame.thread_id(), frame.frame_id()?)?,
+            ),
+            ScopeKind::Arguments => make_variables(
+                debugger.frame_argument_variables(frame.thread_id(), frame.frame_id()?)?,
+            ),
+            ScopeKind::Globals => {
+                make_variables(debugger.thread_global_variables(frame.thread_id())?)
             }
-            ScopeKind::Arguments => {
-                debugger.frame_argument_variables(frame.thread_id(), frame.frame_id())?
-            }
-            ScopeKind::Globals => debugger.thread_global_variables(frame.thread_id())?,
-        }
-        .into_iter()
-        .map(|variable| make_variable(variable.name, &format!("{:?}", variable.value)))
-        .collect();
+            ScopeKind::ShaderOutputs => debugger
+                .thread_shader_outputs(frame.thread_id())?
+                .into_iter()
+                .map(|output| {
+                    let value = output.value.map_or_else(
+                        || "not produced yet".to_string(),
+                        |value| format!("{value:?}"),
+                    );
+                    let mut variable = make_variable(Some(output.name), &value);
+                    // Interface annotations are labels, not evaluatable expressions.
+                    variable.evaluate_name = None;
+                    variable
+                })
+                .collect(),
+        };
 
         Ok(vec![self.make_response(
             req.seq,
@@ -614,7 +685,24 @@ impl DebugAdapter {
     fn make_run_event(&mut self, result: RunResult) -> Result<OutgoingMessage, DebugAdapterError> {
         use dapts::StoppedEventReason as Reason;
         let (reason, description) = match result {
-            RunResult::Finished => return self.make_event("terminated", &serde_json::json!({})),
+            RunResult::Finished => {
+                let debugger = self.debugger()?;
+                let has_outputs = debugger.threads().into_iter().any(|thread| {
+                    debugger
+                        .thread_shader_outputs(thread.id)
+                        .is_ok_and(|outputs| outputs.iter().any(|output| output.value.is_some()))
+                });
+                if self.outputs_presented || !has_outputs {
+                    return self.make_event("terminated", &serde_json::json!({}));
+                }
+                self.outputs_presented = true;
+                (
+                    Reason::Pause,
+                    Some(
+                        "Shader outputs are available for inspection. Continue to finish the session.",
+                    ),
+                )
+            }
             RunResult::Step => (Reason::Step, None),
             RunResult::Breakpoint => (Reason::Breakpoint, None),
             RunResult::InvocationFinished => (

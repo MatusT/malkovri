@@ -87,6 +87,16 @@ impl InvocationState {
         let program = self.program.clone();
         self.handle_instruction(id, program.instruction(id))?;
 
+        if matches!(
+            program.instruction(id).leaf(),
+            Some(naga::Statement::Return { value: Some(_) })
+        ) && matches!(
+            self.current_function_frame()?.function_id(),
+            FunctionId::EntryPoint(_)
+        ) {
+            self.entry_point_return = Some(id);
+        }
+
         self.stack[caller_frame_index].increment_statement_index();
 
         // Resolve any signals/exhaustion produced by the statement we just ran,
