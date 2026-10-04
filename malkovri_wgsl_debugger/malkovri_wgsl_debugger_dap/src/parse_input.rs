@@ -5,9 +5,71 @@ use std::{fs, path::Path};
 
 use crate::error::DebugAdapterError;
 use malkovri_wgsl_debugger::{
-    DrawConfig, ExecutionConfig, GlobalConstants, Primitive, ResourceBinding, ShaderStage, Value,
-    WorkgroupConfig,
+    DrawConfig, EntryPointInfo, ExecutionConfig, GlobalConstants, Primitive, ResourceBinding,
+    ShaderProgram, ShaderStage, Value, WorkgroupConfig,
 };
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum EntryType {
+    Compute,
+    Vertex,
+    Fragment,
+}
+
+pub fn select_entry_point<'a>(
+    arguments: &serde_json::Map<String, serde_json::Value>,
+    program: &'a ShaderProgram,
+) -> Result<EntryPointInfo<'a>, DebugAdapterError> {
+    let stage = arguments
+        .get("entryType")
+        .map(|value| serde_json::from_value::<EntryType>(value.clone()))
+        .transpose()
+        .map_err(|error| DebugAdapterError::Parse(format!("invalid entryType: {error}")))?
+        .map(|entry_type| match entry_type {
+            EntryType::Compute => ShaderStage::Compute,
+            EntryType::Vertex => ShaderStage::Vertex,
+            EntryType::Fragment => ShaderStage::Fragment,
+        });
+    let name = arguments
+        .get("entryPoint")
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|name| !name.trim().is_empty())
+                .ok_or_else(|| {
+                    DebugAdapterError::Parse("entryPoint must be a non-empty string".into())
+                })
+        })
+        .transpose()?;
+    let mut matches = program.entry_points().filter(|entry| {
+        stage.is_none_or(|stage| entry.stage == stage) && name.is_none_or(|name| entry.name == name)
+    });
+    let first = matches.next();
+    if let Some(entry) = first
+        && matches.next().is_none()
+    {
+        return Ok(entry);
+    }
+    let available = program
+        .entry_points()
+        .map(|entry| format!("{} ({:?})", entry.name, entry.stage))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if available.is_empty() {
+        return Err(DebugAdapterError::Parse(
+            "shader has no entry points".into(),
+        ));
+    }
+    let reason = if first.is_none() {
+        "no entry point matches entryType and entryPoint"
+    } else {
+        "multiple entry points match; specify entryType and entryPoint"
+    };
+    Err(DebugAdapterError::Parse(format!(
+        "{reason}. Available: {available}"
+    )))
+}
 
 pub fn parse_execution_config(
     arguments: &serde_json::Map<String, serde_json::Value>,

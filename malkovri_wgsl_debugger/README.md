@@ -60,6 +60,8 @@ deno task build
   "request": "launch",
   "name": "Debug shader",
   "program": "${workspaceFolder}/shader.wgsl",
+  "entryType": "compute",
+  "entryPoint": "main",
   "singleThreadExecution": false,
   "workgroupConfig": {
     "workgroupSize": [64, 1, 1],
@@ -166,6 +168,12 @@ whole number of four-byte elements.
 
 ## Launch config options
 
+Select the shader stage with `entryType` (`compute`, `vertex`, or `fragment`)
+and the WGSL function with `entryPoint`. Either can be omitted if the remaining
+selection identifies exactly one entry point. With neither field, the shader must
+have exactly one entry point. Ambiguous selections, unknown names, and stage/name
+mismatches fail with a list of available entry points.
+
 Compute shaders use `workgroupConfig`. Vertex shaders use `drawConfig`, which
 emulates a non-indexed WebGPU `draw(vertexCount, instanceCount, firstVertex,
 firstInstance)` call. The debugger creates `vertexCount * instanceCount` threads,
@@ -175,6 +183,8 @@ three vertices in each of two instances (six threads):
 
 ```json
 {
+  "entryType": "vertex",
+  "entryPoint": "vs_main",
   "drawConfig": {
     "vertexCount": 3,
     "instanceCount": 2,
@@ -194,6 +204,8 @@ fragment with default inputs to `ShaderProgram::create_debugger`.
 | Field                  | Type                           | Default       | Description                                                                        |
 |------------------------|--------------------------------|---------------|------------------------------------------------------------------------------------|
 | `program`              | string                         | —             | Absolute path to the WGSL shader file.                                             |
+| `entryType` | `"compute"` \| `"vertex"` \| `"fragment"` | inferred | Shader stage to debug. |
+| `entryPoint` | string | inferred | WGSL entry point function name; selection must be unambiguous. |
 | `stopOnEntry`          | boolean                        | `false`       | Stop at the entry point before running to breakpoints.                             |
 | `singleThreadExecution` | boolean                       | `false`       | Step Over and Continue advance only the selected VS Code thread instead of all shader invocations. |
 | `workgroupConfig.workgroupSize` | `[u32, u32, u32]`     | `[1, 1, 1]`   | Number of threads along each dimension of the workgroup being debugged.            |

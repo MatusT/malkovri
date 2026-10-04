@@ -33,6 +33,16 @@
                 "type": "string",
                 "description": "Absolute path to the WGSL shader file to debug."
               },
+              "entryType": {
+                "type": "string",
+                "enum": ["compute", "vertex", "fragment"],
+                "description": "Shader stage to debug. May be omitted when the entry point selection is unambiguous."
+              },
+              "entryPoint": {
+                "type": "string",
+                "minLength": 1,
+                "description": "WGSL entry point function name. May be omitted when exactly one entry point matches entryType."
+              },
               "stopOnEntry": {
                 "type": "boolean",
                 "default": false,
@@ -181,7 +191,9 @@
             "type": "wgsl",
             "request": "launch",
             "name": "Launch Program",
-            "program": "${workspaceFolder}/shader.wgsl"
+            "program": "${workspaceFolder}/shader.wgsl",
+            "entryType": "compute",
+            "entryPoint": "main"
           }
         ]
       }

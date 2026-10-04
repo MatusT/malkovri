@@ -1275,3 +1275,153 @@ fn launch_rejects_stage_mismatches_and_invalid_draw_commands() {
         assert!(s.adapter.debugger().is_err());
     }
 }
+
+const MULTI_ENTRY_SHADER: &str = r#"
+@compute @workgroup_size(1) fn cs_first() {}
+@vertex fn vs_main(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4f {
+    return vec4f(f32(vertex), 0.0, 0.0, 1.0);
+}
+@compute @workgroup_size(1) fn cs_second() {}
+@fragment fn fs_main() -> @location(0) vec4f {
+    return vec4f(0.25, 0.5, 0.75, 1.0);
+}
+"#;
+
+#[test]
+fn launch_selects_entry_point_by_name_and_stage_before_configuring_invocations() {
+    for (selection, expected_name, expected_threads) in [
+        (
+            json!({"entryType": "vertex", "entryPoint": "vs_main", "drawConfig": {"vertexCount": 3}}),
+            "vs_main",
+            3,
+        ),
+        (json!({"entryPoint": "vs_main"}), "vs_main", 1),
+        (json!({"entryType": "vertex"}), "vs_main", 1),
+        (
+            json!({"entryPoint": "cs_second", "workgroupConfig": {"workgroupSize": [2, 1, 1]}}),
+            "cs_second",
+            2,
+        ),
+        (
+            json!({"entryType": "compute", "entryPoint": "cs_second"}),
+            "cs_second",
+            1,
+        ),
+        (
+            json!({"entryType": "fragment", "entryPoint": "fs_main"}),
+            "fs_main",
+            1,
+        ),
+        (json!({"entryType": "fragment"}), "fs_main", 1),
+    ] {
+        let mut s = Session::new();
+        s.send("initialize", json!({}));
+        let mut args =
+            json!({"program": "multi.wgsl", "source": MULTI_ENTRY_SHADER, "stopOnEntry": true});
+        args.as_object_mut()
+            .unwrap()
+            .extend(selection.as_object().unwrap().clone());
+        s.send("launch", args);
+        let cfg = s.send("configurationDone", json!({}));
+        assert_eq!(event_body(&cfg, "stopped")["reason"], "entry");
+        let threads = s.send("threads", json!({}));
+        let threads = response_body(&threads, s.last_seq())["threads"]
+            .as_array()
+            .unwrap();
+        assert_eq!(threads.len(), expected_threads);
+        for thread in threads {
+            let stack = s.send("stackTrace", json!({"threadId": thread["id"]}));
+            assert_eq!(
+                response_body(&stack, s.last_seq())["stackFrames"][0]["name"],
+                expected_name
+            );
+        }
+        let completed = s.send("continue", json!({"threadId": 1}));
+        match expected_name {
+            "vs_main" => {
+                assert_eq!(event_body(&completed, "stopped")["reason"], "pause");
+                for index in 0..expected_threads {
+                    assert_eq!(
+                        shader_outputs_for_thread(&mut s, (index + 1) as u64).1["@builtin(position)"],
+                        format!("Primitive(F32x4([{index}.0, 0.0, 0.0, 1.0]))")
+                    );
+                }
+            }
+            "fs_main" => {
+                assert_eq!(event_body(&completed, "stopped")["reason"], "pause");
+                assert_eq!(
+                    shader_outputs_for_thread(&mut s, 1).1["@location(0)"],
+                    "Primitive(F32x4([0.25, 0.5, 0.75, 1.0]))"
+                );
+            }
+            _ => assert_eq!(event_body(&completed, "terminated"), &json!({})),
+        }
+    }
+}
+
+#[test]
+fn invalid_or_ambiguous_entry_selection_preserves_the_previous_session() {
+    let mut s = Session::new();
+    s.send("initialize", json!({}));
+    s.send("launch", json!({"program": "multi.wgsl", "source": MULTI_ENTRY_SHADER, "entryPoint": "fs_main", "stopOnEntry": true}));
+    s.send("configurationDone", json!({}));
+    for (selection, expected) in [
+        (json!({}), "multiple entry points match"),
+        (
+            json!({"entryType": "compute"}),
+            "multiple entry points match",
+        ),
+        (json!({"entryPoint": "missing"}), "no entry point matches"),
+        (
+            json!({"entryType": "compute", "entryPoint": "vs_main"}),
+            "no entry point matches",
+        ),
+        (json!({"entryType": "geometry"}), "invalid entryType"),
+        (json!({"entryType": 1}), "invalid entryType"),
+        (json!({"entryType": null}), "invalid entryType"),
+        (
+            json!({"entryPoint": ""}),
+            "entryPoint must be a non-empty string",
+        ),
+        (
+            json!({"entryPoint": "  "}),
+            "entryPoint must be a non-empty string",
+        ),
+        (
+            json!({"entryPoint": 1}),
+            "entryPoint must be a non-empty string",
+        ),
+        (
+            json!({"entryPoint": null}),
+            "entryPoint must be a non-empty string",
+        ),
+        (
+            json!({"entryPoint": "vs_main", "workgroupConfig": {}}),
+            "workgroupConfig is only supported for compute",
+        ),
+        (
+            json!({"entryPoint": "fs_main", "drawConfig": {}}),
+            "drawConfig is only supported for vertex",
+        ),
+    ] {
+        let mut args = json!({"program": "multi.wgsl", "source": MULTI_ENTRY_SHADER});
+        args.as_object_mut()
+            .unwrap()
+            .extend(selection.as_object().unwrap().clone());
+        let messages = s.send("launch", args);
+        let response = find_response(&messages, s.last_seq()).unwrap();
+        assert_eq!(response["success"], false, "{response}");
+        let message = response["message"].as_str().unwrap();
+        assert!(message.contains(expected), "{response}");
+        if expected.contains("matches") || expected.contains("match") {
+            assert!(message.contains("vs_main (Vertex)"), "{response}");
+            assert!(message.contains("cs_second (Compute)"), "{response}");
+            assert!(message.contains("fs_main (Fragment)"), "{response}");
+        }
+        let stack = s.send("stackTrace", json!({"threadId": 1}));
+        assert_eq!(
+            response_body(&stack, s.last_seq())["stackFrames"][0]["name"],
+            "fs_main"
+        );
+    }
+}
