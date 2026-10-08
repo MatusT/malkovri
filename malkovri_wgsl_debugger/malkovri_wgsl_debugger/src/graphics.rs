@@ -1,6 +1,8 @@
 //! CPU triangle interpolation shared by supplied and shader-generated vertex outputs.
 use glam::{DVec2, DVec3};
 use std::collections::BTreeMap;
+mod session;
+pub use session::{GraphicsSession, GraphicsSource};
 
 use crate::{LocationInput, Primitive, ShaderProgram, Value};
 use naga::{Interpolation, Sampling, ScalarKind};

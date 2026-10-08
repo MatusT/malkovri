@@ -50,30 +50,41 @@ impl Invocation {
 /// One active stage's invocations, in deterministic scheduler order.
 pub(super) struct ExecutionGroup {
     invocations: Vec<Invocation>,
+    thread_offset: usize,
 }
 
 impl ExecutionGroup {
     pub fn new(invocations: Vec<Invocation>) -> Self {
-        Self { invocations }
+        Self {
+            invocations,
+            thread_offset: 0,
+        }
+    }
+
+    pub(super) fn next_thread_offset(&self) -> usize {
+        self.thread_offset + self.invocations.len()
+    }
+    pub(super) fn set_thread_offset(&mut self, offset: usize) {
+        self.thread_offset = offset;
     }
 
     pub fn ids(&self) -> impl Iterator<Item = InvocationId> + '_ {
-        (0..self.invocations.len()).map(InvocationId)
+        (self.thread_offset..self.next_thread_offset()).map(InvocationId)
     }
 
     pub fn resolve(&self, thread_id: DebugThreadId) -> Result<InvocationId, EvaluatorError> {
         thread_id
             .checked_sub(1)
             .and_then(|index| usize::try_from(index).ok())
-            .filter(|&index| index < self.invocations.len())
+            .filter(|&index| index >= self.thread_offset && index < self.next_thread_offset())
             .map(InvocationId)
             .ok_or_else(|| EvaluatorError::InternalError(format!("unknown thread id {thread_id}")))
     }
 
     pub fn get(&self, id: InvocationId) -> &Invocation {
-        &self.invocations[id.0]
+        &self.invocations[id.0 - self.thread_offset]
     }
     pub fn get_mut(&mut self, id: InvocationId) -> &mut Invocation {
-        &mut self.invocations[id.0]
+        &mut self.invocations[id.0 - self.thread_offset]
     }
 }

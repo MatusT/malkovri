@@ -256,6 +256,8 @@ pub struct Debugger {
     focused_thread: InvocationId,
     program: Arc<ShaderProgram>,
     entry_point_index: usize,
+    bindings: HashMap<ResourceBinding, Rc<RefCell<Value>>>,
+    constants: GlobalConstants,
 }
 
 impl Debugger {
@@ -264,8 +266,27 @@ impl Debugger {
         program: Arc<ShaderProgram>,
         entry_point_index: usize,
         config: ExecutionConfig,
-        mut global_constants: GlobalConstants,
+        global_constants: GlobalConstants,
         bindings: HashMap<ResourceBinding, Value>,
+    ) -> Result<Self, DebuggerError> {
+        Self::new_shared(
+            program,
+            entry_point_index,
+            config,
+            global_constants,
+            bindings
+                .into_iter()
+                .map(|(key, value)| (key, Rc::new(RefCell::new(value))))
+                .collect(),
+        )
+    }
+
+    fn new_shared(
+        program: Arc<ShaderProgram>,
+        entry_point_index: usize,
+        config: ExecutionConfig,
+        mut global_constants: GlobalConstants,
+        naga_bindings: HashMap<ResourceBinding, Rc<RefCell<Value>>>,
     ) -> Result<Self, DebuggerError> {
         let module = program.module();
         if module.entry_points.get(entry_point_index).is_none() {
@@ -274,11 +295,6 @@ impl Debugger {
                 module.entry_points.len()
             )));
         }
-        let naga_bindings: HashMap<naga::ResourceBinding, Rc<RefCell<Value>>> = bindings
-            .into_iter()
-            .map(|(binding, value)| (binding, Rc::new(RefCell::new(value))))
-            .collect();
-
         let shared_workgroup_globals: HashMap<_, _> = module
             .global_variables
             .iter()
@@ -416,7 +432,31 @@ impl Debugger {
             focused_thread,
             program,
             entry_point_index,
+            bindings: naga_bindings,
+            constants: global_constants,
         })
+    }
+
+    pub(crate) fn create_next_stage(
+        &self,
+        entry: usize,
+        config: ExecutionConfig,
+    ) -> Result<Self, DebuggerError> {
+        let mut next = Self::new_shared(
+            self.program.clone(),
+            entry,
+            config,
+            self.constants,
+            self.bindings.clone(),
+        )?;
+        let offset = self.group.next_thread_offset();
+        next.group.set_thread_offset(offset);
+        next.focused_thread = next
+            .group
+            .ids()
+            .next()
+            .unwrap_or(InvocationId::placeholder());
+        Ok(next)
     }
 
     /// The WGSL source code for this session.

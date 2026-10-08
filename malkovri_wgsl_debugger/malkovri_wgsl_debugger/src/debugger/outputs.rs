@@ -86,3 +86,52 @@ fn output_name(binding: &Binding) -> String {
         Binding::Location { location, .. } => format!("@location({location})"),
     }
 }
+
+impl Debugger {
+    /// Completed vertex outputs suitable for triangle interpolation.
+    pub fn vertex_outputs(&self) -> Result<Vec<crate::graphics::VertexOutput>, String> {
+        if self.program.module().entry_points[self.entry_point_index].stage
+            != naga::ShaderStage::Vertex
+        {
+            return Err("expected a vertex debugger".into());
+        }
+        self.threads()
+            .iter()
+            .map(|thread| {
+                if self.thread_state(thread.id).map_err(|e| e.to_string())?
+                    != super::ThreadState::Finished
+                {
+                    return Err(format!("vertex thread {} has not returned", thread.id));
+                }
+                let mut position = None;
+                let mut locations = std::collections::BTreeMap::new();
+                for output in self
+                    .thread_shader_outputs(thread.id)
+                    .map_err(|e| e.to_string())?
+                {
+                    let value = output.value.ok_or_else(|| {
+                        format!("vertex thread {} missing {}", thread.id, output.name)
+                    })?;
+                    match output.binding {
+                        Binding::BuiltIn(naga::BuiltIn::Position { .. }) => {
+                            let Value::Primitive(crate::Primitive::F32x4(v)) = value else {
+                                return Err("vertex position must be vec4f".into());
+                            };
+                            position = Some(v);
+                        }
+                        Binding::Location { location, .. } => {
+                            locations.insert(location, value);
+                        }
+                        _ => return Err("unsupported vertex builtin output".into()),
+                    }
+                }
+                Ok(crate::graphics::VertexOutput {
+                    position: position.ok_or("missing vertex position")?,
+                    locations,
+                    vertex_index: thread.global_invocation_id[0],
+                    instance_index: thread.global_invocation_id[1],
+                })
+            })
+            .collect()
+    }
+}

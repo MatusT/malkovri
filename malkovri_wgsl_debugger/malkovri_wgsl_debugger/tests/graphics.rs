@@ -550,3 +550,102 @@ fn selected_pixel_continue_advances_only_its_quad_and_honors_peer_breakpoints() 
         other_before
     );
 }
+
+#[test]
+fn linked_stages_retain_vertex_outputs_share_resources_and_reset_private_state() {
+    use malkovri_wgsl_debugger::{
+        ResourceBinding,
+        graphics::{GraphicsSession, GraphicsSource},
+    };
+    let program = ShaderProgram::new(
+        r#"
+@group(0) @binding(0) var<storage, read_write> buffer: array<u32>;
+var<private> marker:u32=3u;
+struct Out { @builtin(position) pos:vec4f, @location(0) uv:vec2f }
+@vertex fn vs(@builtin(vertex_index) vertex:u32) -> Out {
+    let points=array<vec2f,3>(vec2f(-1.0,1.0),vec2f(1.0,1.0),vec2f(-1.0,-1.0));
+    buffer[vertex]=vertex+5u;
+    marker=99u;
+    return Out(vec4f(points[vertex],0.5,1.0),points[vertex]);
+}
+@fragment fn fs(@location(0) uv:vec2f) -> @location(0) vec4f {
+    return vec4f(uv,f32(buffer[0]),f32(marker));
+}"#,
+    )
+    .unwrap();
+    let raster = RasterConfig {
+        viewport: Viewport {
+            width: 4,
+            height: 4,
+        },
+        pixel_range: Some(PixelRange {
+            from: [0, 0],
+            to: [1, 1],
+        }),
+    };
+    let binding = ResourceBinding {
+        group: 0,
+        binding: 0,
+    };
+    let mut session = GraphicsSession::new(
+        program.clone(),
+        1,
+        GraphicsSource::Vertex {
+            entry: 0,
+            config: VertexConfig {
+                draw: DrawConfig {
+                    vertex_count: 3,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        },
+        raster.clone(),
+        GlobalConstants::default(),
+        HashMap::from([(binding, Value::Array(vec![Primitive::U32(0).into(); 3]))]),
+    )
+    .unwrap();
+    assert!(session.advance_stage().is_err());
+    assert!(session.has_next_stage());
+    assert_eq!(
+        session
+            .debugger_mut()
+            .run_to_breakpoint(1, false, &[], None)
+            .unwrap(),
+        RunResult::Finished
+    );
+    let captured = session.debugger().vertex_outputs().unwrap();
+    session.advance_stage().unwrap();
+    assert!(!session.has_next_stage());
+    assert_eq!(session.vertex_outputs().len(), 3);
+    assert_eq!(session.debugger().threads()[0].id, 4);
+    assert!(session.debugger().thread_shader_outputs(1).is_err());
+    assert_eq!(
+        session
+            .debugger_mut()
+            .run_to_breakpoint(4, false, &[], None)
+            .unwrap(),
+        RunResult::Finished
+    );
+    let output = session.debugger().thread_shader_outputs(4).unwrap()[0]
+        .value
+        .clone();
+    assert_eq!(output, Some(Primitive::F32x4([-0.75, 0.75, 5., 3.]).into()));
+    let mut supplied = GraphicsSession::new(
+        program,
+        1,
+        GraphicsSource::Outputs(captured),
+        raster,
+        GlobalConstants::default(),
+        HashMap::from([(binding, Value::Array(vec![Primitive::U32(5).into(); 3]))]),
+    )
+    .unwrap();
+    supplied
+        .debugger_mut()
+        .run_to_breakpoint(1, false, &[], None)
+        .unwrap();
+    assert_eq!(
+        supplied.debugger().thread_shader_outputs(1).unwrap()[0].value,
+        output
+    );
+}
